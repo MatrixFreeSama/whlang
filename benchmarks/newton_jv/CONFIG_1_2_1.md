@@ -63,7 +63,9 @@ The WHEX human surface is compile-time only. The release audit separately proves
 
 ### Matched expert C
 
-The audit used a reconstructed formula-fused expert C control aligned to the mathematical workload and reduction freedom. The adjacent rematch record documents GCC 14.2 with:
+Source: `Newton_Jv_expert_C_matched.c`.
+
+The audit used a formula-fused expert C control aligned to the mathematical workload and reduction freedom. The adjacent rematch record documents GCC 14.2 with:
 
 ```text
 -O3 -march=native -mtune=native -flto -ffast-math
@@ -75,9 +77,13 @@ Audited source identity:
 a9a9d3e908d08983e2c74f99c391e57597e37a5a404bafa153c3c140a06979b2
 ```
 
+The recovered repository file matches this identity exactly.
+
 ### Explicit AVX-512 C
 
-A stronger hand-written SIMD C control was also admitted. It is intentionally a harder machine-level opponent than ordinary compiler-vectorized C.
+Source: `Newton_Jv_expert_C_explicit_AVX512.c`.
+
+This stronger hand-written SIMD C control was admitted as a harder machine-level opponent than ordinary compiler-vectorized C.
 
 Audited source identity:
 
@@ -85,7 +91,7 @@ Audited source identity:
 05e141dff01fcdf04a0821395fe675dc4876dfce1d60115613c18252388701ea
 ```
 
-The exact two external C source files were not retained in the Wheelchair 1.2.1 release tree. Their hashes are retained so a later file must not be presented as the audited control unless it matches the corresponding identity.
+The recovered repository file matches this identity exactly.
 
 ## Wheelchair 1.2.1 machine-code change
 
