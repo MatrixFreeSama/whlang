@@ -1,0 +1,58 @@
+{
+  "schema": "wheelchair.newton-jv-performance/1",
+  "release": "1.2.1",
+  "date": "2026-09-03",
+  "host": {
+    "cpu": "Intel Xeon Platinum 8370C @ 2.80 GHz",
+    "environment": "virtualized x86-64 host",
+    "visible_logical_cpus": 5,
+    "visible_cpu_ids": "0-4",
+    "sustained_cgroup_cpu_quota": 4
+  },
+  "workload": {
+    "name": "matrix-free periodic Newton Jacobian-vector product",
+    "sizes": [10000000, 100000000],
+    "floating_point": "FP64 tolerant reduction",
+    "chunk_coordinates": 65536,
+    "logical_accumulation_carriers": 4,
+    "reduction": "deterministic causal/fixed topology",
+    "checksums": {
+      "10000000": "0x40a1414a1c4e8000",
+      "100000000": "0x40d591e5093fa000"
+    }
+  },
+  "measurement": {
+    "warmups_per_point": 3,
+    "measured_runs_per_contestant": 21,
+    "order": "shuffled/interleaved",
+    "cpu_affinity": "fixed",
+    "timing_boundary": "whole-process wall time",
+    "reported_statistic": "median"
+  },
+  "results_ms": [
+    {"n": 10000000, "cores": 1, "wheelchair_1_2_0": 28.311, "wheelchair_1_2_1": 15.087, "matched_c": 20.835, "explicit_avx512_c": 21.329, "speedup_1_2_1_vs_1_2_0": 1.877},
+    {"n": 10000000, "cores": 2, "wheelchair_1_2_0": 21.630, "wheelchair_1_2_1": 14.430, "matched_c": 18.768, "explicit_avx512_c": 18.296, "speedup_1_2_1_vs_1_2_0": 1.499},
+    {"n": 10000000, "cores": 4, "wheelchair_1_2_0": 15.516, "wheelchair_1_2_1": 9.977, "matched_c": 15.346, "explicit_avx512_c": 13.118, "speedup_1_2_1_vs_1_2_0": 1.555},
+    {"n": 100000000, "cores": 1, "wheelchair_1_2_0": 217.807, "wheelchair_1_2_1": 106.144, "matched_c": 141.877, "explicit_avx512_c": 120.285, "speedup_1_2_1_vs_1_2_0": 2.052},
+    {"n": 100000000, "cores": 2, "wheelchair_1_2_0": 141.114, "wheelchair_1_2_1": 63.041, "matched_c": 88.667, "explicit_avx512_c": 76.908, "speedup_1_2_1_vs_1_2_0": 2.238},
+    {"n": 100000000, "cores": 4, "wheelchair_1_2_0": 92.793, "wheelchair_1_2_1": 48.754, "matched_c": 64.366, "explicit_avx512_c": 56.485, "speedup_1_2_1_vs_1_2_0": 1.903}
+  ],
+  "machine_code_delta_1_2_0_to_1_2_1": {
+    "VCVTTPD2QQ": {"before": 4, "after": 2},
+    "VPMULLQ": {"before": 10, "after": 6},
+    "generated_rx_bytes": {"before": 1305, "after": 1209}
+  },
+  "audited_external_control_source_sha256": {
+    "matched_expert_c": "a9a9d3e908d08983e2c74f99c391e57597e37a5a404bafa153c3c140a06979b2",
+    "explicit_avx512_c": "05e141dff01fcdf04a0821395fe675dc4876dfce1d60115613c18252388701ea"
+  },
+  "authoritative_raw_data_in_release_archive": [
+    {"path": "benchmarks/newton_jv/10M_21run.json", "sha256": "9d37bb8279449fc71420092f03544061c888a77ab1b2f607339ee0a02692905e"},
+    {"path": "benchmarks/newton_jv/100M_21run.json", "sha256": "562693eaf2fcf011801dddc3ba63fa25e6414ec9b9f49967f3e03f0160f96894"}
+  ],
+  "release_archive": {
+    "path": "dist/Wheelchair-1.2.1.zip",
+    "sha256": "8ed8f27125a47d816dbae8d56b6f71060d28e75b33ab76edb664596569884490"
+  },
+  "claim_boundary": "One matrix-free Newton/Jv workload on one virtualized host; not a universal language ranking."
+}
