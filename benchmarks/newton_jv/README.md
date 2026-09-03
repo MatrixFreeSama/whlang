@@ -14,7 +14,11 @@ jv[i] = (2 + 0.375*u[i]^2)*v[i] - v[i-1] - v[i+1]
 
 with periodic boundaries.
 
-The Wheelchair source is [`mature.whex`](mature.whex).
+Sources:
+
+- Wheelchair 1.2.1: [`mature.whex`](mature.whex)
+- matched expert C: [`Newton_Jv_expert_C_matched.c`](Newton_Jv_expert_C_matched.c)
+- explicit AVX-512 C: [`Newton_Jv_expert_C_explicit_AVX512.c`](Newton_Jv_expert_C_explicit_AVX512.c)
 
 Required checksums:
 
@@ -105,23 +109,21 @@ Therefore the Python surface is not timed runtime work and did not create a diff
 
 ## External C controls and provenance
 
-The exact two external C controls were measurement controls, not Wheelchair backend dependencies.
-
-Audited identities:
+Both original C control sources have now been recovered and published in this directory. They are not reconstructions: each file matches the source SHA-256 identity already frozen by the 1.2.1 audit.
 
 ```text
-matched expert C:
+Newton_Jv_expert_C_matched.c
 a9a9d3e908d08983e2c74f99c391e57597e37a5a404bafa153c3c140a06979b2
 
-explicit AVX-512 C:
+Newton_Jv_expert_C_explicit_AVX512.c
 05e141dff01fcdf04a0821395fe675dc4876dfce1d60115613c18252388701ea
 ```
 
-Their exact source text was not retained in the 1.2.1 release tree. This repository therefore records the hashes rather than fabricating byte-identical source after the fact. See [`CONTROL_SOURCE_IDENTITIES.md`](CONTROL_SOURCE_IDENTITIES.md).
+See [`CONTROL_SOURCE_IDENTITIES.md`](CONTROL_SOURCE_IDENTITIES.md) for the provenance contract.
 
 ## Raw 21-run data
 
-The authoritative Wheelchair 1.2.1 release archive already contains the two raw sample files:
+The authoritative Wheelchair 1.2.1 release archive contains the two raw sample files:
 
 ```text
 benchmarks/newton_jv/10M_21run.json
