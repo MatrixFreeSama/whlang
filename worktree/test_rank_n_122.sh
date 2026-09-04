@@ -13,8 +13,8 @@ echo '2e83af25b6a6188c9ce24497d636206ca5978e59a92b619e6b722909ad2d4f80  compiler
 echo 'e9116041c673aec4dca58a43379ccb78d5ae3d6aa7e7ba76656da32b24cdfeb3  runtime/tensor_runtime_template_x86_64.S' | sha256sum -c -
 echo 'WHEELCHAIR_1_2_1_NATIVE_SOURCE_PEAK_BYTES=PASS'
 
-python3 whexc.py plan tests/whex/rank2_native_122.whex > "$TMP/r2.plan.json"
-python3 whexc.py plan tests/whex/rank3_native_122.whex > "$TMP/r3.plan.json"
+python3 surface/whex_surface.py plan tests/whex/rank2_native_122.whex > "$TMP/r2.plan.json"
+python3 surface/whex_surface.py plan tests/whex/rank3_native_122.whex > "$TMP/r3.plan.json"
 python3 - "$TMP/r2.plan.json" "$TMP/r3.plan.json" <<'PY'
 import json,sys
 for expected_rank,path in ((2,sys.argv[1]),(3,sys.argv[2])):
@@ -51,7 +51,7 @@ PY
 
 # The transformed core must contain one physical product axis and no source
 # nested-axis execution object. q is a point token, not an inner-loop variable.
-python3 whexc.py compile tests/whex/rank2_native_122.whex -o "$TMP/r2.core.wh" >/dev/null
+python3 surface/whex_surface.py compile tests/whex/rank2_native_122.whex -o "$TMP/r2.core.wh" >/dev/null
 python3 - "$TMP/r2.core.wh" <<'PY'
 import json,sys
 x=json.load(open(sys.argv[1],encoding='utf-8'))
@@ -72,7 +72,7 @@ sum checksum[i in n, j in 3]: f64 = cast(f64, i + j)
 output checksum
 test (4) => { checksum = 0.0 }
 EOF
-if python3 whexc.py plan "$TMP/nonpow2.whex" >/dev/null 2>&1; then
+if python3 surface/whex_surface.py plan "$TMP/nonpow2.whex" >/dev/null 2>&1; then
   echo 'non-power-of-two Rank-N was incorrectly admitted' >&2; exit 1
 fi
 cat > "$TMP/periodic_rankn.whex" <<'EOF'
@@ -83,14 +83,14 @@ sum checksum[i in n, j in 4]: f64 = cast(f64, periodic(i + 1, n) + j)
 output checksum
 test (4) => { checksum = 0.0 }
 EOF
-if python3 whexc.py plan "$TMP/periodic_rankn.whex" >/dev/null 2>&1; then
+if python3 surface/whex_surface.py plan "$TMP/periodic_rankn.whex" >/dev/null 2>&1; then
   echo 'dynamic periodic Rank-N was incorrectly admitted' >&2; exit 1
 fi
 echo 'RANK_N_UNPROVEN_LAYOUT_EXPLICIT_REJECTION=PASS'
 
-# Native execution. The user supplies logical n=4; runtime owns 4*product points.
-python3 whexc.py native tests/whex/rank2_native_122.whex -o "$TMP/r2" --executors 1 >/dev/null
-python3 whexc.py native tests/whex/rank3_native_122.whex -o "$TMP/r3" --executors 1 >/dev/null
+# Native execution. The user supplies logical n=4; runtime owns n*product points.
+python3 surface/whex_surface.py native tests/whex/rank2_native_122.whex -o "$TMP/r2" --executors 1 >/dev/null
+python3 surface/whex_surface.py native tests/whex/rank3_native_122.whex -o "$TMP/r3" --executors 1 >/dev/null
 python3 wheelchairc.py tests/wh_equivalence/rank2_native_122.wh -o "$TMP/r2wh" --executors 1 --semantic-plan "$TMP/r2wh.plan.json" >/dev/null
 r2=$($TMP/r2 4)
 r3=$($TMP/r3 4)
