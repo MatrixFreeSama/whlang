@@ -14,6 +14,8 @@ ld -nostdlib -static -z noexecstack -T runtime/tensor_runtime.ld \
 ./tools/generate_tensor_runtime_offsets.sh "$BUILD/tensor_runtime_template" compiler/runtime_offsets.inc
 
 python3 tools/generate_rankn_backend_122.py
+python3 tools/generate_product_subtract_frontend.py
+python3 tools/generate_vector_reduction_residency.py
 as --64 "$BUILD/generated_122/tensor_rankn_runtime_template_x86_64.S" -o "$BUILD/tensor_rankn_runtime_template.o"
 ld -nostdlib -static -z noexecstack -T runtime/tensor_runtime.ld \
   "$BUILD/tensor_rankn_runtime_template.o" -o "$BUILD/tensor_rankn_runtime_template"
@@ -28,8 +30,10 @@ ld -nostdlib -static -z noexecstack -T runtime/general_runtime.ld \
 ./tools/generate_general_runtime_offsets.sh "$BUILD/general_runtime_template" compiler/general_runtime_offsets.inc
 
 # Handwritten assembly compiler: general sovereign lane + topology HPC lane.
+# The mature 1.2.3 frontend remains byte-frozen. 1.2.4 derives its accepted
+# generic native-codegen recipes from that frozen source at build time.
 as --64 compiler/topologyc_x86_64.S -o "$BUILD/topologyc_core.o"
-as --64 compiler/tensor_frontend_x86_64.S -o "$BUILD/tensor_frontend.o"
+as --64 "$BUILD/tensor_frontend_product_subtract_residency.S" -o "$BUILD/tensor_frontend.o"
 as --64 compiler/general_frontend_x86_64.S -o "$BUILD/general_frontend.o"
 as --64 compiler/runtime_blob_x86_64.S -o "$BUILD/runtime_blob.o"
 as --64 compiler/general_runtime_blob_x86_64.S -o "$BUILD/general_runtime_blob.o"
@@ -55,4 +59,6 @@ for f in "$BUILD/topologyc" "$BUILD/topologyc-rankn" "$BUILD/tensor_runtime_temp
   readelf -d "$f" 2>&1 | grep -q 'There is no dynamic section'
 done
 
+echo 'GENERIC_PRODUCT_SUBTRACT_CONTRACTION=BUILT'
+echo 'GENERIC_VECTOR_REDUCTION_RESIDENCY=BUILT'
 echo 'WHEELCHAIR_BUILD=PASS'
