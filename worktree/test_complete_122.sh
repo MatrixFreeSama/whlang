@@ -20,6 +20,9 @@ src=src.replace('./test_109.sh','sh test_109_122.sh')
 # Keep the scheduler/resource machine-code assertions unchanged while using a
 # parser-version-independent spelling of its diagnostic summary expression.
 src=src.replace('./test_scheduler.sh','sh test_scheduler_122.sh')
+# Preserve the 1.0.11 numeric/executor/vector-native invariant without requiring
+# one exact register-pressure manifestation on every AVX-512 microarchitecture.
+src=src.replace('./test_operator_span_mature_1011.sh','sh test_operator_span_mature_122.sh')
 # 1.1.0's non-erasable Rank-N rejection was a physical Rank-1 ceiling, not a
 # permanent semantic invariant. 1.2.2 replaces it with positive native proof.
 src=src.replace('./test_whex_semantic_parallel_121.sh','sh test_whex_semantic_parallel_122.sh')
