@@ -1,0 +1,55 @@
+name: Audit FSI Machine Shape 1.2.4
+
+on:
+  push:
+    branches: [bench-fluid-solid-coupling-1.2.4]
+    paths:
+      - '.github/workflows/audit-fsi-machine-shape-124.yml'
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bench-fluid-solid-coupling-1.2.4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build and compile
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd worktree
+          python3 tools/apply_123.py
+          sh build.sh
+          cp build/topologyc /tmp/topologyc-124
+          ./whexc ../benchmarks/fluid_solid_coupling_124/fsi_decoupled.whex -o build/fsi_dec_wh --executors 1 >/dev/null
+          cp /tmp/topologyc-124 build/topologyc
+          ./whexc ../benchmarks/fluid_solid_coupling_124/fsi_coupled.whex -o build/fsi_cpl_wh --executors 1 >/dev/null
+          gcc -O3 -mavx512f -mfma -flto -ffast-math -mprefer-vector-width=512 -pthread -DCOUPLED_MODE=0 ../benchmarks/fluid_solid_coupling_124/Fluid_Solid_expert_C_matched.c -o build/fsi_dec_c
+          gcc -O3 -mavx512f -mfma -flto -ffast-math -mprefer-vector-width=512 -pthread -DCOUPLED_MODE=1 ../benchmarks/fluid_solid_coupling_124/Fluid_Solid_expert_C_matched.c -o build/fsi_cpl_c
+      - name: Audit instruction shape
+        shell: bash
+        run: |
+          cd worktree
+          python - <<'PY' | tee /tmp/fsi_machine_shape.txt
+          import re, subprocess
+          files=['fsi_dec_wh','fsi_cpl_wh','fsi_dec_c','fsi_cpl_c']
+          pats=['vaddpd','vsubpd','vmulpd','vfmadd','vfnmadd','vcvtt','vpmullq','vpaddq','vpand','vextract','vinsert','kmov','call','jmp']
+          for f in files:
+              p='build/'+f
+              text=subprocess.check_output(['objdump','-d','-Mintel',p],text=True,errors='replace')
+              ins=[]
+              for line in text.splitlines():
+                  m=re.search(r'\t([a-zA-Z][a-zA-Z0-9_.]*)\s',line)
+                  if m: ins.append(m.group(1).lower())
+              print(f'FILE={f} SIZE={subprocess.check_output(["stat","-c","%s",p],text=True).strip()} INSTRUCTIONS={len(ins)}')
+              for pat in pats:
+                  print(f'  {pat.upper()}={sum(1 for x in ins if x.startswith(pat))}')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fsi-machine-shape
+          path: /tmp/fsi_machine_shape.txt
+          if-no-files-found: error
