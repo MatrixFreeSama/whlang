@@ -22,3 +22,9 @@ A coordination-heavy matrix-free global-stiffness action used to compare:
 This benchmark is intentionally useful as a non-ideal or hostile workload rather than a best-case showcase. It studies how much throughput each execution model retains around periodic neighbor coupling, reduction, and global coordination pressure.
 
 See `degradation_resistance_global_stiffness/README.md` for methodology, numerical checks, two-host results, limitations, and the definition of observed degradation resistance.
+
+## Shared Dependency Episode 1.2.5
+
+`shared_dependency_episode_125/`
+
+The formal decoupled/coupled two-field witness for the general 1.2.5 Shared Dependency Episode recovery. It includes WH/WHEX sources, the matched Expert C control, and the two-host authority table.

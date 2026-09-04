@@ -1,0 +1,14 @@
+program fsi_coupled_124
+tolerance 1e-8
+input n: u64 range 4..100000000
+field fluid[i in n]: f64 = -0.375 + cast(f64, (i * 31 + 11) % 2048) / 2048.0
+field solid[i in n]: f64 = 0.25 + cast(f64, (i * 23 + 5) % 1024) / 1536.0
+field rho[i in n]: f64 = 1.0 + cast(f64, (i * 13 + 9) % 256) / 2048.0
+field mu[i in n]: f64 = 0.75 + cast(f64, (i * 7 + 3) % 128) / 1024.0
+field elastic[i in n]: f64 = 1.25 + cast(f64, (i * 19 + 1) % 256) / 1024.0
+field gamma[i in n]: f64 = 0.125 + cast(f64, (i * 5 + 7) % 64) / 4096.0
+field fluid_op[i in n]: f64 = rho[i] * (2.0 * fluid[i] - fluid[periodic(i + n - 1, n)] - fluid[periodic(i + 1, n)]) + mu[i] * (fluid[periodic(i + 1, n)] - fluid[periodic(i + n - 1, n)]) + gamma[i] * (fluid[i] - solid[i])
+field solid_op[i in n]: f64 = elastic[i] * (2.0 * solid[i] - solid[periodic(i + n - 1, n)] - solid[periodic(i + 1, n)]) + 0.0625 * (solid[periodic(i + 1, n)] - solid[periodic(i + n - 1, n)]) + gamma[i] * (solid[i] - fluid[i])
+sum checksum[i in n]: f64 = fluid_op[i] * fluid_op[i] + solid_op[i] * solid_op[i]
+output checksum
+test (4) => { checksum = 0.07295131862414589 }
