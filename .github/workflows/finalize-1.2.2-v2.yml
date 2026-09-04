@@ -1,0 +1,226 @@
+name: Finalize Wheelchair 1.2.2 Rank-N v2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/finalize-1.2.2-v2.yml'
+
+permissions:
+  contents: write
+
+env:
+  AUTHORITY_COMMIT: 61cecbf1bad0b73c6257fb24e6f739296b1c8956
+
+jobs:
+  authority:
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [ubuntu-22.04, ubuntu-24.04]
+        slot: [1, 2, 3]
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: build-1.2.2
+          fetch-depth: 0
+
+      - name: Freeze executable implementation since native authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor "$AUTHORITY_COMMIT" HEAD
+          python3 - <<'PY'
+          import os, subprocess
+          changed=set(subprocess.check_output(
+              ['git','diff','--name-only',os.environ['AUTHORITY_COMMIT'],'HEAD'],text=True
+          ).splitlines())
+          allowed={
+            '.github/workflows/validate-1.2.2.yml',
+            '.github/workflows/finalize-1.2.2.yml',
+            'worktree/MATURE_1_2_2_PROOF.md',
+            'worktree/RELEASE_PROOF_1_2_2.md',
+            'worktree/VERSION',
+            'worktree/test_109_122.sh',
+            'worktree/test_complete_122.sh',
+            'worktree/test_scheduler_122.sh',
+            'worktree/test_wh_equivalence_122.sh',
+            'worktree/test_whex_semantic_parallel_122.sh',
+          }
+          bad=sorted(changed-allowed)
+          if bad: raise SystemExit('execution implementation changed after authority: '+', '.join(bad))
+          print('RANK_N_RELEASE_EXECUTION_CODE_FREEZE=PASS')
+          PY
+
+      - name: Build and probe
+        id: probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd worktree
+          python3 tools/apply_122.py
+          sh build.sh
+          ./build/topologyc --probe | tee /tmp/probe.txt
+          ./build/topologyc --isa-capabilities | tee /tmp/caps.txt
+          if grep -q 'AVX-512F: usable' /tmp/probe.txt; then
+            echo 'qualified=true' >> "$GITHUB_OUTPUT"
+            echo 'AVX512_RELEASE_HOST=QUALIFIED'
+          else
+            echo 'qualified=false' >> "$GITHUB_OUTPUT"
+            echo 'AVX512_RELEASE_HOST=NOT_QUALIFIED'
+          fi
+
+      - name: Full 1.2.2 authority
+        if: steps.probe.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd worktree
+          sh test_complete_122.sh | tee /tmp/release-gates.txt
+          grep -q '^WHEELCHAIR_RANK_N_1_2_2=PASS$' /tmp/release-gates.txt
+          grep -q '^WHEELCHAIR_1_2_2_COMPLETE=PASS$' /tmp/release-gates.txt
+
+      - name: Write authority record
+        if: steps.probe.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_commit=$(git rev-parse HEAD)
+          out='/tmp/rankn-authority-${{ matrix.image }}-${{ matrix.slot }}.txt'
+          {
+            echo 'WHEELCHAIR_VERSION=1.2.2'
+            echo "RELEASE_COMMIT=$release_commit"
+            echo "WORKFLOW_RUN=$GITHUB_RUN_ID"
+            echo "RUNNER_IMAGE=${{ matrix.image }}"
+            echo "RUNNER_SLOT=${{ matrix.slot }}"
+            cat /tmp/probe.txt
+            cat /tmp/caps.txt
+            cat /tmp/release-gates.txt
+          } > "$out"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.probe.outputs.qualified == 'true'
+        with:
+          name: rankn-authority-${{ matrix.image }}-${{ matrix.slot }}
+          path: /tmp/rankn-authority-${{ matrix.image }}-${{ matrix.slot }}.txt
+          if-no-files-found: error
+          retention-days: 90
+
+  quorum:
+    needs: authority
+    if: always()
+    runs-on: ubuntu-22.04
+    steps:
+      - name: No qualified-host failure allowed
+        run: test '${{ needs.authority.result }}' != 'failure'
+
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: rankn-authority-*
+          path: authority
+          merge-multiple: true
+
+      - name: Require at least one complete AVX-512 authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          count=$(find authority -type f -name 'rankn-authority-*.txt' 2>/dev/null | wc -l)
+          test "$count" -ge 1
+          grep -R -q '^WHEELCHAIR_RANK_N_1_2_2=PASS$' authority
+          grep -R -q '^WHEELCHAIR_1_2_2_COMPLETE=PASS$' authority
+          echo "AVX512_AUTHORITY_RECORDS=$count"
+          echo 'WHEELCHAIR_1_2_2_RELEASE_AUTHORITY=PASS'
+
+  package:
+    needs: quorum
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: build-1.2.2
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rankn-authority-*
+          path: /tmp/authority
+          merge-multiple: true
+
+      - name: Create, re-extract and verify release archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_commit=$(git rev-parse HEAD)
+          test "$(cat worktree/VERSION)" = '1.2.2'
+          rm -rf /tmp/release /tmp/verify
+          mkdir -p /tmp/release/Wheelchair-1.2.2
+          rsync -a --exclude 'build/' --exclude '__pycache__/' --exclude '*.pyc' --exclude '*.pyo' \
+            worktree/ /tmp/release/Wheelchair-1.2.2/
+          rm -f /tmp/release/Wheelchair-1.2.2/SHA256SUMS
+          {
+            echo 'Wheelchair 1.2.2 final release authority'
+            echo "release_commit=$release_commit"
+            echo "workflow_run=$GITHUB_RUN_ID"
+            cat /tmp/authority/rankn-authority-*.txt
+          } > /tmp/release/Wheelchair-1.2.2/RELEASE_GATES_1_2_2.txt
+
+          python3 - <<'PY'
+          from pathlib import Path
+          root=Path('/tmp/release/Wheelchair-1.2.2')
+          forbidden={'.exe','.dll','.so','.o','.a','.pdb','.pyc','.pyo'}
+          for p in root.rglob('*'):
+              if not p.is_file(): continue
+              if p.suffix.lower() in forbidden:
+                  raise SystemExit(f'forbidden build artifact: {p.relative_to(root)}')
+              h=p.read_bytes()[:4]
+              if h.startswith(b'\x7fELF') or h[:2]==b'MZ':
+                  raise SystemExit(f'forbidden native binary: {p.relative_to(root)}')
+          print('RELEASE_NATIVE_BINARY_HYGIENE=PASS')
+          PY
+
+          cd /tmp/release/Wheelchair-1.2.2
+          find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+          cd /tmp/release
+          find Wheelchair-1.2.2 -exec touch -t 200001010000 {} +
+          find Wheelchair-1.2.2 \( -type f -o -type d \) | LC_ALL=C sort > /tmp/files.txt
+          zip -X -q /tmp/Wheelchair-1.2.2.zip -@ < /tmp/files.txt
+          sha256sum /tmp/Wheelchair-1.2.2.zip | sed 's#/tmp/##' > /tmp/Wheelchair-1.2.2.zip.sha256
+
+          mkdir -p /tmp/verify
+          unzip -q /tmp/Wheelchair-1.2.2.zip -d /tmp/verify
+          cd /tmp/verify/Wheelchair-1.2.2
+          sha256sum -c SHA256SUMS
+          test "$(cat VERSION)" = '1.2.2'
+          grep -q '^WHEELCHAIR_RANK_N_1_2_2=PASS$' RELEASE_GATES_1_2_2.txt
+          grep -q '^WHEELCHAIR_1_2_2_COMPLETE=PASS$' RELEASE_GATES_1_2_2.txt
+          echo 'WHEELCHAIR_1_2_2_PACKAGE_REEXTRACT=PASS'
+          cat /tmp/Wheelchair-1.2.2.zip.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Wheelchair-1.2.2-release
+          path: |
+            /tmp/Wheelchair-1.2.2.zip
+            /tmp/Wheelchair-1.2.2.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish to main/dist
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          rm -rf /tmp/release-main
+          git worktree add --detach /tmp/release-main origin/main
+          cp /tmp/Wheelchair-1.2.2.zip /tmp/release-main/dist/Wheelchair-1.2.2.zip
+          cp /tmp/Wheelchair-1.2.2.zip.sha256 /tmp/release-main/dist/Wheelchair-1.2.2.zip.sha256
+          cd /tmp/release-main
+          git config user.name 'wheelchair-release-bot'
+          git config user.email 'wheelchair-release-bot@users.noreply.github.com'
+          git add dist/Wheelchair-1.2.2.zip dist/Wheelchair-1.2.2.zip.sha256
+          git commit -m 'Release Wheelchair 1.2.2 mature native Rank-N'
+          git push origin HEAD:main
