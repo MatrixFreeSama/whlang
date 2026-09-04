@@ -1,0 +1,110 @@
+name: Package Wheelchair 1.2.5
+
+on:
+  push:
+    branches: [build-1.2.5-multifield]
+    paths:
+      - '.github/workflows/package-1.2.5.yml'
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: mainrepo
+      - uses: actions/checkout@v4
+        with:
+          ref: build-1.2.5-multifield
+          path: devrepo
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Inspect 1.2.4 package and validate 1.2.5
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import zipfile
+          p='mainrepo/dist/Wheelchair-1.2.4.zip'
+          with zipfile.ZipFile(p) as z:
+              names=z.namelist()
+          print('PACKAGE_124_MEMBER_COUNT='+str(len(names)))
+          tops=sorted({n.split('/',1)[0] for n in names if n})
+          print('PACKAGE_124_TOPS='+','.join(tops))
+          for n in names[:40]: print('PACKAGE_124_MEMBER='+n)
+          PY
+          cd devrepo/worktree
+          python3 tools/apply_123.py >/dev/null
+          sh build.sh >/dev/null
+          sh test_complete_125.sh | tee /tmp/complete125.txt
+          grep -q '^WHEELCHAIR_1_2_5_COMPLETE=PASS$' /tmp/complete125.txt
+      - name: Build deterministic release ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf stage
+          mkdir -p stage/Wheelchair-1.2.5
+          python3 - <<'PY'
+          from pathlib import Path
+          import shutil
+          src=Path('devrepo/worktree')
+          dst=Path('stage/Wheelchair-1.2.5')
+          skip_parts={'build','__pycache__','.pytest_cache'}
+          skip_suffix={'.o','.pyc','.pyo'}
+          for p in sorted(src.rglob('*')):
+              rel=p.relative_to(src)
+              if any(part in skip_parts for part in rel.parts):
+                  continue
+              if p.is_dir():
+                  (dst/rel).mkdir(parents=True,exist_ok=True)
+                  continue
+              if p.suffix in skip_suffix:
+                  continue
+              q=dst/rel
+              q.parent.mkdir(parents=True,exist_ok=True)
+              shutil.copyfile(p,q)
+          # Public multi-field witness sources used by the 1.2.5 authority.
+          bsrc=Path('devrepo/benchmarks/fluid_solid_coupling_124')
+          bdst=dst/'benchmarks'/'fluid_solid_coupling_124'
+          bdst.mkdir(parents=True,exist_ok=True)
+          for name in ('fsi_coupled.wh','fsi_coupled.whex','fsi_decoupled.whex','Fluid_Solid_expert_C_matched.c'):
+              shutil.copyfile(bsrc/name,bdst/name)
+          PY
+          python3 - <<'PY'
+          from pathlib import Path
+          import zipfile, hashlib
+          root=Path('stage/Wheelchair-1.2.5')
+          out=Path('Wheelchair-1.2.5.zip')
+          epoch=(2026,9,5,0,0,0)
+          with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              for p in sorted(root.rglob('*')):
+                  if not p.is_file(): continue
+                  arc=p.as_posix()
+                  info=zipfile.ZipInfo(arc,epoch)
+                  info.compress_type=zipfile.ZIP_DEFLATED
+                  info.external_attr=(0o100644 << 16)
+                  z.writestr(info,p.read_bytes(),compress_type=zipfile.ZIP_DEFLATED,compresslevel=9)
+          b=out.read_bytes(); h=hashlib.sha256(b).hexdigest()
+          Path('Wheelchair-1.2.5.zip.sha256').write_text(f'{h}  Wheelchair-1.2.5.zip\n')
+          print('WHEELCHAIR_1_2_5_ZIP_SIZE='+str(len(b)))
+          print('WHEELCHAIR_1_2_5_ZIP_SHA256='+h)
+          with zipfile.ZipFile(out) as z:
+              names=z.namelist()
+              assert 'Wheelchair-1.2.5/VERSION' in names
+              assert 'Wheelchair-1.2.5/RELEASE_PROOF_1_2_5.md' in names
+              assert 'Wheelchair-1.2.5/RELEASE_GATES_1_2_5.txt' in names
+              assert 'Wheelchair-1.2.5/surface/shared_dependency_episode.py' in names
+              assert 'Wheelchair-1.2.5/tools/generate_shared_dependency_episode_125.py' in names
+              assert not any('/build/' in n or '__pycache__' in n for n in names)
+          print('WHEELCHAIR_1_2_5_PACKAGE_SEAL=PASS')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Wheelchair-1.2.5-formal
+          path: |
+            Wheelchair-1.2.5.zip
+            Wheelchair-1.2.5.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
