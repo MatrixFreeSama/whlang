@@ -1,0 +1,149 @@
+name: Validate Shared Dependency Episode 1.2.5
+
+on:
+  push:
+    branches: [build-1.2.5-multifield]
+    paths:
+      - 'worktree/**'
+      - 'benchmarks/fluid_solid_coupling_124/**'
+      - '.github/workflows/validate-shared-dependency-125.yml'
+
+jobs:
+  authority:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4, 5, 6, 7, 8]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: build-1.2.5-multifield
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build and qualify AVX-512 host
+        id: qualify
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "SLOT=${{ matrix.slot }}" | tee /tmp/host.txt
+          lscpu | grep -E 'Vendor ID|Model name|CPU family|^Model:|Socket|Thread|Core' | tee -a /tmp/host.txt || true
+          cd worktree
+          python3 tools/apply_123.py
+          sh build.sh
+          ./build/topologyc --probe | tee /tmp/probe.txt
+          if grep -q 'AVX-512F: usable' /tmp/probe.txt; then
+            echo 'qualified=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'qualified=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Structural sovereignty and inherited peak gates
+        if: steps.qualify.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd worktree
+          sh test_109_125.sh
+          sh test_shared_dependency_episode_125.sh
+          sh test_generic_native_125.sh
+          sh test_rank_n_122.sh
+          sh test_sparse_causal_expansion_123.sh
+      - name: Build exact 1.2.4 controls and expert C
+        if: steps.qualify.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd worktree
+          as --64 build/tensor_frontend_product_subtract_residency.S -o build/tensor_frontend_124_authority.o
+          ld -nostdlib -static -z noexecstack \
+            build/topologyc_core.o build/tensor_frontend_124_authority.o build/general_frontend.o \
+            build/runtime_blob.o build/general_runtime_blob.o -o build/topologyc-124-authority
+          PYTHONPATH=surface python3 - <<'PY'
+          from pathlib import Path
+          import whex_surface
+          for stem in ('fsi_decoupled','fsi_coupled'):
+              p=Path('../benchmarks/fluid_solid_coupling_124')/(stem+'.whex')
+              data,_,_=whex_surface.load_surface(p)
+              Path('build/'+stem+'.core').write_bytes(whex_surface.canonical_core_bytes(data))
+          PY
+          for q in 1 2 4; do
+            for mode in decoupled coupled; do
+              if [ "$q" = 1 ]; then
+                build/topologyc-124-authority "build/fsi_${mode}.core" -o "build/fsi_${mode}_124_q${q}"
+              else
+                build/topologyc-124-authority "build/fsi_${mode}.core" -o "build/fsi_${mode}_124_q${q}" --executors "$q"
+              fi
+              ./whexc "../benchmarks/fluid_solid_coupling_124/fsi_${mode}.whex" -o "build/fsi_${mode}_125_q${q}" --executors "$q" >/dev/null
+            done
+          done
+          COMMON='-O3 -march=native -mtune=native -flto -ffast-math -mprefer-vector-width=512 -pthread'
+          gcc $COMMON -DCOUPLED_MODE=0 ../benchmarks/fluid_solid_coupling_124/Fluid_Solid_expert_C_matched.c -o build/fsi_decoupled_c512
+          gcc $COMMON -DCOUPLED_MODE=1 ../benchmarks/fluid_solid_coupling_124/Fluid_Solid_expert_C_matched.c -o build/fsi_coupled_c512
+      - name: Same-host 1.2.4 vs 1.2.5 vs Expert C authority
+        if: steps.qualify.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd worktree
+          python3 - <<'PY' | tee /tmp/authority.txt
+          import math, os, random, re, statistics, struct, subprocess, time
+          RUNS=11; WARM=3
+          cpulist=sorted(os.sched_getaffinity(0))
+          def cpus(q): return ','.join(map(str,cpulist[:q]))
+          def run(c): return subprocess.check_output(c,text=True).strip()
+          def val(s):
+              m=re.search(r'0x([0-9a-fA-F]+)',s); b=int(m.group(1),16)
+              return struct.unpack('>d',b.to_bytes(8,'big'))[0]
+          speed=[]; newc=[]
+          rng=random.Random(0x5DE125)
+          for mode in ('decoupled','coupled'):
+            for n in (10_000_000,100_000_000):
+              for q in (1,2,4):
+                cmds={
+                  'OLD':['taskset','-c',cpus(q),f'build/fsi_{mode}_124_q{q}',str(n)],
+                  'NEW':['taskset','-c',cpus(q),f'build/fsi_{mode}_125_q{q}',str(n)],
+                  'C':['taskset','-c',cpus(q),f'build/fsi_{mode}_c512',str(n),str(q)],
+                }
+                first={k:run(v) for k,v in cmds.items()}
+                ov,nv,cv=map(val,(first['OLD'],first['NEW'],first['C']))
+                if first['OLD'] != first['NEW']:
+                    raise SystemExit(f'1.2.5 checksum bits changed vs 1.2.4: {mode} {n} q{q}: {first}')
+                if abs(nv-cv)/max(abs(cv),1.0)>1e-8:
+                    raise SystemExit(f'C numeric mismatch: {mode} {n} q{q}')
+                for c in cmds.values():
+                  for _ in range(WARM): run(c)
+                samples={k:[] for k in cmds}
+                for _ in range(RUNS):
+                  order=list(cmds); rng.shuffle(order)
+                  for k in order:
+                    t=time.perf_counter_ns(); run(cmds[k]); samples[k].append((time.perf_counter_ns()-t)/1e6)
+                med={k:statistics.median(v) for k,v in samples.items()}
+                sp=med['OLD']/med['NEW']; nc=med['NEW']/med['C']
+                speed.append(sp); newc.append(nc)
+                print(f'ROW MODE={mode} N={n} Q={q} OLD_MS={med["OLD"]:.6f} NEW_MS={med["NEW"]:.6f} C512_MS={med["C"]:.6f} OLD_NEW={sp:.4f}x NEW_C={nc:.4f}x')
+          medsp=statistics.median(speed); geosp=math.exp(sum(math.log(x) for x in speed)/len(speed))
+          medc=statistics.median(newc); geoc=math.exp(sum(math.log(x) for x in newc)/len(newc))
+          print(f'SHARED_DEPENDENCY_MEDIAN_124_TO_125={medsp:.4f}x')
+          print(f'SHARED_DEPENDENCY_GEOMEAN_124_TO_125={geosp:.4f}x')
+          print(f'SHARED_DEPENDENCY_MEDIAN_125_VS_C={medc:.4f}x')
+          print(f'SHARED_DEPENDENCY_GEOMEAN_125_VS_C={geoc:.4f}x')
+          if medsp < 1.50 or geosp < 1.50:
+              raise SystemExit('physical-gain gate failed: aggregate 1.2.5 speedup < 1.50x')
+          print('SHARED_DEPENDENCY_PHYSICAL_GAIN=PASS')
+          print('SHARED_DEPENDENCY_NUMERIC_IDENTITY_124_125=PASS')
+          print('SHARED_DEPENDENCY_AUTHORITY_HOST=PASS')
+          PY
+      - name: Seal authority artifact
+        if: steps.qualify.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          cat /tmp/host.txt /tmp/probe.txt /tmp/authority.txt > /tmp/result.txt
+          echo 'WHEELCHAIR_SHARED_DEPENDENCY_1_2_5_HOST=PASS' >> /tmp/result.txt
+      - uses: actions/upload-artifact@v4
+        if: steps.qualify.outputs.qualified == 'true'
+        with:
+          name: shared-dependency-125-${{ matrix.slot }}
+          path: /tmp/result.txt
+          if-no-files-found: error
+          retention-days: 30
