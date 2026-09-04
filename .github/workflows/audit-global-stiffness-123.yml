@@ -59,14 +59,43 @@ jobs:
           cd worktree
           sh tools/disassemble_generated.sh build/stiff_resident_q1 > /tmp/resident.dis 2>&1
           sh tools/disassemble_generated.sh build/stiff_tailgate_q1 > /tmp/tailgate.dis 2>&1
-          r=$(grep -Eic 'cmp.*r8.*0x8|cmp.*r8.*,8' /tmp/resident.dis || true)
-          t=$(grep -Eic 'cmp.*r8.*0x8|cmp.*r8.*,8' /tmp/tailgate.dis || true)
-          echo "RESIDENT_CMP_R8_8=$r" | tee /tmp/audit.txt
-          echo "TAILGATE_CMP_R8_8=$t" | tee -a /tmp/audit.txt
-          test "$t" -lt "$r"
-          test "$(grep -Eic 'vaddpd.*zmm12.*zmm0|vaddpd.*%zmm0.*%zmm12' /tmp/tailgate.dis || true)" -gt 0
-          test "$(grep -Eic '\bcall\b' /tmp/tailgate.dis || true)" -eq 0
-          echo 'FULL_BLOCK_TAIL_GATE_MACHINE_ERASURE=PASS' | tee -a /tmp/audit.txt
+          python3 - <<'PY' | tee /tmp/audit.txt
+          from pathlib import Path
+          import re
+
+          def instructions(path):
+              out=[]
+              for line in Path(path).read_text(errors='replace').splitlines():
+                  m=re.match(r'^\s*[0-9a-f]+:\s+(?:[0-9a-f]{2}\s+)+\s*(.*)$', line.lower())
+                  if m:
+                      asm=m.group(1).strip()
+                      if asm:
+                          out.append(asm)
+              return out
+
+          def accum_index(v):
+              for i,s in enumerate(v):
+                  if s.startswith('vaddpd') and 'zmm12' in s and 'zmm0' in s:
+                      return i
+              raise SystemExit('resident zmm12 accumulation missing')
+
+          resident=instructions('/tmp/resident.dis')
+          tailgate=instructions('/tmp/tailgate.dis')
+          ri=accum_index(resident)
+          ti=accum_index(tailgate)
+          rnext=resident[ri+1:ri+3]
+          tnext=tailgate[ti+1:ti+3]
+          print('RESIDENT_AFTER_ACCUM=' + ' | '.join(rnext))
+          print('TAILGATE_AFTER_ACCUM=' + ' | '.join(tnext))
+          assert rnext and rnext[0].startswith('cmp') and 'r8' in rnext[0]
+          assert len(rnext)>1 and rnext[1].startswith('jbe')
+          assert tnext and tnext[0].startswith('jbe')
+          assert not tnext[0].startswith('cmp')
+          assert any(s.startswith('cmp') and 'r8' in s and ('0x8' in s or ',8' in s) for s in tailgate[:ti])
+          assert not any(s.startswith('call') for s in tailgate)
+          print('FULL_BLOCK_TAIL_GATE_DYNAMIC_CMP_ERASURE=PASS')
+          print('TAIL_GATE_GENERATED_CALL_EDGES=0')
+          PY
       - name: Four-way same-host benchmark
         if: steps.isa.outputs.qualified == 'true'
         shell: bash
