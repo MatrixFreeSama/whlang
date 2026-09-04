@@ -1,0 +1,9 @@
+program global_stiffness_123
+tolerance 1e-10
+input n: u64 range 4..100000000
+field x[i in n]: f64 = -0.5 + cast(f64, (i * 29 + 7) % 1024) / 1024.0
+field edge_k[i in n]: f64 = 1.0 + cast(f64, (i * 17 + 3) % 256) / 1024.0
+field kx[i in n]: f64 = (edge_k[i] + edge_k[periodic(i + 1, n)]) * x[i] - edge_k[i] * x[periodic(i + n - 1, n)] - edge_k[periodic(i + 1, n)] * x[periodic(i + 1, n)]
+sum checksum[i in n]: f64 = kx[i] * kx[i]
+output checksum
+test (4) => { checksum = 0.02624587072568829 }
