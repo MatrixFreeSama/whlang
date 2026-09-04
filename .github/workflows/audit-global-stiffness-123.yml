@@ -1,5 +1,4 @@
-name: Audit Wheelchair Physical Vector Width
-# trigger: compare mature resident ZMM lane against native-width and forced-512 expert C
+name: Dissect Wheelchair vs Expert C512 Hot Kernel
 on:
   push:
     branches: [main]
@@ -7,14 +6,14 @@ on:
 permissions:
   contents: read
 jobs:
-  width:
+  dissect:
     strategy:
       fail-fast: false
       matrix:
-        image: [ubuntu-22.04, ubuntu-24.04]
-        slot: [1,2,3]
+        image: [ubuntu-24.04]
+        slot: [1,2,3,4]
     runs-on: ${{ matrix.image }}
-    timeout-minutes: 35
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
@@ -30,7 +29,7 @@ jobs:
           sh build.sh
           ./build/topologyc --probe | tee /tmp/probe.txt
           if grep -q 'AVX-512F: usable' /tmp/probe.txt; then echo 'qualified=true' >> "$GITHUB_OUTPUT"; else echo 'qualified=false' >> "$GITHUB_OUTPUT"; fi
-      - name: Build resident and C width controls
+      - name: Dissect resident and forced-512 C
         if: steps.isa.outputs.qualified == 'true'
         shell: bash
         run: |
@@ -38,54 +37,29 @@ jobs:
           cd worktree
           as --64 build/tensor_frontend_product_subtract_residency.S -o build/tensor_frontend_resident.o
           ld -nostdlib -static -z noexecstack build/topologyc_core.o build/tensor_frontend_resident.o build/general_frontend.o build/runtime_blob.o build/general_runtime_blob.o -o build/topologyc-resident
-          for q in 1 2 4; do
-            cp build/topologyc-resident build/topologyc
-            ./whexc ../benchmarks/global_stiffness_123/stiffness.whex -o "build/global_stiffness_resident_q${q}" --executors "$q" >/dev/null
+          cp build/topologyc-resident build/topologyc
+          ./whexc ../benchmarks/global_stiffness_123/stiffness.whex -o build/stiff_wh --executors 1 >/dev/null
+          gcc -O3 -march=native -mtune=native -flto -ffast-math -mprefer-vector-width=512 -pthread ../benchmarks/global_stiffness_123/Global_Stiffness_expert_C_matched.c -o build/stiff_c512
+          sh tools/disassemble_generated.sh build/stiff_wh > /tmp/wh.dis 2>&1
+          objdump -d -M intel build/stiff_c512 > /tmp/c512.dis
+          nm -n build/stiff_c512 | grep -E ' worker$|worker\.' | tee /tmp/symbols.txt || true
+          printf '%-22s %6s %6s\n' TOKEN WH C512 | tee /tmp/counts.txt
+          for p in vmovdqa64 vmovapd vpbroadcastq vpmullq vpaddq vpsubq vpandq vpminuq vcvtqq2pd vcvttpd2qq vfmadd vfnmadd vfmsub vmulpd vaddpd vsubpd vextract kmov call; do
+            w=$(grep -Eic "$p" /tmp/wh.dis || true); c=$(grep -Eic "$p" /tmp/c512.dis || true)
+            printf '%-22s %6d %6d\n' "$p" "$w" "$c" | tee -a /tmp/counts.txt
           done
-          gcc -O3 -march=native -mtune=native -flto -ffast-math -pthread ../benchmarks/global_stiffness_123/Global_Stiffness_expert_C_matched.c -o build/global_stiffness_c
-          gcc -O3 -march=native -mtune=native -flto -ffast-math -mprefer-vector-width=512 -pthread ../benchmarks/global_stiffness_123/Global_Stiffness_expert_C_matched.c -o build/global_stiffness_c512
-          gcc --version | head -1 | tee /tmp/gcc.txt
-          objdump -d -M intel build/global_stiffness_c | grep -Eo '\b[xyz]mm[0-9]+' | sort | uniq -c | tee /tmp/c_width_regs.txt || true
-          objdump -d -M intel build/global_stiffness_c512 | grep -Eo '\b[xyz]mm[0-9]+' | sort | uniq -c | tee /tmp/c512_width_regs.txt || true
-      - name: Same-host sustained-width benchmark
-        if: steps.isa.outputs.qualified == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY' | tee /tmp/width_result.txt
-          import os,random,statistics,subprocess,time,struct
-          from pathlib import Path
-          B=Path('worktree/build')
-          RUNS=11; WARM=2; N=100_000_000
-          def cpus(q):
-              a=sorted(os.sched_getaffinity(0)); return ','.join(map(str,a[:q]))
-          def wh(q): return ['taskset','-c',cpus(q),str(B/f'global_stiffness_resident_q{q}'),str(N)]
-          def c(kind,q): return ['taskset','-c',cpus(q),str(B/kind),str(N),str(q)]
-          def run(cmd): return subprocess.check_output(cmd,text=True).strip()
-          rng=random.Random(0x512256)
-          for q in (1,2,4):
-              cmds={'WH-ZMM512':wh(q),'C-native':c('global_stiffness_c',q),'C-forced512':c('global_stiffness_c512',q)}
-              outs={k:run(v) for k,v in cmds.items()}
-              if len(set(outs.values())) != 1: raise SystemExit(f'checksum mismatch q={q}: {outs}')
-              for cmd in cmds.values():
-                  for _ in range(WARM): run(cmd)
-              s={k:[] for k in cmds}
-              for _ in range(RUNS):
-                  order=list(cmds); rng.shuffle(order)
-                  for k in order:
-                      t=time.perf_counter_ns(); run(cmds[k]); s[k].append((time.perf_counter_ns()-t)/1e6)
-              m={k:statistics.median(v) for k,v in s.items()}
-              print(f'WIDTH N={N} Q={q} WH={m["WH-ZMM512"]:.6f} C_NATIVE={m["C-native"]:.6f} C_512={m["C-forced512"]:.6f} C512/CNATIVE={m["C-forced512"]/m["C-native"]:.4f}x WH/C512={m["WH-ZMM512"]/m["C-forced512"]:.4f}x')
-          print('VECTOR_WIDTH_CONTROL=PASS')
-          PY
+          echo '=== WH RX ==='
+          sed -n '1,260p' /tmp/wh.dis
+          echo '=== C512 WORKER ZMM CORE ==='
+          grep -Ein -C 35 'zmm2[1-4].*vfmadd|vfmadd.*zmm2[1-4]|zmm.*vfmsub|vfmsub.*zmm|zmm.*vmulpd|vmulpd.*zmm' /tmp/c512.dis | head -900 || true
       - uses: actions/upload-artifact@v4
         if: steps.isa.outputs.qualified == 'true'
         with:
-          name: vector-width-control-${{ matrix.image }}-${{ matrix.slot }}
+          name: c512-hot-kernel-${{ matrix.slot }}
           path: |
-            /tmp/width_result.txt
+            /tmp/wh.dis
+            /tmp/c512.dis
+            /tmp/counts.txt
             /tmp/probe.txt
-            /tmp/gcc.txt
-            /tmp/c_width_regs.txt
-            /tmp/c512_width_regs.txt
+            /tmp/symbols.txt
           if-no-files-found: error
