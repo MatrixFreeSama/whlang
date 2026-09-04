@@ -17,7 +17,7 @@ jobs:
         run: |
           cd worktree
           python3 tools/apply_122.py
-      - name: Build protected dual native lanes
+      - name: Build protected native lanes
         run: |
           cd worktree
           sh build.sh
@@ -26,9 +26,9 @@ jobs:
           cd worktree
           ./build/topologyc --probe
           ./build/topologyc --isa-capabilities
-      - name: Run Rank-N and technical-peak gates
+      - name: Run monolithic 1.2.2 release harness
         shell: bash
         run: |
           set -euo pipefail
           cd worktree
-          sh test_rank_n_122.sh | tee /tmp/rankn122.log
+          sh test_complete_122.sh | tee /tmp/wheelchair-1.2.2-release-gates.txt
