@@ -7,10 +7,11 @@ import wh_surface
 import wh_structural
 
 
-def _compile_native(core_bytes: bytes, output: Path, executors: int) -> tuple[int,str,str]:
+def _compile_native(core_bytes: bytes, output: Path, executors: int, *, rank_n: bool=False) -> tuple[int,str,str]:
     with tempfile.TemporaryDirectory(prefix='wheelchair_surface_') as td:
         core=Path(td)/'program.core.wh'; core.write_bytes(core_bytes)
-        cmd=[str(ROOT/'build/topologyc'),str(core),'-o',str(output)]
+        compiler=ROOT/'build/topologyc-rankn' if rank_n else ROOT/'build/topologyc'
+        cmd=[str(compiler),str(core),'-o',str(output)]
         if executors!=1: cmd += ['--executors',str(executors)]
         p=subprocess.run(cmd,cwd=ROOT,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
         return p.returncode,p.stdout,p.stderr
@@ -35,7 +36,7 @@ def main():
         data, parser = wh_structural.compile_surface(text,a.source)
         plan=wh_structural.semantic_plan(parser)
         blob=wh_structural.canonical_core_bytes(data)
-        rc,out,err=_compile_native(blob,a.output,a.executors)
+        rc,out,err=_compile_native(blob,a.output,a.executors,rank_n=("rank_n_product" in data))
         if rc:
             sys.stderr.write(err or out); return rc
         if a.semantic_plan is not None:

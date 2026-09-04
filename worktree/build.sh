@@ -13,6 +13,15 @@ ld -nostdlib -static -z noexecstack -T runtime/tensor_runtime.ld \
   "$BUILD/tensor_runtime_template.o" -o "$BUILD/tensor_runtime_template"
 ./tools/generate_tensor_runtime_offsets.sh "$BUILD/tensor_runtime_template" compiler/runtime_offsets.inc
 
+python3 tools/generate_rankn_backend_122.py
+as --64 "$BUILD/generated_122/tensor_rankn_runtime_template_x86_64.S" -o "$BUILD/tensor_rankn_runtime_template.o"
+ld -nostdlib -static -z noexecstack -T runtime/tensor_runtime.ld \
+  "$BUILD/tensor_rankn_runtime_template.o" -o "$BUILD/tensor_rankn_runtime_template"
+./tools/generate_tensor_runtime_offsets.sh "$BUILD/tensor_rankn_runtime_template" "$BUILD/runtime_rankn_offsets.inc"
+rankn_va=$(nm -n "$BUILD/tensor_rankn_runtime_template" | awk '$3=="rank_n_product_patch" {print "0x"$1; exit}')
+[ -n "$rankn_va" ]
+printf '.equ RUNTIME_RANK_N_PRODUCT_OFF, 0x%x\n' $((rankn_va-0x400000)) >> "$BUILD/runtime_rankn_offsets.inc"
+
 as --64 runtime/general_runtime_template_x86_64.S -o "$BUILD/general_runtime_template.o"
 ld -nostdlib -static -z noexecstack -T runtime/general_runtime.ld \
   "$BUILD/general_runtime_template.o" -o "$BUILD/general_runtime_template"
@@ -29,13 +38,20 @@ ld -nostdlib -static -z noexecstack \
   "$BUILD/runtime_blob.o" "$BUILD/general_runtime_blob.o" \
   -o "$BUILD/topologyc"
 
+as --64 "$BUILD/generated_122/tensor_rankn_frontend_x86_64.S" -o "$BUILD/tensor_rankn_frontend.o"
+as --64 "$BUILD/generated_122/runtime_rankn_blob_x86_64.S" -o "$BUILD/runtime_rankn_blob.o"
+ld -nostdlib -static -z noexecstack \
+  "$BUILD/topologyc_core.o" "$BUILD/tensor_rankn_frontend.o" "$BUILD/general_frontend.o" \
+  "$BUILD/runtime_rankn_blob.o" "$BUILD/general_runtime_blob.o" \
+  -o "$BUILD/topologyc-rankn"
+
 # Execution Fabric remains a distinct native runtime layer.
 as --64 runtime/causal_return_fabric_x86_64.S -o "$BUILD/causal_return_fabric.o"
 ld -nostdlib -static -z noexecstack "$BUILD/causal_return_fabric.o" -o "$BUILD/topology-fabric"
 as --64 runtime/causal_return_parallel_x86_64.S -o "$BUILD/causal_return_parallel.o"
 ld -nostdlib -static -z noexecstack "$BUILD/causal_return_parallel.o" -o "$BUILD/topology-fabric-run"
 
-for f in "$BUILD/topologyc" "$BUILD/tensor_runtime_template" "$BUILD/general_runtime_template" "$BUILD/topology-fabric" "$BUILD/topology-fabric-run"; do
+for f in "$BUILD/topologyc" "$BUILD/topologyc-rankn" "$BUILD/tensor_runtime_template" "$BUILD/tensor_rankn_runtime_template" "$BUILD/general_runtime_template" "$BUILD/topology-fabric" "$BUILD/topology-fabric-run"; do
   readelf -d "$f" 2>&1 | grep -q 'There is no dynamic section'
 done
 

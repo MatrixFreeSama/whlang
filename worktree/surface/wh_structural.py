@@ -36,6 +36,7 @@ from typing import Any
 import wh_surface as wh
 import whex_surface as wx
 import whex_semantics as ws
+import rank_n_product as rnp
 
 SOURCE_EXTENSION = ".wh"
 
@@ -325,6 +326,13 @@ class WHStructuralParser(wx.WHEXParser):
             "native_equivalence_required_when_proof_complete": True,
             "failure_policy": "explicit_reject_not_general_or_scalar_fallback",
         }
+        try:
+            physical, evidence = rnp.physicalize(self.data)
+        except rnp.RankNPhysicalizationError as exc:
+            raise wh.SurfaceError(str(exc)) from exc
+        if evidence:
+            self.data = physical
+            rnp.attach_semantic_plan(plan, evidence, int(physical["rank_n_product"]))
         self.semantic_plan = plan
         return self.data
 

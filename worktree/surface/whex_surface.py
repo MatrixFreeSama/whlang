@@ -14,6 +14,7 @@ from typing import Any
 
 import wh_surface as wh
 import whex_semantics as ws
+import rank_n_product as rnp
 
 SOURCE_EXTENSION = ".whex"
 FORMAT = wh.FORMAT
@@ -413,18 +414,20 @@ class WHEXParser(wh.Parser):
         self.optional_semicolon()
 
     def parse_each(self) -> None:
-        # each i in n, j in m { field_name: f64 = expression }
+        # Familiar block form of a structural Rank-N map. No axis is serialized.
         axes: list[dict[str, Any]] = []; names: set[str] = set()
-        axis = self.parse_name(allow_numeric=True)
-        self.expect_kw("in"); extent = self.parse_expr()
-        axes.append({"name": axis, "extent": extent}); names.add(axis)
-        if self.match_op(","):
-            raise self.error("current dedicated topologyc currently accepts exactly one explicit topology axis")
+        while True:
+            axis = self.parse_name(allow_numeric=True)
+            if axis in names: raise self.error(f"duplicate topology axis {axis!r}")
+            self.expect_kw("in"); extent = self.parse_expr()
+            axes.append({"name": axis, "extent": extent}); names.add(axis)
+            if self.match_op(","): continue
+            break
         self.expect_op("{")
         name = self.parse_name(allow_numeric=True)
         self.expect_op(":"); typ = self.parse_scalar_type()
         if typ != "f64": raise self.error("current dedicated topologyc WHEX fields are currently f64")
-        if axes[0].get("extent") != {"var":"n"}: raise self.error("current dedicated topologyc WHEX each extent must be n")
+        if len(axes)==1 and axes[0].get("extent") != {"var":"n"}: raise self.error("current native topologyc WHEX rank-1 each extent must be n")
         self.expect_op("=")
         self.axes.append(names)
         try: expr = self.parse_expr()
@@ -491,12 +494,20 @@ class WHEXParser(wh.Parser):
         # Build the semantic plan now so dependency cycles/effects/parallel contracts
         # reject before native lowering.  The plan is side metadata and never enters
         # canonical bytes, preserving zero-cost erasure.
-        self.semantic_plan = ws.build_plan(
+        plan = ws.build_plan(
             self.data, functions=self.functions, records=self.records,
             axis_declarations=self.axis_declarations,
             binding_regions=self.binding_regions, regions=self.regions,
             rank_n_erasures=self.rank_n_erasures,
         )
+        try:
+            physical, evidence = rnp.physicalize(self.data)
+        except rnp.RankNPhysicalizationError as exc:
+            raise wh.SurfaceError(str(exc)) from exc
+        if evidence:
+            self.data = physical
+            rnp.attach_semantic_plan(plan, evidence, int(physical["rank_n_product"]))
+        self.semantic_plan = plan
         return self.data
 
 def compile_surface(text: str, source: Path | None = None, *, auto_repair: bool = True):
@@ -535,7 +546,8 @@ def format_keywords(text: str, language: str) -> str:
 def _compile_native(root: Path, data: dict[str, Any], output: Path, executors: int, isa_limit: str | None = None) -> None:
     with tempfile.TemporaryDirectory(prefix="whex_core_") as td:
         core=Path(td)/"program.core.wh"; core.write_bytes(canonical_core_bytes(data))
-        cmd=[str(root/"build/topologyc"),str(core),"-o",str(output.resolve())]
+        native_compiler = root/"build/topologyc-rankn" if "rank_n_product" in data else root/"build/topologyc"
+        cmd=[str(native_compiler),str(core),"-o",str(output.resolve())]
         if executors != 1: cmd += ["--executors",str(executors)]
         if isa_limit is not None: cmd += ["--isa-limit",isa_limit]
         p=subprocess.run(cmd,cwd=root,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
