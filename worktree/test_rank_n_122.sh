@@ -88,8 +88,24 @@ if python3 surface/whex_surface.py plan "$TMP/periodic_rankn.whex" >/dev/null 2>
 fi
 echo 'RANK_N_UNPROVEN_LAYOUT_EXPLICIT_REJECTION=PASS'
 
-# Native execution. The user supplies logical n=4; runtime owns n*product points.
-python3 surface/whex_surface.py native tests/whex/rank2_native_122.whex -o "$TMP/r2" --executors 1 >/dev/null
+# Native execution is staged so a backend failure cannot hide whether product
+# coordinate recovery itself works before fused map/load composition is tested.
+if python3 surface/whex_surface.py native tests/whex/rank2_reduce_native_122.whex -o "$TMP/r2direct" --executors 1 >/dev/null; then
+  echo 'RANK2_DIRECT_REDUCTION_NATIVE_COMPILE=PASS'
+else
+  echo 'RANK2_DIRECT_REDUCTION_NATIVE_COMPILE=FAIL' >&2
+  exit 1
+fi
+r2direct=$($TMP/r2direct 4)
+[ "$r2direct" = 'checksum_bits=0x405e000000000000' ]
+echo 'RANK2_DIRECT_REDUCTION_NATIVE_REFERENCE=PASS'
+
+if python3 surface/whex_surface.py native tests/whex/rank2_native_122.whex -o "$TMP/r2" --executors 1 >/dev/null; then
+  echo 'RANK2_MAP_LOAD_NATIVE_COMPILE=PASS'
+else
+  echo 'RANK2_MAP_LOAD_NATIVE_COMPILE=FAIL' >&2
+  exit 1
+fi
 python3 surface/whex_surface.py native tests/whex/rank3_native_122.whex -o "$TMP/r3" --executors 1 >/dev/null
 python3 wheelchairc.py tests/wh_equivalence/rank2_native_122.wh -o "$TMP/r2wh" --executors 1 --semantic-plan "$TMP/r2wh.plan.json" >/dev/null
 r2=$($TMP/r2 4)
