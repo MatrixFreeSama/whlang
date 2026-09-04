@@ -1,5 +1,5 @@
-name: Benchmark Wheelchair Generic Product-Subtract Contraction
-# trigger: three-way same-host validation
+name: Benchmark Wheelchair Generic Vector Reduction Residency
+# trigger: four-way same-host validation
 on:
   push:
     branches: [main]
@@ -14,13 +14,13 @@ jobs:
         image: [ubuntu-22.04, ubuntu-24.04]
         slot: [1,2,3]
     runs-on: ${{ matrix.image }}
-    timeout-minutes: 45
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
         with:
           ref: bench-global-stiffness-1.2.3
           fetch-depth: 0
-      - name: Build experimental generic contraction lane
+      - name: Build experimental structural lanes
         id: isa
         shell: bash
         run: |
@@ -28,10 +28,10 @@ jobs:
           cd worktree
           python3 tools/apply_123.py
           sh build.sh
-          cp build/topologyc build/topologyc-product-subtract
+          cp build/topologyc build/topologyc-resident
           ./build/topologyc --probe | tee /tmp/probe.txt
           if grep -q 'AVX-512F: usable' /tmp/probe.txt; then echo 'qualified=true' >> "$GITHUB_OUTPUT"; else echo 'qualified=false' >> "$GITHUB_OUTPUT"; fi
-      - name: Compile baseline optimized and expert C
+      - name: Compile frozen product-only resident and expert C contestants
         if: steps.isa.outputs.qualified == 'true'
         shell: bash
         run: |
@@ -39,43 +39,57 @@ jobs:
           cd worktree
           as --64 compiler/tensor_frontend_x86_64.S -o build/tensor_frontend_baseline.o
           ld -nostdlib -static -z noexecstack build/topologyc_core.o build/tensor_frontend_baseline.o build/general_frontend.o build/runtime_blob.o build/general_runtime_blob.o -o build/topologyc-baseline
+          as --64 build/tensor_frontend_product_subtract.S -o build/tensor_frontend_product.o
+          ld -nostdlib -static -z noexecstack build/topologyc_core.o build/tensor_frontend_product.o build/general_frontend.o build/runtime_blob.o build/general_runtime_blob.o -o build/topologyc-product
           for q in 1 2 4; do
             cp build/topologyc-baseline build/topologyc
             ./whexc ../benchmarks/global_stiffness_123/stiffness.whex -o "build/global_stiffness_base_q${q}" --executors "$q" >/dev/null
-            cp build/topologyc-product-subtract build/topologyc
-            ./whexc ../benchmarks/global_stiffness_123/stiffness.whex -o "build/global_stiffness_opt_q${q}" --executors "$q" >/dev/null
+            cp build/topologyc-product build/topologyc
+            ./whexc ../benchmarks/global_stiffness_123/stiffness.whex -o "build/global_stiffness_product_q${q}" --executors "$q" >/dev/null
+            cp build/topologyc-resident build/topologyc
+            ./whexc ../benchmarks/global_stiffness_123/stiffness.whex -o "build/global_stiffness_resident_q${q}" --executors "$q" >/dev/null
           done
-          cp build/topologyc-product-subtract build/topologyc
+          cp build/topologyc-resident build/topologyc
           gcc -O3 -march=native -mtune=native -flto -ffast-math -pthread ../benchmarks/global_stiffness_123/Global_Stiffness_expert_C_matched.c -o build/global_stiffness_c
           gcc --version | head -1 | tee /tmp/gcc.txt
-      - name: Audit optimized generated RX
+      - name: Audit generated RX erasures
         if: steps.isa.outputs.qualified == 'true'
         shell: bash
         run: |
           set -euo pipefail
           cd worktree
-          sh tools/disassemble_generated.sh build/global_stiffness_opt_q1 > /tmp/wh-opt.dis 2>&1
-          sh tools/disassemble_generated.sh build/global_stiffness_base_q1 > /tmp/wh-base.dis 2>&1
-          count_opt(){ grep -Eic "$1" /tmp/wh-opt.dis || true; }
-          count_base(){ grep -Eic "$1" /tmp/wh-base.dis || true; }
+          for k in base product resident; do sh tools/disassemble_generated.sh "build/global_stiffness_${k}_q1" > "/tmp/${k}.dis" 2>&1; done
+          count(){ grep -Eic "$2" "/tmp/$1.dis" || true; }
           {
-            printf 'BASE_VFNMADD_COUNT=%s\n' "$(count_base vfnmadd)"
-            printf 'OPT_VFNMADD_COUNT=%s\n' "$(count_opt vfnmadd)"
-            printf 'BASE_VMULPD_COUNT=%s\n' "$(count_base vmulpd)"
-            printf 'OPT_VMULPD_COUNT=%s\n' "$(count_opt vmulpd)"
-            printf 'BASE_VSUBPD_COUNT=%s\n' "$(count_base vsubpd)"
-            printf 'OPT_VSUBPD_COUNT=%s\n' "$(count_opt vsubpd)"
-            printf 'OPT_GENERATED_CALLS=%s\n' "$(count_opt call)"
+            printf 'BASE_VFNMADD=%s\n' "$(count base vfnmadd)"
+            printf 'PRODUCT_VFNMADD=%s\n' "$(count product vfnmadd)"
+            printf 'RESIDENT_VFNMADD=%s\n' "$(count resident vfnmadd)"
+            printf 'BASE_VMULPD=%s\n' "$(count base vmulpd)"
+            printf 'PRODUCT_VMULPD=%s\n' "$(count product vmulpd)"
+            printf 'RESIDENT_VMULPD=%s\n' "$(count resident vmulpd)"
+            printf 'BASE_VSUBPD=%s\n' "$(count base vsubpd)"
+            printf 'PRODUCT_VSUBPD=%s\n' "$(count product vsubpd)"
+            printf 'RESIDENT_VSUBPD=%s\n' "$(count resident vsubpd)"
+            printf 'BASE_VEXTRACTF64X4=%s\n' "$(count base vextractf64x4)"
+            printf 'PRODUCT_VEXTRACTF64X4=%s\n' "$(count product vextractf64x4)"
+            printf 'RESIDENT_VEXTRACTF64X4=%s\n' "$(count resident vextractf64x4)"
+            printf 'BASE_VADDPD=%s\n' "$(count base vaddpd)"
+            printf 'PRODUCT_VADDPD=%s\n' "$(count product vaddpd)"
+            printf 'RESIDENT_VADDPD=%s\n' "$(count resident vaddpd)"
+            printf 'RESIDENT_GENERATED_CALLS=%s\n' "$(count resident call)"
           } | tee /tmp/audit.txt
-          test "$(count_base vfnmadd)" -eq 0
-          test "$(count_opt vfnmadd)" -gt 0
-          test "$(count_opt call)" -eq 0
-      - name: Three-way 21-run same-host benchmark
+          test "$(count base vfnmadd)" -eq 0
+          test "$(count product vfnmadd)" -gt 0
+          test "$(count resident vfnmadd)" -gt 0
+          test "$(count resident call)" -eq 0
+          test "$(count resident vextractf64x4)" -lt "$(count product vextractf64x4)"
+          test "$(count resident vaddpd)" -lt "$(count product vaddpd)"
+      - name: Four-way 21-run same-host benchmark
         if: steps.isa.outputs.qualified == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          python3 benchmarks/global_stiffness_123/bench_threeway.py | tee /tmp/result.txt
+          python3 benchmarks/global_stiffness_123/bench_fourway.py | tee /tmp/result.txt
       - name: Preserve Newton native peak bytes
         if: steps.isa.outputs.qualified == 'true'
         shell: bash
@@ -85,12 +99,12 @@ jobs:
           for q in 1 2 4; do
             cp build/topologyc-baseline build/topologyc
             ./whexc tests/whex/newton_jv_mature_regression.whex -o "build/newton_base_q${q}" --executors "$q" >/dev/null
-            cp build/topologyc-product-subtract build/topologyc
-            ./whexc tests/whex/newton_jv_mature_regression.whex -o "build/newton_opt_q${q}" --executors "$q" >/dev/null
-            cmp "build/newton_base_q${q}" "build/newton_opt_q${q}"
+            cp build/topologyc-resident build/topologyc
+            ./whexc tests/whex/newton_jv_mature_regression.whex -o "build/newton_resident_q${q}" --executors "$q" >/dev/null
+            cmp "build/newton_base_q${q}" "build/newton_resident_q${q}"
           done
-          cp build/topologyc-product-subtract build/topologyc
-          echo 'NEWTON_JV_NATIVE_BYTE_IDENTITY_AFTER_PRODUCT_SUBTRACT=PASS'
+          cp build/topologyc-resident build/topologyc
+          echo 'NEWTON_JV_NATIVE_BYTE_IDENTITY_AFTER_VECTOR_RESIDENCY=PASS'
       - name: Regress mature Rank-N and SCE
         if: steps.isa.outputs.qualified == 'true'
         shell: bash
@@ -101,11 +115,11 @@ jobs:
           grep -q '^WHEELCHAIR_RANK_N_1_2_2=PASS$' /tmp/rankn.txt
           sh test_sparse_causal_expansion_123.sh | tee /tmp/sce.txt
           grep -q '^WHEELCHAIR_SPARSE_CAUSAL_EXPANSION_1_2_3=PASS$' /tmp/sce.txt
-          echo 'PRODUCT_SUBTRACT_OLD_TECHNICAL_PEAKS=PASS'
+          echo 'VECTOR_REDUCTION_RESIDENCY_OLD_TECHNICAL_PEAKS=PASS'
       - uses: actions/upload-artifact@v4
         if: steps.isa.outputs.qualified == 'true'
         with:
-          name: product-subtract-threeway-${{ matrix.image }}-${{ matrix.slot }}
+          name: vector-reduction-residency-${{ matrix.image }}-${{ matrix.slot }}
           path: |
             /tmp/result.txt
             /tmp/audit.txt
