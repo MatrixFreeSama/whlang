@@ -14,6 +14,14 @@ if grep -Eini '\b(newton|stiffness|fem|cfd|poisson|kkt|fluid|solid|fsi|navier|el
 fi
 
 sh build.sh >/dev/null
+grep -q 'stmxcsr dword ptr \[rsp\]' build/tensor_frontend_shared_base_125.S
+grep -q 'mov dword ptr \[rsp+4\],0x1f80' build/tensor_frontend_shared_base_125.S
+grep -q 'ldmxcsr dword ptr \[rsp+4\]' build/tensor_frontend_shared_base_125.S
+grep -q 'ldmxcsr dword ptr \[rsp\]' build/tensor_frontend_shared_base_125.S
+grep -q 'rounded normal binary64 reciprocal bits' build/tensor_frontend_shared_base_125.S
+echo 'SHARED_DEPENDENCY_EPISODE_AOT_MXCSR_CANONICAL=PASS'
+echo 'SHARED_DEPENDENCY_EPISODE_SUBNORMAL_RECIPROCAL_REJECT=PASS'
+
 as --64 build/tensor_frontend_product_subtract_residency.S -o build/tensor_frontend_124_exact.o
 ld -nostdlib -static -z noexecstack \
   build/topologyc_core.o build/tensor_frontend_124_exact.o build/general_frontend.o \
@@ -67,9 +75,16 @@ done
 echo 'NEWTON_JV_NATIVE_BYTE_IDENTITY_ON_1_2_5=PASS'
 echo 'GLOBAL_STIFFNESS_NATIVE_BYTE_IDENTITY_ON_1_2_5=PASS'
 
-./wheelchairc ../benchmarks/fluid_solid_coupling_124/fsi_coupled.wh -o build/sde125_wh --executors 1 >/tmp/sde125_wh.json
-./whexc ../benchmarks/fluid_solid_coupling_124/fsi_coupled.whex -o build/sde125_whex --executors 1 >/tmp/sde125_whex.json
+./wheelchairc ../benchmarks/fluid_solid_coupling_124/fsi_coupled.wh -o build/sde125_wh --executors 1 --semantic-plan /tmp/sde125_wh.plan.json >/tmp/sde125_wh.json
+./whexc ../benchmarks/fluid_solid_coupling_124/fsi_coupled.whex -o build/sde125_whex --executors 1 --semantic-plan /tmp/sde125_whex.plan.json >/tmp/sde125_whex.json
 cmp build/sde125_wh build/sde125_whex
+python3 - <<'PY'
+import json
+w=json.load(open('/tmp/sde125_wh.plan.json'))['shared_dependency_episode']
+x=json.load(open('/tmp/sde125_whex.plan.json'))['shared_dependency_episode']
+assert w==x,(w,x)
+print('WH_WHEX_SHARED_DEPENDENCY_PLAN_EQUIVALENCE=PASS')
+PY
 [ "$(build/sde125_wh 10000000)" = 'checksum_bits=0x4130e896f42e1dd6' ]
 echo 'WH_WHEX_SHARED_DEPENDENCY_NATIVE_BYTE_EQUIVALENCE=PASS'
 echo 'SHARED_DEPENDENCY_NUMERIC_REFERENCE=PASS'
