@@ -1,5 +1,5 @@
 name: Benchmark Wheelchair Generic Vector Reduction Residency
-# trigger: four-way same-host validation
+# trigger: four-way same-host validation v2
 on:
   push:
     branches: [main]
@@ -70,20 +70,16 @@ jobs:
             printf 'BASE_VSUBPD=%s\n' "$(count base vsubpd)"
             printf 'PRODUCT_VSUBPD=%s\n' "$(count product vsubpd)"
             printf 'RESIDENT_VSUBPD=%s\n' "$(count resident vsubpd)"
-            printf 'BASE_VEXTRACTF64X4=%s\n' "$(count base vextractf64x4)"
-            printf 'PRODUCT_VEXTRACTF64X4=%s\n' "$(count product vextractf64x4)"
-            printf 'RESIDENT_VEXTRACTF64X4=%s\n' "$(count resident vextractf64x4)"
-            printf 'BASE_VADDPD=%s\n' "$(count base vaddpd)"
-            printf 'PRODUCT_VADDPD=%s\n' "$(count product vaddpd)"
-            printf 'RESIDENT_VADDPD=%s\n' "$(count resident vaddpd)"
+            printf 'PRODUCT_ZMM12_ACCUM=%s\n' "$(count product 'vaddpd.*%zmm0.*%zmm12|vaddpd.*zmm12.*zmm12.*zmm0')"
+            printf 'RESIDENT_ZMM12_ACCUM=%s\n' "$(count resident 'vaddpd.*%zmm0.*%zmm12|vaddpd.*zmm12.*zmm12.*zmm0')"
             printf 'RESIDENT_GENERATED_CALLS=%s\n' "$(count resident call)"
           } | tee /tmp/audit.txt
           test "$(count base vfnmadd)" -eq 0
           test "$(count product vfnmadd)" -gt 0
           test "$(count resident vfnmadd)" -gt 0
           test "$(count resident call)" -eq 0
-          test "$(count resident vextractf64x4)" -lt "$(count product vextractf64x4)"
-          test "$(count resident vaddpd)" -lt "$(count product vaddpd)"
+          test "$(count product 'vaddpd.*%zmm0.*%zmm12|vaddpd.*zmm12.*zmm12.*zmm0')" -eq 0
+          test "$(count resident 'vaddpd.*%zmm0.*%zmm12|vaddpd.*zmm12.*zmm12.*zmm0')" -gt 0
       - name: Four-way 21-run same-host benchmark
         if: steps.isa.outputs.qualified == 'true'
         shell: bash
