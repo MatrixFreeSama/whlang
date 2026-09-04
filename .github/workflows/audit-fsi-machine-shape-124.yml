@@ -8,6 +8,10 @@ on:
 
 jobs:
   audit:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1,2,3,4,5,6,7,8]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -16,20 +20,34 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Build and compile
+      - name: Build and qualify
+        id: probe
         shell: bash
         run: |
           set -euo pipefail
           cd worktree
           python3 tools/apply_123.py
           sh build.sh
+          ./build/topologyc --probe | tee /tmp/probe.txt
+          if grep -q 'AVX-512F: usable' /tmp/probe.txt; then
+            echo 'qualified=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'qualified=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Compile audit binaries
+        if: steps.probe.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd worktree
           cp build/topologyc /tmp/topologyc-124
           ./whexc ../benchmarks/fluid_solid_coupling_124/fsi_decoupled.whex -o build/fsi_dec_wh --executors 1 >/dev/null
           cp /tmp/topologyc-124 build/topologyc
           ./whexc ../benchmarks/fluid_solid_coupling_124/fsi_coupled.whex -o build/fsi_cpl_wh --executors 1 >/dev/null
-          gcc -O3 -mavx512f -mfma -flto -ffast-math -mprefer-vector-width=512 -pthread -DCOUPLED_MODE=0 ../benchmarks/fluid_solid_coupling_124/Fluid_Solid_expert_C_matched.c -o build/fsi_dec_c
-          gcc -O3 -mavx512f -mfma -flto -ffast-math -mprefer-vector-width=512 -pthread -DCOUPLED_MODE=1 ../benchmarks/fluid_solid_coupling_124/Fluid_Solid_expert_C_matched.c -o build/fsi_cpl_c
+          gcc -O3 -march=native -mtune=native -flto -ffast-math -mprefer-vector-width=512 -pthread -DCOUPLED_MODE=0 ../benchmarks/fluid_solid_coupling_124/Fluid_Solid_expert_C_matched.c -o build/fsi_dec_c
+          gcc -O3 -march=native -mtune=native -flto -ffast-math -mprefer-vector-width=512 -pthread -DCOUPLED_MODE=1 ../benchmarks/fluid_solid_coupling_124/Fluid_Solid_expert_C_matched.c -o build/fsi_cpl_c
       - name: Audit instruction shape
+        if: steps.probe.outputs.qualified == 'true'
         shell: bash
         run: |
           cd worktree
@@ -49,7 +67,8 @@ jobs:
                   print(f'  {pat.upper()}={sum(1 for x in ins if x.startswith(pat))}')
           PY
       - uses: actions/upload-artifact@v4
+        if: steps.probe.outputs.qualified == 'true'
         with:
-          name: fsi-machine-shape
+          name: fsi-machine-shape-${{ matrix.slot }}
           path: /tmp/fsi_machine_shape.txt
           if-no-files-found: error
