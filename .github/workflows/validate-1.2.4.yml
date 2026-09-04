@@ -1,0 +1,143 @@
+name: Validate Wheelchair 1.2.4 Generic Native
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/validate-1.2.4.yml']
+permissions:
+  contents: read
+jobs:
+  validate:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1,2,3,4,5,6,7,8,9,10,11,12]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: build-1.2.4
+          fetch-depth: 0
+      - name: Build and qualify AVX-512 authority host
+        id: isa
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/authority/${{ matrix.slot }}
+          {
+            echo "SLOT=${{ matrix.slot }}"
+            lscpu | grep -E 'Vendor ID|Model name|CPU family|^Model:|Socket|Thread|Core' || true
+          } | tee /tmp/authority/${{ matrix.slot }}/cpu.txt
+          cd worktree
+          python3 tools/apply_123.py
+          sh build.sh
+          ./build/topologyc --probe | tee /tmp/authority/${{ matrix.slot }}/probe.txt
+          if grep -q 'AVX-512F: usable' /tmp/authority/${{ matrix.slot }}/probe.txt; then
+            echo 'qualified=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'qualified=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Run complete 1.2.4 authority
+        if: steps.isa.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd worktree
+          sh test_complete_124.sh | tee /tmp/authority/${{ matrix.slot }}/release-gates.txt
+          grep -q '^WHEELCHAIR_1_2_4_COMPLETE=PASS$' /tmp/authority/${{ matrix.slot }}/release-gates.txt
+      - name: Same-host baseline and expert-C benchmark
+        if: steps.isa.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd worktree
+          cp build/topologyc build/topologyc-optimized-124
+          as --64 compiler/tensor_frontend_x86_64.S -o build/tensor_frontend_baseline_perf.o
+          ld -nostdlib -static -z noexecstack \
+            build/topologyc_core.o build/tensor_frontend_baseline_perf.o build/general_frontend.o \
+            build/runtime_blob.o build/general_runtime_blob.o -o build/topologyc-baseline-perf
+          for q in 1 2 4; do
+            cp build/topologyc-baseline-perf build/topologyc
+            ./whexc ../benchmarks/global_operator_124/stiffness.whex -o "build/perf_base_q${q}" --executors "$q" >/dev/null
+            cp build/topologyc-optimized-124 build/topologyc
+            ./whexc ../benchmarks/global_operator_124/stiffness.whex -o "build/perf_opt_q${q}" --executors "$q" >/dev/null
+          done
+          cp build/topologyc-optimized-124 build/topologyc
+          gcc -O3 -march=native -mtune=native -flto -ffast-math -mprefer-vector-width=512 -pthread \
+            ../benchmarks/global_operator_124/Global_Stiffness_expert_C_matched.c -o build/perf_c512
+          gcc --version | head -1 | tee /tmp/authority/${{ matrix.slot }}/gcc.txt
+          python3 - <<'PY' | tee /tmp/authority/${{ matrix.slot }}/benchmark.txt
+          import math, os, random, statistics, struct, subprocess, time
+          from pathlib import Path
+          B=Path('build'); RUNS=21; WARM=3; TOL=1e-10
+          def cpus(q): return ','.join(map(str, sorted(os.sched_getaffinity(0))[:q]))
+          def run(cmd): return subprocess.check_output(cmd, text=True).strip()
+          def value(out):
+              h=out.split('0x',1)[1]
+              return struct.unpack('>d', bytes.fromhex(h))[0]
+          def wh(kind,n,q): return ['taskset','-c',cpus(q),str(B/f'perf_{kind}_q{q}'),str(n)]
+          def cc(n,q): return ['taskset','-c',cpus(q),str(B/'perf_c512'),str(n),str(q)]
+          rng=random.Random(0x124C0DE)
+          ratios=[]
+          for n in (10_000_000,100_000_000):
+              for q in (1,2,4):
+                  cmds={'BASE':wh('base',n,q),'OPT':wh('opt',n,q),'C512':cc(n,q)}
+                  first={k:run(v) for k,v in cmds.items()}
+                  vals=[value(x) for x in first.values()]
+                  scale=max(max(abs(v) for v in vals),1.0)
+                  spread=(max(vals)-min(vals))/scale
+                  if spread>TOL: raise SystemExit(f'numeric mismatch n={n} q={q} spread={spread} {first}')
+                  for c in cmds.values():
+                      for _ in range(WARM): run(c)
+                  s={k:[] for k in cmds}
+                  for _ in range(RUNS):
+                      order=list(cmds); rng.shuffle(order)
+                      for k in order:
+                          t=time.perf_counter_ns(); out=run(cmds[k]); dt=(time.perf_counter_ns()-t)/1e6
+                          if abs(value(out)-value(first[k]))/max(abs(value(first[k])),1.0)>TOL:
+                              raise SystemExit('numeric drift')
+                          s[k].append(dt)
+                  m={k:statistics.median(v) for k,v in s.items()}
+                  ratio=m['BASE']/m['OPT']; ratios.append(ratio)
+                  print(f'GENERIC124 N={n} Q={q} BASE={m["BASE"]:.6f} OPT={m["OPT"]:.6f} C512={m["C512"]:.6f} BASE/OPT={ratio:.4f}x C512/OPT={m["C512"]/m["OPT"]:.4f}x spread={spread:.3e}')
+          med=statistics.median(ratios)
+          geo=math.exp(sum(math.log(x) for x in ratios)/len(ratios))
+          print(f'GENERIC124_MEDIAN_BASELINE_SPEEDUP={med:.4f}x')
+          print(f'GENERIC124_GEOMEAN_BASELINE_SPEEDUP={geo:.4f}x')
+          if med < 1.05 or geo < 1.05:
+              raise SystemExit('accepted generic optimizer failed same-host >=5% aggregate speedup gate')
+          print('GENERIC124_SAME_HOST_PERFORMANCE=PASS')
+          PY
+      - name: Seal authority artifact
+        if: steps.isa.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q '^GENERIC124_SAME_HOST_PERFORMANCE=PASS$' /tmp/authority/${{ matrix.slot }}/benchmark.txt
+          printf '%s\n' 'WHEELCHAIR_1_2_4_AUTHORITY=PASS' > /tmp/authority/${{ matrix.slot }}/seal.txt
+      - uses: actions/upload-artifact@v4
+        if: steps.isa.outputs.qualified == 'true'
+        with:
+          name: authority-1.2.4-${{ matrix.slot }}
+          path: /tmp/authority/${{ matrix.slot }}
+          if-no-files-found: error
+  quorum:
+    if: always()
+    needs: [validate]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: authority-1.2.4-*
+          path: /tmp/all-authority
+          merge-multiple: false
+      - name: Require real authority and no qualified failure
+        shell: bash
+        run: |
+          set -euo pipefail
+          test '${{ needs.validate.result }}' = 'success'
+          count=$(find /tmp/all-authority -type f -name seal.txt -print | wc -l)
+          test "$count" -ge 1
+          grep -Rqx 'WHEELCHAIR_1_2_4_AUTHORITY=PASS' /tmp/all-authority
+          echo "WHEELCHAIR_1_2_4_AUTHORITY_COUNT=$count"
+          echo 'WHEELCHAIR_1_2_4_QUORUM=PASS'
