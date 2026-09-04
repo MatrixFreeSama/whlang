@@ -4,6 +4,7 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$ROOT"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT INT TERM
+# Wheelchair 1.2.2 final Rank-N validation entrypoint.
 
 # Hard peak-protection law: the complete 1.2.1 Rank-1 native source triplet is
 # byte-frozen. Rank-N is a separate derived lane and cannot consume these peaks.
