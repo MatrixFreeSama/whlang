@@ -77,13 +77,14 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           import zipfile, hashlib
-          root=Path('stage/Wheelchair-1.2.5')
+          stage=Path('stage')
+          root=stage/'Wheelchair-1.2.5'
           out=Path('Wheelchair-1.2.5.zip')
           epoch=(2026,9,5,0,0,0)
           with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
               for p in sorted(root.rglob('*')):
                   if not p.is_file(): continue
-                  arc=p.as_posix()
+                  arc=p.relative_to(stage).as_posix()
                   info=zipfile.ZipInfo(arc,epoch)
                   info.compress_type=zipfile.ZIP_DEFLATED
                   info.external_attr=(0o100644 << 16)
@@ -94,6 +95,8 @@ jobs:
           print('WHEELCHAIR_1_2_5_ZIP_SHA256='+h)
           with zipfile.ZipFile(out) as z:
               names=z.namelist()
+              tops=sorted({n.split('/',1)[0] for n in names if n})
+              assert tops == ['Wheelchair-1.2.5']
               assert 'Wheelchair-1.2.5/VERSION' in names
               assert 'Wheelchair-1.2.5/RELEASE_PROOF_1_2_5.md' in names
               assert 'Wheelchair-1.2.5/RELEASE_GATES_1_2_5.txt' in names
