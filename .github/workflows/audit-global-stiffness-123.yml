@@ -10,8 +10,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [ubuntu-22.04, ubuntu-24.04]
-        slot: [1,2,3]
+        image: [ubuntu-24.04]
+        slot: [1,2,3,4,5,6,7,8,9,10,11,12]
     runs-on: ${{ matrix.image }}
     timeout-minutes: 55
     steps:
