@@ -23,6 +23,10 @@ src=src.replace('./test_scheduler.sh','sh test_scheduler_122.sh')
 # 1.1.0's non-erasable Rank-N rejection was a physical Rank-1 ceiling, not a
 # permanent semantic invariant. 1.2.2 replaces it with positive native proof.
 src=src.replace('./test_whex_semantic_parallel_121.sh','sh test_whex_semantic_parallel_122.sh')
+# 1.2.1 froze the entire WHEX routing-surface source because it was a physical-
+# only release. 1.2.2 intentionally extends that surface for Rank-N, so preserve
+# the old canonical/native corpus instead of imposing the obsolete whole-file SHA.
+src=src.replace('./test_wh_equivalence_121.sh','sh test_wh_equivalence_122.sh')
 src=src.replace("echo 'WHEELCHAIR_1_1_0_SEMANTIC_INVARIANTS_ON_1_2_1=PASS'",
                 "echo 'WHEELCHAIR_1_1_0_SEMANTIC_INVARIANTS_ON_1_2_2=PASS'")
 src=src.replace("echo 'WHEELCHAIR_1_2_0_SURFACE_INVARIANTS_ON_1_2_1=PASS'",
