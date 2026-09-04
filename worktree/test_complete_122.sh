@@ -11,6 +11,9 @@ mkdir -p build/complete122
 python3 - <<'PY'
 from pathlib import Path
 src=Path('test_complete.sh').read_text(encoding='utf-8')
+# This generated script lives under build/, therefore preserve the caller's
+# release-tree root instead of deriving ROOT from the temporary script path.
+src=src.replace('ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\ncd "$ROOT"', 'ROOT=$(pwd)\ncd "$ROOT"', 1)
 src=src.replace('./test_whex_semantic_parallel_121.sh','./test_whex_semantic_parallel_122.sh')
 src=src.replace("echo 'WHEELCHAIR_1_1_0_SEMANTIC_INVARIANTS_ON_1_2_1=PASS'",
                 "echo 'WHEELCHAIR_1_1_0_SEMANTIC_INVARIANTS_ON_1_2_2=PASS'")
