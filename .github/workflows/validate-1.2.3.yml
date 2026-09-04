@@ -1,5 +1,5 @@
 name: Validate Wheelchair 1.2.3 Sparse Causal Expansion
-# authority-trigger: 3-final-head
+# authority-trigger: 4-root-temp-audit
 
 on:
   push:
