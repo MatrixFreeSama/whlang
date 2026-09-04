@@ -7,7 +7,7 @@ permissions:
 jobs:
   validate:
     if: github.actor != 'github-actions[bot]'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
@@ -21,17 +21,14 @@ jobs:
         run: |
           cd worktree
           sh build.sh
+      - name: Report physical ISA
+        run: |
+          cd worktree
+          ./build/topologyc --probe
+          ./build/topologyc --isa-capabilities
       - name: Run Rank-N and technical-peak gates
         shell: bash
         run: |
           set -euo pipefail
           cd worktree
           sh test_rank_n_122.sh | tee /tmp/rankn122.log
-      - name: Commit validated source transformation
-        run: |
-          git config user.name 'wheelchair-release-bot'
-          git config user.email 'wheelchair-release-bot@users.noreply.github.com'
-          git add worktree/surface/whex_surface.py worktree/surface/wh_structural.py worktree/wheelchairc.py worktree/build.sh
-          if git diff --cached --quiet; then exit 0; fi
-          git commit -m 'Wheelchair 1.2.2: native Rank-N product realization with peak isolation'
-          git push origin HEAD:build-1.2.2
