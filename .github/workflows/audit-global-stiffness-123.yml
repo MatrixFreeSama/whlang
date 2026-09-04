@@ -1,4 +1,4 @@
-name: Validate Wheelchair Full-Block Tail Gate Fusion
+name: Validate Wheelchair Static Fused-Block Unroll
 on:
   push:
     branches: [main]
@@ -27,7 +27,7 @@ jobs:
           cd worktree
           python3 tools/apply_123.py
           sh build.sh
-          cp build/topologyc build/topologyc-tailgate
+          cp build/topologyc build/topologyc-unroll2
           ./build/topologyc --probe | tee /tmp/probe.txt
           if grep -q 'AVX-512F: usable' /tmp/probe.txt; then echo 'qualified=true' >> "$GITHUB_OUTPUT"; else echo 'qualified=false' >> "$GITHUB_OUTPUT"; fi
       - name: Build comparison lanes
@@ -45,56 +45,39 @@ jobs:
             ./whexc ../benchmarks/global_stiffness_123/stiffness.whex -o "build/stiff_base_q${q}" --executors "$q" >/dev/null
             cp build/topologyc-resident build/topologyc
             ./whexc ../benchmarks/global_stiffness_123/stiffness.whex -o "build/stiff_resident_q${q}" --executors "$q" >/dev/null
-            cp build/topologyc-tailgate build/topologyc
-            ./whexc ../benchmarks/global_stiffness_123/stiffness.whex -o "build/stiff_tailgate_q${q}" --executors "$q" >/dev/null
+            cp build/topologyc-unroll2 build/topologyc
+            ./whexc ../benchmarks/global_stiffness_123/stiffness.whex -o "build/stiff_unroll2_q${q}" --executors "$q" >/dev/null
           done
-          cp build/topologyc-tailgate build/topologyc
+          cp build/topologyc-unroll2 build/topologyc
           gcc -O3 -march=native -mtune=native -flto -ffast-math -mprefer-vector-width=512 -pthread ../benchmarks/global_stiffness_123/Global_Stiffness_expert_C_matched.c -o build/stiff_c512
           gcc --version | head -1 | tee /tmp/gcc.txt
-      - name: Audit hot-loop compare erasure
+      - name: Audit static unroll generated RX
         if: steps.isa.outputs.qualified == 'true'
         shell: bash
         run: |
           set -euo pipefail
           cd worktree
-          sh tools/disassemble_generated.sh build/stiff_resident_q1 > /tmp/resident.dis 2>&1
-          sh tools/disassemble_generated.sh build/stiff_tailgate_q1 > /tmp/tailgate.dis 2>&1
+          sh tools/disassemble_generated.sh build/stiff_unroll2_q1 > /tmp/unroll2.dis 2>&1
           python3 - <<'PY' | tee /tmp/audit.txt
           from pathlib import Path
           import re
-
-          def instructions(path):
-              out=[]
-              for line in Path(path).read_text(errors='replace').splitlines():
-                  m=re.match(r'^\s*[0-9a-f]+:\s+(?:[0-9a-f]{2}\s+)+\s*(.*)$', line.lower())
-                  if m:
-                      asm=m.group(1).strip()
-                      if asm:
-                          out.append(asm)
-              return out
-
-          def accum_index(v):
-              for i,s in enumerate(v):
-                  if s.startswith('vaddpd') and 'zmm12' in s and 'zmm0' in s:
-                      return i
-              raise SystemExit('resident zmm12 accumulation missing')
-
-          resident=instructions('/tmp/resident.dis')
-          tailgate=instructions('/tmp/tailgate.dis')
-          ri=accum_index(resident)
-          ti=accum_index(tailgate)
-          rnext=resident[ri+1:ri+3]
-          tnext=tailgate[ti+1:ti+3]
-          print('RESIDENT_AFTER_ACCUM=' + ' | '.join(rnext))
-          print('TAILGATE_AFTER_ACCUM=' + ' | '.join(tnext))
-          assert rnext and rnext[0].startswith('cmp') and 'r8' in rnext[0]
-          assert len(rnext)>1 and rnext[1].startswith('jbe')
-          assert tnext and tnext[0].startswith('jbe')
-          assert not tnext[0].startswith('cmp')
-          assert any(s.startswith('cmp') and 'r8' in s and ('0x8' in s or ',8' in s) for s in tailgate[:ti])
-          assert not any(s.startswith('call') for s in tailgate)
-          print('FULL_BLOCK_TAIL_GATE_DYNAMIC_CMP_ERASURE=PASS')
-          print('TAIL_GATE_GENERATED_CALL_EDGES=0')
+          s=Path('/tmp/unroll2.dis').read_text(errors='replace').lower()
+          def count(p): return len(re.findall(p,s))
+          a0=count(r'vaddpd[^\n]*(?:zmm12[^\n]*zmm0|zmm0[^\n]*zmm12)')
+          a1=count(r'vaddpd[^\n]*(?:zmm14[^\n]*zmm0|zmm0[^\n]*zmm14)')
+          bulk16=count(r'cmp\s+r8,0x10|cmp\s+r8,16')
+          carrier_dispatch=count(r'test\s+sil,0x8|test\s+sil,8')
+          calls=count(r'\bcall\b')
+          print(f'UNROLL2_ZMM12_ACCUM={a0}')
+          print(f'UNROLL2_ZMM14_ACCUM={a1}')
+          print(f'UNROLL2_BULK16_GATE={bulk16}')
+          print(f'UNROLL2_RUNTIME_CARRIER_DISPATCH={carrier_dispatch}')
+          print(f'UNROLL2_GENERATED_CALL_EDGES={calls}')
+          assert a0>0 and a1>0
+          assert bulk16>0
+          assert carrier_dispatch==0
+          assert calls==0
+          print('STATIC_FUSED_BLOCK_MACHINE_SHAPE=PASS')
           PY
       - name: Four-way same-host benchmark
         if: steps.isa.outputs.qualified == 'true'
@@ -102,29 +85,39 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY' | tee /tmp/result.txt
-          import os,random,statistics,subprocess,time
+          import os,random,statistics,subprocess,time,struct
           from pathlib import Path
-          B=Path('worktree/build'); RUNS=21; WARM=3
+          B=Path('worktree/build'); RUNS=21; WARM=3; TOL=1e-10
           def cs(q): return ','.join(map(str,sorted(os.sched_getaffinity(0))[:q]))
           def run(c): return subprocess.check_output(c,text=True).strip()
+          def val(out):
+              h=out.split('0x',1)[1]
+              return struct.unpack('>d',bytes.fromhex(h))[0]
+          def close(vs):
+              scale=max(max(abs(v) for v in vs),1.0)
+              return (max(vs)-min(vs))/scale <= TOL
           def wh(k,n,q): return ['taskset','-c',cs(q),str(B/f'stiff_{k}_q{q}'),str(n)]
           def cc(n,q): return ['taskset','-c',cs(q),str(B/'stiff_c512'),str(n),str(q)]
-          rng=random.Random(0xF011B10C)
+          rng=random.Random(0x2F05EDB10C)
           for n in (10_000_000,100_000_000):
             for q in (1,2,4):
-              cmds={'BASE':wh('base',n,q),'RESIDENT':wh('resident',n,q),'TAILGATE':wh('tailgate',n,q),'C512':cc(n,q)}
+              cmds={'BASE':wh('base',n,q),'RESIDENT':wh('resident',n,q),'UNROLL2':wh('unroll2',n,q),'C512':cc(n,q)}
               out={k:run(v) for k,v in cmds.items()}
-              if len(set(out.values())) != 1: raise SystemExit(f'checksum mismatch n={n} q={q} {out}')
+              values=[val(x) for x in out.values()]
+              if not close(values): raise SystemExit(f'checksum mismatch n={n} q={q} {out}')
               for c in cmds.values():
                 for _ in range(WARM): run(c)
-              s={k:[] for k in cmds}
+              samples={k:[] for k in cmds}
               for _ in range(RUNS):
                 order=list(cmds); rng.shuffle(order)
                 for k in order:
-                  t=time.perf_counter_ns(); run(cmds[k]); s[k].append((time.perf_counter_ns()-t)/1e6)
-              m={k:statistics.median(v) for k,v in s.items()}
-              print(f'TAILGATE N={n} Q={q} BASE={m["BASE"]:.6f} RES={m["RESIDENT"]:.6f} TAIL={m["TAILGATE"]:.6f} C512={m["C512"]:.6f} RES/TAIL={m["RESIDENT"]/m["TAILGATE"]:.4f}x C512/TAIL={m["C512"]/m["TAILGATE"]:.4f}x')
-          print('TAIL_GATE_FOURWAY_REFERENCE=PASS')
+                  t=time.perf_counter_ns(); o=run(cmds[k]); dt=(time.perf_counter_ns()-t)/1e6
+                  if abs(val(o)-val(out[k]))/max(abs(val(out[k])),1.0)>TOL: raise SystemExit('numeric drift')
+                  samples[k].append(dt)
+              m={k:statistics.median(v) for k,v in samples.items()}
+              spread=(max(values)-min(values))/max(max(abs(v) for v in values),1.0)
+              print(f'UNROLL2 N={n} Q={q} BASE={m["BASE"]:.6f} RES={m["RESIDENT"]:.6f} U2={m["UNROLL2"]:.6f} C512={m["C512"]:.6f} BASE/U2={m["BASE"]/m["UNROLL2"]:.4f}x RES/U2={m["RESIDENT"]/m["UNROLL2"]:.4f}x C512/U2={m["C512"]/m["UNROLL2"]:.4f}x spread={spread:.3e}')
+          print('STATIC_FUSED_BLOCK_FOURWAY_REFERENCE=PASS')
           PY
       - name: Preserve Newton bytes and mature gates
         if: steps.isa.outputs.qualified == 'true'
@@ -135,12 +128,12 @@ jobs:
           for q in 1 2 4; do
             cp build/topologyc-baseline build/topologyc
             ./whexc tests/whex/newton_jv_mature_regression.whex -o "build/newton_base_q${q}" --executors "$q" >/dev/null
-            cp build/topologyc-tailgate build/topologyc
-            ./whexc tests/whex/newton_jv_mature_regression.whex -o "build/newton_tail_q${q}" --executors "$q" >/dev/null
-            cmp "build/newton_base_q${q}" "build/newton_tail_q${q}"
+            cp build/topologyc-unroll2 build/topologyc
+            ./whexc tests/whex/newton_jv_mature_regression.whex -o "build/newton_u2_q${q}" --executors "$q" >/dev/null
+            cmp "build/newton_base_q${q}" "build/newton_u2_q${q}"
           done
-          cp build/topologyc-tailgate build/topologyc
-          echo 'NEWTON_JV_NATIVE_BYTE_IDENTITY_AFTER_TAIL_GATE=PASS'
+          cp build/topologyc-unroll2 build/topologyc
+          echo 'NEWTON_JV_NATIVE_BYTE_IDENTITY_AFTER_STATIC_UNROLL=PASS'
           sh test_rank_n_122.sh | tee /tmp/rankn.txt
           grep -q '^WHEELCHAIR_RANK_N_1_2_2=PASS$' /tmp/rankn.txt
           sh test_sparse_causal_expansion_123.sh | tee /tmp/sce.txt
@@ -151,11 +144,12 @@ jobs:
           grep -q '^GLOBAL_OPERATOR_CENTRAL_SPAWN_LOOP=0$' /tmp/sce.txt
           grep -q '^GLOBAL_OPERATOR_CENTRAL_WAIT_LOOP=0$' /tmp/sce.txt
           grep -q '^GLOBAL_OPERATOR_CENTRAL_REDUCTION_LOOP=0$' /tmp/sce.txt
-          echo 'TAIL_GATE_OLD_TECHNICAL_PEAKS=PASS'
+          grep -q '^GLOBAL_OPERATOR_NON_NEIGHBOR_COMMUNICATION=0$' /tmp/sce.txt
+          echo 'STATIC_FUSED_BLOCK_OLD_TECHNICAL_PEAKS=PASS'
       - uses: actions/upload-artifact@v4
         if: steps.isa.outputs.qualified == 'true'
         with:
-          name: tail-gate-fusion-${{ matrix.image }}-${{ matrix.slot }}
+          name: static-fused-block-unroll-${{ matrix.slot }}
           path: |
             /tmp/result.txt
             /tmp/audit.txt
@@ -163,4 +157,5 @@ jobs:
             /tmp/gcc.txt
             /tmp/rankn.txt
             /tmp/sce.txt
+            /tmp/unroll2.dis
           if-no-files-found: error
