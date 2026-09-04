@@ -1,0 +1,9 @@
+program semantic_control_topology
+strict
+input n: u64 range 4..16
+region compute effect pure parallel {
+    field x[i in n]: f64 = select(i == 0, 2.0, 1.0)
+    sum total[i in n]: f64 = x[i]
+}
+output total
+test (4) => { total = 5.0 }

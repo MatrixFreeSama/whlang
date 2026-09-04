@@ -1,0 +1,5 @@
+program cast_surface_mismatch
+input x: u64
+let y = cast(f64, x)
+output y = y
+test () => { y = 0.0 }

@@ -1,0 +1,10 @@
+程序 whex_heat_equivalence
+容差 1e-10
+输入 n: u64 范围 4..100000000
+场 u[i 属于 n]: f64 = 0.25 + 转换(f64, (i * 17 + 3) % 1024) / 1024.0
+每个 i 属于 n {
+    next: f64 = u[i] + 0.125 * (u[周期(i + n - 1, n)] - 2.0 * u[i] + u[周期(i + 1, n)])
+}
+求和 checksum[i 属于 n]: f64 = next[i]
+输出 checksum
+测试 (4) => { checksum = 1.111328125 }

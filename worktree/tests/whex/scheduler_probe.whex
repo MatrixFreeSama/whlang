@@ -1,0 +1,11 @@
+program scheduler_probe
+
+tolerance 1e-10
+
+input n: u64 range 4..1000000
+
+sum checksum[i in n]: f64 = 1.0
+
+output checksum
+
+test (4) => { checksum = 4.0 }

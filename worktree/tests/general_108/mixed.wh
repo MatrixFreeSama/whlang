@@ -1,0 +1,5 @@
+program mixed
+input x: u64
+let y = x + 1.5
+output y = y
+test () => { y = 0.0 }

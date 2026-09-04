@@ -1,0 +1,6 @@
+program tolerance_abs_parser
+input n: u64 range 8 .. 1024
+tensor x[i: n]: f64 = 1.0
+reduce s[i: n]: f64~(abs=0.0, rel=0.0000000001) = sum x[i]
+output s = s
+test (8) => { s = 1.0 }

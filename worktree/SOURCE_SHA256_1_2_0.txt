@@ -1,0 +1,15 @@
+Wheelchair 1.2.0 key source identity
+
+WH structural recovery:
+7054d1012782899bf423accbae23417a267b6d6188438106b309a288f3365b39  surface/wh_structural.py
+7a94185c7c4441b2ddcc842be19a4e80ae17d1d0570eb53e4665896976604aa6  wheelchairc.py
+
+WHEX 1.1.0 byte-frozen shared surface / expert surface:
+c2a2ce61b169de39d8bd4ff7de3e615ea71c86d25dbb64236b2c7ba5f2a59c09  surface/wh_surface.py
+29d75d5f4f41c19a34dff1cca7366a5db6525d143514fa72d025386a3dece42d  surface/whex_surface.py
+32518611fad6079c91b68d67e11f09e902f8f86d62136532dac993e5929f2551  surface/whex_semantics.py
+
+Native backend, byte-frozen from 1.1.0 / 1.0.15 physical realization:
+f897e112778873868ca3c34048b19d07725572f648c91eb7c441aef06435763f  compiler/tensor_frontend_x86_64.S
+2e83af25b6a6188c9ce24497d636206ca5978e59a92b619e6b722909ad2d4f80  compiler/topologyc_x86_64.S
+e9116041c673aec4dca58a43379ccb78d5ae3d6aa7e7ba76656da32b24cdfeb3  runtime/tensor_runtime_template_x86_64.S

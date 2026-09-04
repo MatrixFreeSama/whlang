@@ -1,0 +1,6 @@
+program idiv
+input x: i64
+input y: i64
+let z = x / y
+output z = z
+test () => { z = 0 }

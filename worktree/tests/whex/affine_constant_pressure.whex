@@ -1,0 +1,12 @@
+program affine_constant_pressure
+
+tolerance 1e-10
+input n: u64 range 1024..2048
+field p[i in n]: f64 = ((0.25 + (cast(f64, (((i * 17) + 3) % 1024)) / 1024.0)) + (0.5 * (cast(f64, (((i * 19) + 5) % 1024)) / 1024.0)))
+field q1[i in n]: f64 = (p[i] + (0.5 * p[(i + 1)]))
+field q2[i in n]: f64 = (q1[((i * 3) + 1)] + q1[((i * 3) + 1)])
+sum checksum[i in n]: f64 = q2[i]
+output checksum
+test (1024) => { checksum = 3069.75 }
+test (1025) => { checksum = 3070.61962890625 }
+test (2048) => { checksum = 6139.5 }

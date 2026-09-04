@@ -1,0 +1,10 @@
+program rankn_axis_erasure
+strict
+input n: u64 range 4..1024
+axis i in n
+axis j in 4
+region compute effect pure parallel {
+    sum total[i in n, j in 4]: f64 = cast(f64, i)
+}
+output total
+test (4) => { total = 24.0 }

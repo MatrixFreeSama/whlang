@@ -1,0 +1,18 @@
+程序 whex_topology_showcase
+严格
+输入 n: u64 范围 4..16
+轴 i 属于 n
+记录 constants {
+    shift = 2.0
+}
+纯 泛型 函数 value(x: u64) -> f64 = 转换(f64, x) - constants.shift
+区域 compute 效应 纯 并行 {
+    循环 i 属于 0..n {
+        定义 x[i]: f64 = value(i)
+    }
+    循环 i 属于 0..n {
+        total += x[i]
+    }
+}
+输出 total
+测试 (4) => { total = -2.0 }

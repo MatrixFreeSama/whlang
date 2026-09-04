@@ -1,0 +1,14 @@
+program lcg64
+contract integer_overflow = wrap
+input seed: u64
+input steps: u64
+iterate rng limit steps {
+    state x: u64 = seed
+    state i: u64 = 0
+    while i < steps
+    update x = x * 6364136223846793005 + 1442695040888963407
+    update i = i + 1
+    result x
+}
+publish rng
+test (42, 10) => { rng = 457466634992928148 }

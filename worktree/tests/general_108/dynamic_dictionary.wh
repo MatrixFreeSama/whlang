@@ -1,0 +1,9 @@
+program dyn_dict
+input k: string
+dictionary weights: string -> f64 {
+  "red" = 1.0,
+  "green" = 2.0
+}
+lookup weight = weights[k] default 0.5
+output weight = weight
+test ("green") => { weight = 2.0 }

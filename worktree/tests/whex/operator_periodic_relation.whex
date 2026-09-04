@@ -1,0 +1,16 @@
+program operator_periodic_relation
+
+tolerance 1e-10
+input n: u64 range 1024..1024
+field p[i in n]: f64 = (0.25 + (cast(f64, (((i * 17) + 3) % 1024)) / 1024.0))
+field q1[i in n]: f64 = ((0.5 * p[i]) + (0.5 * p[((i + 512) % 1024)]))
+field q2[i in n]: f64 = ((0.5 * q1[i]) + (0.5 * q1[((i + 512) % 1024)]))
+field q3[i in n]: f64 = ((0.5 * q2[i]) + (0.5 * q2[((i + 512) % 1024)]))
+field q4[i in n]: f64 = ((0.5 * q3[i]) + (0.5 * q3[((i + 512) % 1024)]))
+field q5[i in n]: f64 = ((0.5 * q4[i]) + (0.5 * q4[((i + 512) % 1024)]))
+field q6[i in n]: f64 = ((0.5 * q5[i]) + (0.5 * q5[((i + 512) % 1024)]))
+field q7[i in n]: f64 = ((0.5 * q6[i]) + (0.5 * q6[((i + 512) % 1024)]))
+field q8[i in n]: f64 = ((0.5 * q7[i]) + (0.5 * q7[((i + 512) % 1024)]))
+sum checksum[i in n]: f64 = q8[i]
+output checksum
+test (1024) => { checksum = 767.5 }

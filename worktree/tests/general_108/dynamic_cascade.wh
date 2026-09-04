@@ -1,0 +1,7 @@
+program dyn_cascade
+input x: u64
+cascade c executors 2 chunk 2 axis i events true {
+  goal A work 4 = i + x
+}
+output A = c.A
+test (1) => { A = 10 }

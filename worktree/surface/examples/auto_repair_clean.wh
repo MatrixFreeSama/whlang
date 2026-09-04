@@ -1,0 +1,12 @@
+program repair_equivalence
+input N: u64 range 1 .. 64
+let temperature: u64 = 7
+let pressure: u64 = 3
+tensor values[i: N]: u64 = temperature + i
+reduce total[i: N]: u64 = sum values[i]
+let masked: u64 = bit_and(temperature, pressure)
+let hot: bool = temperature >= pressure
+publish total
+publish masked
+publish hot
+test (4) => { total = 34, masked = 3, hot = true }

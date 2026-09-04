@@ -1,0 +1,10 @@
+{
+  "format": "wheelchair.tensor/1",
+  "contracts": {"deterministic": true, "integer_overflow": "trap"},
+  "inputs": [{"name":"x","type":"u64"}],
+  "bindings": [
+    {"name":"y","op":"compute","expr":{"op":"add","args":[{"var":"x"},{"literal":7,"type":"u64"}]}}
+  ],
+  "outputs": [{"expr":{"var":"y"}}],
+  "tests": [{"name":"smoke"}]
+}

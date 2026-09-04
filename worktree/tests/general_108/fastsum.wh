@@ -1,0 +1,6 @@
+program fastsum
+input n: u64
+tensor x[i: n]: f64 = 1.0
+reduce s[i: n]: f64 = sum x[i]
+output s = s
+test () => { s = 1.0 }

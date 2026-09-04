@@ -1,0 +1,6 @@
+program rankn_axis_erasure
+strict
+input n: u64 range 4..1024
+sum total[i in n]: f64 = 4.0 * cast(f64, i)
+output total
+test (4) => { total = 24.0 }

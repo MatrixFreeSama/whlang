@@ -1,0 +1,18 @@
+program f64_ops
+let a = 1.0 + 1.5
+let b = 5.0 - 2.0
+let c = 1.5 * 4.0
+let d = 7.5 / 2.5
+let e = min(3.0, 2.0)
+let f = max(3.0, 2.0)
+let g = 1.0 < 1.5
+let h = 1.0 > 1.5
+output a = a
+output b = b
+output c = c
+output d = d
+output e = e
+output f = f
+output g = g
+output h = h
+test () => { a = 2.5, b = 3.0, c = 6.0, d = 3.0, e = 2.0, f = 3.0, g = true, h = false }
