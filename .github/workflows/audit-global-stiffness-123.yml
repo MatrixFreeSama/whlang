@@ -1,5 +1,5 @@
 name: Benchmark Wheelchair Generic Product-Subtract Contraction
-# trigger: contraction benchmark v2
+# trigger: contraction benchmark v3
 on:
   push:
     branches: [main]
@@ -38,10 +38,13 @@ jobs:
           for q in 1 2 4; do ./whexc ../benchmarks/global_stiffness_123/stiffness.whex -o "build/global_stiffness_wh_q${q}" --executors "$q" >/dev/null; done
           gcc -O3 -march=native -mtune=native -flto -ffast-math -pthread ../benchmarks/global_stiffness_123/Global_Stiffness_expert_C_matched.c -o build/global_stiffness_c
           sh tools/disassemble_generated.sh build/global_stiffness_wh_q1 > /tmp/wh.dis 2>&1
-          grep -Eic 'vfnmadd' /tmp/wh.dis | xargs printf 'WH_VFNMADD_COUNT=%s\n' | tee /tmp/audit.txt
-          grep -Eic 'vmulpd' /tmp/wh.dis | xargs printf 'WH_VMULPD_COUNT=%s\n' | tee -a /tmp/audit.txt
-          grep -Eic 'vsubpd' /tmp/wh.dis | xargs printf 'WH_VSUBPD_COUNT=%s\n' | tee -a /tmp/audit.txt
-          grep -Eic 'call' /tmp/wh.dis | xargs printf 'WH_GENERATED_CALLS=%s\n' | tee -a /tmp/audit.txt
+          count(){ grep -Eic "$1" /tmp/wh.dis || true; }
+          printf 'WH_VFNMADD_COUNT=%s\n' "$(count vfnmadd)" | tee /tmp/audit.txt
+          printf 'WH_VMULPD_COUNT=%s\n' "$(count vmulpd)" | tee -a /tmp/audit.txt
+          printf 'WH_VSUBPD_COUNT=%s\n' "$(count vsubpd)" | tee -a /tmp/audit.txt
+          printf 'WH_GENERATED_CALLS=%s\n' "$(count 'call')" | tee -a /tmp/audit.txt
+          test "$(count vfnmadd)" -gt 0
+          test "$(count 'call')" -eq 0
       - name: Quick same-host benchmark
         if: steps.isa.outputs.qualified == 'true'
         shell: bash
