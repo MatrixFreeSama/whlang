@@ -65,9 +65,15 @@ front = frontend_path.read_text(encoding="utf-8")
 front = replace_once(front, '.include "compiler/runtime_offsets.inc"', '.include "build/runtime_rankn_offsets.inc"')
 front = replace_once(
     front,
-    "    mov dword ptr [rip+tensor_comm_elimination],0\n",
+    "    mov dword ptr [rip+tensor_error],0\n"
+    "    mov dword ptr [rip+tensor_tolerant_fp],0\n"
+    "    mov dword ptr [rip+tensor_comm_elimination],0\n"
+    "    # Mature 1.0.11 symbolic root-axis domain. This is compile-time state only.\n",
+    "    mov dword ptr [rip+tensor_error],0\n"
+    "    mov dword ptr [rip+tensor_tolerant_fp],0\n"
     "    mov dword ptr [rip+tensor_comm_elimination],0\n"
     "    mov qword ptr [rip+tensor_rank_n_product],0\n"
+    "    # Mature 1.0.11 symbolic root-axis domain. This is compile-time state only.\n"
 )
 front = replace_once(
     front,
