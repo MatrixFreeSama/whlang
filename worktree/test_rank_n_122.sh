@@ -102,9 +102,7 @@ python3 surface/whex_surface.py native tests/whex/rank2_reduce_native_122.whex -
 [ "$($TMP/r2direct 4)" = 'checksum_bits=0x405e000000000000' ]
 echo 'RANK2_DIRECT_REDUCTION_NATIVE_REFERENCE=PASS'
 
-# Rank-2 map/load, Rank-3, Rank-6 and WH/WHEX equivalence at the mature executor
-# counts. Integer-valued f64 sums are exact here, so executor topology must not
-# change the result bits.
+# Rank-2 map/load, Rank-3, Rank-6 and WH/WHEX equivalence at mature executor counts.
 for e in 1 2 4; do
   python3 surface/whex_surface.py native tests/whex/rank2_native_122.whex -o "$TMP/r2.$e" --executors "$e" >/dev/null
   python3 surface/whex_surface.py native tests/whex/rank3_native_122.whex -o "$TMP/r3.$e" --executors "$e" >/dev/null
@@ -121,20 +119,13 @@ python3 wheelchairc.py tests/wh_equivalence/rank2_native_122.wh -o "$TMP/r2wh" -
 [ "$($TMP/r2wh 4)" = "$($TMP/r2.4 4)" ]
 echo 'WH_WHEX_RANK2_NATIVE_EQUIVALENCE=PASS'
 
-# The release image deliberately erases ELF section headers after AOT emission,
-# so ordinary objdump section traversal cannot see the appended kernel. Extract
-# the third PT_LOAD, which tensor_runtime.ld defines as the generated RX segment,
-# and disassemble those exact native bytes as a raw x86-64 image.
+# Audit the exact generated RX PT_LOAD, not erased ELF section headers.
 set -- $(readelf -lW "$TMP/r2dynamic" | awk '$1=="LOAD" {n++; if(n==3){print $2,$5; exit}}')
 [ "$#" -eq 2 ]
-rx_off=$(( $1 ))
-rx_size=$(( $2 ))
-[ "$rx_size" -gt 0 ]
+rx_off=$(( $1 )); rx_size=$(( $2 )); [ "$rx_size" -gt 0 ]
 dd if="$TMP/r2dynamic" of="$TMP/r2dynamic.rx" bs=1 skip="$rx_off" count="$rx_size" status=none
 objdump -D -b binary -m i386:x86-64 "$TMP/r2dynamic.rx" > "$TMP/r2dynamic.rx.asm"
 grep -Eiq 'vpsrlq' "$TMP/r2dynamic.rx.asm"
-# The generated evaluator is a fused native episode. It must contain no CALL at
-# all; runtime reaches it by a patched direct jump and there is no scalar oracle.
 if grep -Eiq '[[:space:]]call[q]?[[:space:]]' "$TMP/r2dynamic.rx.asm"; then
   echo 'Rank-N generated RX contains a call edge' >&2; exit 1
 fi
@@ -143,11 +134,35 @@ echo 'RANK_N_AVX512_COORDINATE_RECOVERY=PASS'
 echo 'RANK_N_GENERATED_RX_CALL_EDGES=0'
 echo 'RANK_N_SCALAR_FALLBACK=0'
 
-# Existing mathematical Rank-N erasure still has precedence and byte identity.
-./test_whex_semantic_parallel_110.sh > "$TMP/semantic110.log"
-grep -q 'WHEX_RANK_N_AXIS_ERASURE=PASS' "$TMP/semantic110.log"
-grep -q 'WHEX_RANK_N_MACHINE_CODE_ERASURE=PASS' "$TMP/semantic110.log"
+# 1.1.0's mathematical-axis erasure law remains byte-identical. Re-run that
+# proof directly instead of its historical final assertion that every genuinely
+# used second axis must reject; 1.2.2 intentionally supersedes that old limit.
+python3 surface/whex_surface.py compile tests/whex/rankn_axis_erasure.whex -o "$TMP/rankn_erase.core" >/dev/null
+python3 surface/whex_surface.py compile tests/whex/rankn_axis_erasure_inline.whex -o "$TMP/rankn_inline.core" >/dev/null
+cmp "$TMP/rankn_erase.core" "$TMP/rankn_inline.core"
+./whexc tests/whex/rankn_axis_erasure.whex -o "$TMP/rankn_erase" --semantic-plan "$TMP/rankn_erase.plan" >/dev/null
+./whexc tests/whex/rankn_axis_erasure_inline.whex -o "$TMP/rankn_inline" >/dev/null
+cmp "$TMP/rankn_erase" "$TMP/rankn_inline"
+[ "$($TMP/rankn_erase 4)" = 'checksum_bits=0x4038000000000000' ]
+python3 - "$TMP/rankn_erase.plan" <<'PY'
+import json,sys
+p=json.load(open(sys.argv[1],encoding='utf-8'))
+a=p['axis_algebra']
+assert a['maximum_source_rank']==2 and a['maximum_native_binding_rank']==1
+assert len(a['rank_n_eliminations'])==1
+r=a['rank_n_eliminations'][0]
+assert r['source_rank']==2 and r['native_rank']==1 and r['multiplicity']==4
+assert r['proof']=='expression_independent_of_erased_axes'
+print('WHEX_RANK_N_AXIS_ERASURE=PASS')
+print('WHEX_RANK_N_MACHINE_CODE_ERASURE=PASS')
+PY
 echo 'RANK_N_ERASURE_PRECEDENCE_NONREGRESSION=PASS'
+
+# The exact historical non-erasable Rank-2 example is now a positive native case.
+python3 surface/whex_surface.py native tests/whex/rankn_axis_nonerasable.whex -o "$TMP/rankn_old_nonerasable" --executors 4 >/dev/null
+[ "$($TMP/rankn_old_nonerasable 4)" = 'checksum_bits=0x4048000000000000' ]
+echo 'RANK_N_1_1_REJECTION_SUPERSEDED_BY_NATIVE_1_2_2=PASS'
+echo 'RANK_N_NO_FAKE_FLATTEN=PASS'
 
 # Exact 1.2.1 Newton/Jv restoration remains authoritative for the protected peak.
 ./test_newton_jv_121.sh > "$TMP/newton121.log"
