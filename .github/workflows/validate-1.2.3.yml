@@ -1,5 +1,5 @@
 name: Validate Wheelchair 1.2.3 Sparse Causal Expansion
-# authority-trigger: 6-correct-reference
+# authority-trigger: 7-metadata-identity
 
 on:
   push:
