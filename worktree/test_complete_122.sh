@@ -16,13 +16,13 @@ src=src.replace('ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\ncd "$ROOT"',
 # 1.0.9's blanket build.sh `python` keyword proxy predates the exact,
 # hash-protected Rank-N assembly bootstrap generator. The 1.2.2 inherited gate
 # keeps the sovereign-backend proof and narrows only that proxy.
-src=src.replace('./test_109.sh','./test_109_122.sh')
+src=src.replace('./test_109.sh','sh test_109_122.sh')
 # Keep the scheduler/resource machine-code assertions unchanged while using a
 # parser-version-independent spelling of its diagnostic summary expression.
-src=src.replace('./test_scheduler.sh','./test_scheduler_122.sh')
+src=src.replace('./test_scheduler.sh','sh test_scheduler_122.sh')
 # 1.1.0's non-erasable Rank-N rejection was a physical Rank-1 ceiling, not a
 # permanent semantic invariant. 1.2.2 replaces it with positive native proof.
-src=src.replace('./test_whex_semantic_parallel_121.sh','./test_whex_semantic_parallel_122.sh')
+src=src.replace('./test_whex_semantic_parallel_121.sh','sh test_whex_semantic_parallel_122.sh')
 src=src.replace("echo 'WHEELCHAIR_1_1_0_SEMANTIC_INVARIANTS_ON_1_2_1=PASS'",
                 "echo 'WHEELCHAIR_1_1_0_SEMANTIC_INVARIANTS_ON_1_2_2=PASS'")
 src=src.replace("echo 'WHEELCHAIR_1_2_0_SURFACE_INVARIANTS_ON_1_2_1=PASS'",
