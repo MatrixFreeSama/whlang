@@ -36,13 +36,14 @@ def py_reference(n):
         s += y*y
     return s
 
+kinds=('base','product','resident','striped')
 ref=py_reference(4096)
 for q in QS:
-    outs=[run(wh(k,4096,q)) for k in ('base','product','resident')]+[run(cc(4096,q))]
+    outs=[run(wh(k,4096,q)) for k in kinds]+[run(cc(4096,q))]
     vals=[bits_to_float(x) for x in outs]
     if not close(vals+[ref]):
         raise SystemExit(f'small correctness failure q={q}: py={ref} vals={vals}')
-print('GLOBAL_STIFFNESS_FOURWAY_SMALL_REFERENCE=PASS')
+print('GLOBAL_STIFFNESS_FIVEWAY_SMALL_REFERENCE=PASS')
 
 results=[]
 rng=random.Random(0x1234C0DE)
@@ -52,6 +53,7 @@ for n in NS:
       'Wheelchair-1.2.3-baseline':wh('base',n,q),
       'Wheelchair-product-subtract':wh('product',n,q),
       'Wheelchair-product-subtract-plus-residency':wh('resident',n,q),
+      'Wheelchair-plus-striped-residency':wh('striped',n,q),
       'Expert-C':cc(n,q),
     }
     outputs={name:run(cmd) for name,cmd in cmds.items()}
@@ -70,20 +72,25 @@ for n in NS:
         if abs(v-vals[name])/scale > TOL: raise SystemExit(f'nondeterministic numeric result {name}')
         samples[name].append((t1-t0)/1e6)
     med={name:statistics.median(x) for name,x in samples.items()}
-    b=med['Wheelchair-1.2.3-baseline']; p=med['Wheelchair-product-subtract']; r=med['Wheelchair-product-subtract-plus-residency']; c=med['Expert-C']
+    b=med['Wheelchair-1.2.3-baseline']
+    p=med['Wheelchair-product-subtract']
+    r=med['Wheelchair-product-subtract-plus-residency']
+    s=med['Wheelchair-plus-striped-residency']
+    c=med['Expert-C']
     row={
       'n':n,'executors':q,'runs':RUNS,'warmups':WARMUP,'checksums':outputs,
       'relative_checksum_spread':(max(vals.values())-min(vals.values()))/max(max(abs(v) for v in vals.values()),1.0),
-      'baseline_ms':b,'product_ms':p,'resident_ms':r,'expert_c_ms':c,
+      'baseline_ms':b,'product_ms':p,'resident_ms':r,'striped_ms':s,'expert_c_ms':c,
       'product_speedup_vs_baseline':b/p,
       'residency_incremental_speedup':p/r,
-      'total_speedup_vs_baseline':b/r,
-      'resident_speedup_vs_c':c/r,
-      'resident_percent_faster_than_c':(c/r-1)*100.0,
+      'striped_incremental_speedup':r/s,
+      'total_speedup_vs_baseline':b/s,
+      'striped_speedup_vs_c':c/s,
+      'striped_percent_faster_than_c':(c/s-1)*100.0,
       'samples':samples,
     }
     results.append(row)
-    print(f'N={n} Q={q} BASE={b:.6f} PRODUCT={p:.6f} RESIDENT={r:.6f} C={c:.6f} BASE/RES={b/r:.4f}x C/RES={c/r:.4f}x spread={row["relative_checksum_spread"]:.3e}')
-print('FOURWAY_JSON_BEGIN')
+    print(f'N={n} Q={q} BASE={b:.6f} PRODUCT={p:.6f} RESIDENT={r:.6f} STRIPED={s:.6f} C={c:.6f} BASE/STRIPED={b/s:.4f}x RES/STRIPED={r/s:.4f}x C/STRIPED={c/s:.4f}x spread={row["relative_checksum_spread"]:.3e}')
+print('FIVEWAY_JSON_BEGIN')
 print(json.dumps({'tolerance':TOL,'results':results},indent=2))
-print('FOURWAY_JSON_END')
+print('FIVEWAY_JSON_END')
