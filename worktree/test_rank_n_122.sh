@@ -88,8 +88,29 @@ if python3 surface/whex_surface.py plan "$TMP/periodic_rankn.whex" >/dev/null 2>
 fi
 echo 'RANK_N_UNPROVEN_LAYOUT_EXPLICIT_REJECTION=PASS'
 
-# Native execution is staged so a backend failure cannot hide whether product
-# coordinate recovery itself works before fused map/load composition is tested.
+# Binary native probes: static extra-axis recovery uses the pre-existing mod-2^k
+# path; dynamic-axis recovery additionally requires the new internal ushr node.
+if python3 surface/whex_surface.py native tests/whex/rank2_static_axis_probe_122.whex -o "$TMP/r2static" --executors 1 >/dev/null; then
+  echo 'RANK2_STATIC_AXIS_NATIVE_COMPILE=PASS'
+else
+  echo 'RANK2_STATIC_AXIS_NATIVE_COMPILE=FAIL' >&2
+  exit 1
+fi
+r2static=$($TMP/r2static 4)
+[ "$r2static" = 'checksum_bits=0x4038000000000000' ]
+echo 'RANK2_STATIC_AXIS_NATIVE_REFERENCE=PASS'
+
+if python3 surface/whex_surface.py native tests/whex/rank2_dynamic_axis_probe_122.whex -o "$TMP/r2dynamic" --executors 1 >/dev/null; then
+  echo 'RANK2_DYNAMIC_AXIS_NATIVE_COMPILE=PASS'
+else
+  echo 'RANK2_DYNAMIC_AXIS_NATIVE_COMPILE=FAIL' >&2
+  exit 1
+fi
+r2dynamic=$($TMP/r2dynamic 4)
+[ "$r2dynamic" = 'checksum_bits=0x4038000000000000' ]
+echo 'RANK2_DYNAMIC_AXIS_NATIVE_REFERENCE=PASS'
+
+# Full direct mixed-radix reconstruction and fused map/load composition.
 if python3 surface/whex_surface.py native tests/whex/rank2_reduce_native_122.whex -o "$TMP/r2direct" --executors 1 >/dev/null; then
   echo 'RANK2_DIRECT_REDUCTION_NATIVE_COMPILE=PASS'
 else
