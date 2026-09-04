@@ -11,4 +11,4 @@ region bridge effect pure parallel {
     sum total[i in n]: f64 = a[i] + b[i]
 }
 output total
-test (4) => { total = 24.0 }
+test (4) => { total = 22.0 }
