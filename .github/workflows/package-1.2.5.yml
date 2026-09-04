@@ -5,6 +5,7 @@ on:
     branches: [build-1.2.5-multifield]
     paths:
       - '.github/workflows/package-1.2.5.yml'
+      - 'worktree/README.md'
 
 jobs:
   package:
@@ -37,6 +38,7 @@ jobs:
           PY
           cd devrepo/worktree
           [ "$(cat VERSION)" = "1.2.5" ]
+          grep -q '^# Wheelchair 1.2.5$' README.md
           grep -q '^WHEELCHAIR_1_2_5_AUTHORITY_QUORUM=PASS$' RELEASE_GATES_1_2_5.txt
           grep -q '^WHEELCHAIR_1_2_5_COMPLETE=PASS$' RELEASE_GATES_1_2_5.txt
           grep -q 'Authority run: `33902157205`' RELEASE_PROOF_1_2_5.md
@@ -98,6 +100,8 @@ jobs:
               tops=sorted({n.split('/',1)[0] for n in names if n})
               assert tops == ['Wheelchair-1.2.5']
               assert 'Wheelchair-1.2.5/VERSION' in names
+              assert 'Wheelchair-1.2.5/README.md' in names
+              assert z.read('Wheelchair-1.2.5/README.md').startswith(b'# Wheelchair 1.2.5\n')
               assert 'Wheelchair-1.2.5/RELEASE_PROOF_1_2_5.md' in names
               assert 'Wheelchair-1.2.5/RELEASE_GATES_1_2_5.txt' in names
               assert 'Wheelchair-1.2.5/surface/shared_dependency_episode.py' in names
