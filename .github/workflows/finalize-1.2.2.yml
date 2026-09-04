@@ -1,5 +1,5 @@
 name: Finalize Wheelchair 1.2.2 Rank-N
-# release-gate-trigger: 3
+# release-gate-trigger: 4
 
 on:
   push:
@@ -46,6 +46,7 @@ jobs:
             'worktree/VERSION',
             'worktree/test_109_122.sh',
             'worktree/test_complete_122.sh',
+            'worktree/test_scheduler_122.sh',
             'worktree/test_whex_semantic_parallel_122.sh',
           }
           unexpected=sorted(changed-allowed)
