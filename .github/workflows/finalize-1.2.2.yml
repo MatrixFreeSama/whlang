@@ -1,4 +1,5 @@
 name: Finalize Wheelchair 1.2.2 Rank-N
+# release-gate-trigger: 2
 
 on:
   push:
