@@ -7,18 +7,21 @@ BASE = Path('build/tensor_frontend_shared_base_125.S')
 WIDE = Path('build/tensor_frontend_shared_wide_125.S')
 text = SRC.read_text(encoding='utf-8')
 
-# Compile-time reciprocal generation for tolerant FP.  Strict mode remains on the
-# mature exact-power-of-two path.  This helper executes in the AOT compiler only;
-# no division instruction is copied into generated runtime code.
+# Compile-time reciprocal generation for tolerant FP. Strict mode remains on the
+# mature exact-power-of-two path. This helper executes in the AOT compiler only;
+# no division instruction is copied into generated runtime code. Subnormal
+# reciprocals are deliberately rejected so the compile result cannot depend on
+# an inherited FTZ/DAZ MXCSR environment; those cases retain the proved vector
+# division recipe instead.
 anchor = '''.rpf_no:\n    xor eax,eax\n    mov edx,1\n    ret\n\n# gen_load_f64_bits'''
 if anchor not in text:
     raise SystemExit('reciprocal helper anchor missing')
-helper = '''.rpf_no:\n    xor eax,eax\n    mov edx,1\n    ret\n\n# tolerant_recip_f64_bits(rax=f64 bits) -> rounded binary64 reciprocal bits.\n# Reject zero, NaN and infinity. Used only when tensor_tolerant_fp is set.\ntolerant_recip_f64_bits:\n    mov rcx,rax\n    mov rdx,rcx\n    btr rdx,63\n    test rdx,rdx\n    jz .trf_no\n    mov r8,rdx\n    shr r8,52\n    and r8d,0x7ff\n    cmp r8d,0x7ff\n    je .trf_no\n    movq xmm0,rcx\n    mov rcx,0x3ff0000000000000\n    movq xmm1,rcx\n    divsd xmm1,xmm0\n    movq rax,xmm1\n    mov rcx,rax\n    shr rcx,52\n    and ecx,0x7ff\n    cmp ecx,0x7ff\n    je .trf_no\n    xor edx,edx\n    ret\n.trf_no:\n    xor eax,eax\n    mov edx,1\n    ret\n\n# gen_load_f64_bits'''
+helper = '''.rpf_no:\n    xor eax,eax\n    mov edx,1\n    ret\n\n# tolerant_recip_f64_bits(rax=f64 bits) -> rounded normal binary64 reciprocal bits.\n# Reject zero, NaN, infinity and subnormal results. Used only when tensor_tolerant_fp is set.\ntolerant_recip_f64_bits:\n    mov rcx,rax\n    mov rdx,rcx\n    btr rdx,63\n    test rdx,rdx\n    jz .trf_no\n    mov r8,rdx\n    shr r8,52\n    and r8d,0x7ff\n    cmp r8d,0x7ff\n    je .trf_no\n    movq xmm0,rcx\n    mov rcx,0x3ff0000000000000\n    movq xmm1,rcx\n    divsd xmm1,xmm0\n    movq rax,xmm1\n    mov rcx,rax\n    shr rcx,52\n    and ecx,0x7ff\n    test ecx,ecx\n    jz .trf_no\n    cmp ecx,0x7ff\n    je .trf_no\n    xor edx,edx\n    ret\n.trf_no:\n    xor eax,eax\n    mov edx,1\n    ret\n\n# gen_load_f64_bits'''
 text = text.replace(anchor, helper, 1)
 
-# Extend the ordinary vector division lowering.  Exact reciprocal stays first, so
+# Extend the ordinary vector division lowering. Exact reciprocal stays first, so
 # strict and already-mature power-of-two cases emit the same runtime instruction
-# sequence.  Only tolerant non-power-of-two literal division takes the new path.
+# sequence. Only tolerant non-power-of-two literal division takes the new path.
 old = '''    call recip_pow2_f64_bits\n    test edx,edx; jnz .evf_normal_bin\n    mov r12,rax\n    mov rdi,r15; mov esi,r13d; call emit_vec_float; test eax,eax; jnz .evf_fail\n'''
 new = '''    call recip_pow2_f64_bits\n    test edx,edx; jz .evf_div_have_recip\n    cmp dword ptr [rip+tensor_tolerant_fp],0\n    je .evf_normal_bin\n    mov rdi,r14; call expr_literal_f64_bits\n    test edx,edx; jnz .evf_normal_bin\n    call tolerant_recip_f64_bits\n    test edx,edx; jnz .evf_normal_bin\n.evf_div_have_recip:\n    mov r12,rax\n    mov rdi,r15; mov esi,r13d; call emit_vec_float; test eax,eax; jnz .evf_fail\n'''
 if old not in text:
@@ -36,9 +39,9 @@ text = text.replace(old, new, 1)
 
 BASE.write_text(text, encoding='utf-8')
 
-# Wide recipe: keep runtime-owned ZMM12..15 untouched.  Persistent dependency/CSE
+# Wide recipe: keep runtime-owned ZMM12..15 untouched. Persistent dependency/CSE
 # ownership expands only inside the architecturally free ZMM16..29 domain; ZMM30
-# and ZMM31 remain immutable constant carriers.  Constants beyond two are already
+# and ZMM31 remain immutable constant carriers. Constants beyond two are already
 # supported by RIP-relative EVEX broadcasts, so no scalar path is introduced.
 wide = text
 repls = [
@@ -64,4 +67,5 @@ WIDE.write_text(wide, encoding='utf-8')
 print('SHARED_DEPENDENCY_EPISODE_BASE_1_2_5=DERIVED')
 print('SHARED_DEPENDENCY_EPISODE_WIDE_1_2_5=DERIVED')
 print('SHARED_DEPENDENCY_EPISODE_RUNTIME_RESERVED_ZMM12_15=PROTECTED')
+print('SHARED_DEPENDENCY_EPISODE_SUBNORMAL_RECIPROCAL_REJECT=PASS')
 print('SHARED_DEPENDENCY_EPISODE_SCALAR_FALLBACK=0')
