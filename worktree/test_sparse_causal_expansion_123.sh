@@ -149,19 +149,31 @@ done
 echo 'GLOBAL_OPERATOR_NATIVE_REFERENCE_1_2_4_EXECUTORS=PASS'
 echo 'GLOBAL_OPERATOR_RENAMED_NATIVE_BYTE_EQUIVALENCE=PASS'
 
-# No 1.2.3 topology metadata may leak into canonical/native bytes. The semantic
-# planner is compile-time evidence only until a later physical recipe proves a
-# stronger transformation.
+# Prove the 1.2.3 separator/operator plan is compile-time evidence only. Compile
+# the exact same source once with SCE attachment enabled and once with the
+# attachment function replaced by a no-op in-process. Canonical bytes must be
+# identical even though only the first semantic plan contains operator evidence.
+# This avoids false positives from perfectly legal user/program names containing
+# words such as "separator" or "operator".
 python3 - <<'PY'
 from pathlib import Path
 import sys
 sys.path.insert(0,'surface')
-import whex_surface
+import whex_surface, whex_semantics
 p=Path('tests/whex/global_operator_separator_123_a.whex')
-data,parser,_=whex_surface.load_surface(p)
-blob=whex_surface.canonical_core_bytes(data)
-for forbidden in (b'sparse_causal',b'separator',b'newton_special_case',b'global_operator'):
-    assert forbidden not in blob,forbidden
+with_data,with_parser,_=whex_surface.load_surface(p)
+with_blob=whex_surface.canonical_core_bytes(with_data)
+assert 'global_operator_algebra' in with_parser.semantic_plan
+original=whex_semantics.sce.attach_to_semantic_plan
+try:
+    whex_semantics.sce.attach_to_semantic_plan=lambda plan: None
+    without_data,without_parser,_=whex_surface.load_surface(p)
+finally:
+    whex_semantics.sce.attach_to_semantic_plan=original
+without_blob=whex_surface.canonical_core_bytes(without_data)
+assert 'global_operator_algebra' not in without_parser.semantic_plan
+assert with_blob==without_blob
+print('GLOBAL_OPERATOR_CANONICAL_METADATA_ERASURE=PASS')
 print('GLOBAL_OPERATOR_RUNTIME_METADATA_ERASURE=PASS')
 PY
 
