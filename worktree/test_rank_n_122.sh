@@ -164,9 +164,13 @@ python3 surface/whex_surface.py native tests/whex/rankn_axis_nonerasable.whex -o
 echo 'RANK_N_1_1_REJECTION_SUPERSEDED_BY_NATIVE_1_2_2=PASS'
 echo 'RANK_N_NO_FAKE_FLATTEN=PASS'
 
-# Exact 1.2.1 Newton/Jv restoration remains authoritative for the protected peak.
+# Preserve both 1.2.1 technical peaks: generic periodic-composition erasure and
+# the Newton/Jv native-equivalence/performance-restoration witness.
+./test_121.sh > "$TMP/interior121.log"
+grep -q 'WHEX_INTERIOR_PERIODIC_COMPOSITION_1_2_1=PASS' "$TMP/interior121.log"
 ./test_newton_jv_121.sh > "$TMP/newton121.log"
-grep -q 'WHEX_INTERIOR_PERIODIC_COMPOSITION_1_2_1=PASS' "$TMP/newton121.log"
+grep -q 'NEWTON_JV_10M_100M_EXECUTOR_EQUIVALENCE=PASS' "$TMP/newton121.log"
+echo 'INTERIOR_PERIODIC_1_2_1_TECHNICAL_PEAK_PROTECTED=PASS'
 echo 'NEWTON_JV_1_2_1_TECHNICAL_PEAK_PROTECTED=PASS'
 
 echo 'WHEELCHAIR_RANK_N_1_2_2=PASS'
