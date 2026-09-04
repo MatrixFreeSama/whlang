@@ -1,5 +1,5 @@
-name: Audit Remaining Wheelchair Stiffness Hot-Loop Gap
-# trigger: post-residency machine-code audit
+name: Validate Wheelchair Generic Striped Vector Reduction
+# trigger: two-stripe full same-host validation
 on:
   push:
     branches: [main]
@@ -7,20 +7,20 @@ on:
 permissions:
   contents: read
 jobs:
-  audit:
+  validate:
     strategy:
       fail-fast: false
       matrix:
         image: [ubuntu-22.04, ubuntu-24.04]
         slot: [1,2,3]
     runs-on: ${{ matrix.image }}
-    timeout-minutes: 25
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
         with:
           ref: bench-global-stiffness-1.2.3
           fetch-depth: 0
-      - name: Build and qualify
+      - name: Build striped structural lane and qualify ISA
         id: isa
         shell: bash
         run: |
@@ -28,35 +28,109 @@ jobs:
           cd worktree
           python3 tools/apply_123.py
           sh build.sh
+          cp build/topologyc build/topologyc-striped
           ./build/topologyc --probe | tee /tmp/probe.txt
           if grep -q 'AVX-512F: usable' /tmp/probe.txt; then echo 'qualified=true' >> "$GITHUB_OUTPUT"; else echo 'qualified=false' >> "$GITHUB_OUTPUT"; fi
-      - name: Disassemble optimized Wheelchair and expert C
+      - name: Compile frozen product resident striped and expert C contestants
         if: steps.isa.outputs.qualified == 'true'
         shell: bash
         run: |
           set -euo pipefail
           cd worktree
-          ./whexc ../benchmarks/global_stiffness_123/stiffness.whex -o build/stiff_resident --executors 1 >/dev/null
-          gcc -O3 -march=native -mtune=native -flto -ffast-math -pthread ../benchmarks/global_stiffness_123/Global_Stiffness_expert_C_matched.c -o build/stiff_c
-          sh tools/disassemble_generated.sh build/stiff_resident > /tmp/wh.dis 2>&1
-          objdump -d -M intel build/stiff_c > /tmp/c.dis
-          printf '%-20s %6s %6s\n' TOKEN WH C | tee /tmp/counts.txt
-          for p in vpmullq vpmulld vpaddq vpaddd vpandq vpandd vcvttpd2qq vcvtqq2pd vcvtdq2pd vpsllq vpsrlq vfnmadd vmulpd vaddpd vsubpd vextractf64x4 kmov call; do
-            w=$(grep -Eic "$p" /tmp/wh.dis || true)
-            c=$(grep -Eic "$p" /tmp/c.dis || true)
-            printf '%-20s %6d %6d\n' "$p" "$w" "$c" | tee -a /tmp/counts.txt
+          as --64 compiler/tensor_frontend_x86_64.S -o build/tensor_frontend_baseline.o
+          ld -nostdlib -static -z noexecstack build/topologyc_core.o build/tensor_frontend_baseline.o build/general_frontend.o build/runtime_blob.o build/general_runtime_blob.o -o build/topologyc-baseline
+          as --64 build/tensor_frontend_product_subtract.S -o build/tensor_frontend_product.o
+          ld -nostdlib -static -z noexecstack build/topologyc_core.o build/tensor_frontend_product.o build/general_frontend.o build/runtime_blob.o build/general_runtime_blob.o -o build/topologyc-product
+          as --64 build/tensor_frontend_product_subtract_residency.S -o build/tensor_frontend_resident.o
+          ld -nostdlib -static -z noexecstack build/topologyc_core.o build/tensor_frontend_resident.o build/general_frontend.o build/runtime_blob.o build/general_runtime_blob.o -o build/topologyc-resident
+          for q in 1 2 4; do
+            cp build/topologyc-baseline build/topologyc
+            ./whexc ../benchmarks/global_stiffness_123/stiffness.whex -o "build/global_stiffness_base_q${q}" --executors "$q" >/dev/null
+            cp build/topologyc-product build/topologyc
+            ./whexc ../benchmarks/global_stiffness_123/stiffness.whex -o "build/global_stiffness_product_q${q}" --executors "$q" >/dev/null
+            cp build/topologyc-resident build/topologyc
+            ./whexc ../benchmarks/global_stiffness_123/stiffness.whex -o "build/global_stiffness_resident_q${q}" --executors "$q" >/dev/null
+            cp build/topologyc-striped build/topologyc
+            ./whexc ../benchmarks/global_stiffness_123/stiffness.whex -o "build/global_stiffness_striped_q${q}" --executors "$q" >/dev/null
           done
-          echo '=== Wheelchair generated RX ==='
-          cat /tmp/wh.dis
-          echo '=== Expert C vector instruction excerpts ==='
-          grep -Ein -C 10 'vpmull|vfnmadd|vmulpd|vaddpd|vcvt|vpand|vextract' /tmp/c.dis | head -800 || true
+          cp build/topologyc-striped build/topologyc
+          gcc -O3 -march=native -mtune=native -flto -ffast-math -pthread ../benchmarks/global_stiffness_123/Global_Stiffness_expert_C_matched.c -o build/global_stiffness_c
+          gcc --version | head -1 | tee /tmp/gcc.txt
+      - name: Audit striped generated RX
+        if: steps.isa.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd worktree
+          sh tools/disassemble_generated.sh build/global_stiffness_resident_q1 > /tmp/resident.dis 2>&1
+          sh tools/disassemble_generated.sh build/global_stiffness_striped_q1 > /tmp/striped.dis 2>&1
+          count(){ grep -Eic "$2" "/tmp/$1.dis" || true; }
+          {
+            printf 'RESIDENT_ZMM12_ACCUM=%s\n' "$(count resident 'vaddpd.*%zmm0.*%zmm12|vaddpd.*zmm12.*zmm12.*zmm0')"
+            printf 'RESIDENT_ZMM14_ACCUM=%s\n' "$(count resident 'vaddpd.*%zmm0.*%zmm14|vaddpd.*zmm14.*zmm14.*zmm0')"
+            printf 'STRIPED_ZMM12_ACCUM=%s\n' "$(count striped 'vaddpd.*%zmm0.*%zmm12|vaddpd.*zmm12.*zmm12.*zmm0')"
+            printf 'STRIPED_ZMM14_ACCUM=%s\n' "$(count striped 'vaddpd.*%zmm0.*%zmm14|vaddpd.*zmm14.*zmm14.*zmm0')"
+            printf 'STRIPED_PARITY_TEST=%s\n' "$(count striped 'test.*sil.*0x8|test.*sil.*,8')"
+            printf 'STRIPED_GENERATED_CALLS=%s\n' "$(count striped call)"
+            printf 'STRIPED_VFNMADD=%s\n' "$(count striped vfnmadd)"
+          } | tee /tmp/audit.txt
+          test "$(count resident 'vaddpd.*%zmm0.*%zmm14|vaddpd.*zmm14.*zmm14.*zmm0')" -eq 0
+          test "$(count striped 'vaddpd.*%zmm0.*%zmm12|vaddpd.*zmm12.*zmm12.*zmm0')" -gt 0
+          test "$(count striped 'vaddpd.*%zmm0.*%zmm14|vaddpd.*zmm14.*zmm14.*zmm0')" -gt 0
+          test "$(count striped 'test.*sil.*0x8|test.*sil.*,8')" -gt 0
+          test "$(count striped call)" -eq 0
+          test "$(count striped vfnmadd)" -gt 0
+          echo 'STRIPED_VECTOR_REDUCTION_MACHINE_SHAPE=PASS'
+      - name: Five-way 21-run same-host benchmark
+        if: steps.isa.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 benchmarks/global_stiffness_123/bench_fourway.py | tee /tmp/result.txt
+      - name: Preserve Newton native peak bytes
+        if: steps.isa.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd worktree
+          for q in 1 2 4; do
+            cp build/topologyc-baseline build/topologyc
+            ./whexc tests/whex/newton_jv_mature_regression.whex -o "build/newton_base_q${q}" --executors "$q" >/dev/null
+            cp build/topologyc-striped build/topologyc
+            ./whexc tests/whex/newton_jv_mature_regression.whex -o "build/newton_striped_q${q}" --executors "$q" >/dev/null
+            cmp "build/newton_base_q${q}" "build/newton_striped_q${q}"
+          done
+          cp build/topologyc-striped build/topologyc
+          echo 'NEWTON_JV_NATIVE_BYTE_IDENTITY_AFTER_STRIPED_REDUCTION=PASS'
+      - name: Regress Rank-N SCE and no-fake-parallelism gates
+        if: steps.isa.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd worktree
+          sh test_rank_n_122.sh | tee /tmp/rankn.txt
+          grep -q '^WHEELCHAIR_RANK_N_1_2_2=PASS$' /tmp/rankn.txt
+          sh test_sparse_causal_expansion_123.sh | tee /tmp/sce.txt
+          grep -q '^WHEELCHAIR_SPARSE_CAUSAL_EXPANSION_1_2_3=PASS$' /tmp/sce.txt
+          grep -q '^RANK_N_GENERATED_RX_CALL_EDGES=0$' /tmp/rankn.txt
+          grep -q '^RANK_N_SCALAR_FALLBACK=0$' /tmp/rankn.txt
+          grep -q '^GLOBAL_OPERATOR_SCALAR_FALLBACK=0$' /tmp/sce.txt
+          grep -q '^GLOBAL_OPERATOR_CENTRAL_SPAWN_LOOP=0$' /tmp/sce.txt
+          grep -q '^GLOBAL_OPERATOR_CENTRAL_WAIT_LOOP=0$' /tmp/sce.txt
+          grep -q '^GLOBAL_OPERATOR_CENTRAL_REDUCTION_LOOP=0$' /tmp/sce.txt
+          grep -q '^GLOBAL_OPERATOR_NON_NEIGHBOR_COMMUNICATION=0$' /tmp/sce.txt
+          echo 'STRIPED_VECTOR_REDUCTION_OLD_TECHNICAL_PEAKS=PASS'
       - uses: actions/upload-artifact@v4
         if: steps.isa.outputs.qualified == 'true'
         with:
-          name: remaining-gap-audit-${{ matrix.image }}-${{ matrix.slot }}
+          name: striped-vector-reduction-${{ matrix.image }}-${{ matrix.slot }}
           path: |
-            /tmp/wh.dis
-            /tmp/c.dis
-            /tmp/counts.txt
+            /tmp/result.txt
+            /tmp/audit.txt
             /tmp/probe.txt
+            /tmp/gcc.txt
+            /tmp/rankn.txt
+            /tmp/sce.txt
+            /tmp/resident.dis
+            /tmp/striped.dis
           if-no-files-found: error
