@@ -1,0 +1,116 @@
+name: Finalize Wheelchair 1.2.4 Generic Native
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/finalize-1.2.4.yml'
+
+permissions:
+  contents: write
+
+env:
+  NATIVE_AUTHORITY_COMMIT: c47e146c7f89c2024f3f63550f64731c5ce1a692
+  FINAL_SOURCE_COMMIT: d99b1eedaf426480a4f30d03ba44c60085669ed9
+  AUTHORITY_RUN: '33879496682'
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: d99b1eedaf426480a4f30d03ba44c60085669ed9
+          fetch-depth: 0
+      - name: Freeze authority and prove documentation-only post-authority delta
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$FINAL_SOURCE_COMMIT"
+          actual=$(git diff --name-only "$NATIVE_AUTHORITY_COMMIT".."$FINAL_SOURCE_COMMIT" | LC_ALL=C sort)
+          expected=$(printf '%s\n' \
+            'worktree/MATURE_1_2_4_PROOF.md' \
+            'worktree/RELEASE_GATES_1_2_4.txt' \
+            'worktree/RELEASE_NOTES_1_2_4.md' \
+            'worktree/RELEASE_PROOF_1_2_4.md' | LC_ALL=C sort)
+          test "$actual" = "$expected"
+          test "$(cat worktree/VERSION)" = '1.2.4'
+          grep -q '^native_authority_commit=c47e146c7f89c2024f3f63550f64731c5ce1a692$' worktree/RELEASE_GATES_1_2_4.txt
+          grep -q '^authority_workflow_run=33879496682$' worktree/RELEASE_GATES_1_2_4.txt
+          grep -q '^WHEELCHAIR_1_2_4_QUORUM=PASS$' worktree/RELEASE_GATES_1_2_4.txt
+          echo 'WHEELCHAIR_1_2_4_POST_AUTHORITY_DOC_ONLY_DELTA=PASS'
+      - name: Create, re-extract and verify release archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd worktree
+          python3 tools/apply_123.py
+          test "$(cat VERSION)" = '1.2.4'
+          cd ..
+          rm -rf /tmp/release /tmp/verify /tmp/Wheelchair-1.2.4.zip /tmp/Wheelchair-1.2.4.zip.sha256
+          mkdir -p /tmp/release/Wheelchair-1.2.4
+          rsync -a --exclude 'build/' --exclude '__pycache__/' --exclude '*.pyc' --exclude '*.pyo' \
+            worktree/ /tmp/release/Wheelchair-1.2.4/
+          rm -f /tmp/release/Wheelchair-1.2.4/SHA256SUMS
+          python3 - <<'PY'
+          from pathlib import Path
+          root=Path('/tmp/release/Wheelchair-1.2.4')
+          forbidden={'.exe','.dll','.so','.o','.a','.pdb','.pyc','.pyo'}
+          forbidden_names={'build','.git','__pycache__'}
+          for p in root.rglob('*'):
+              if any(part in forbidden_names for part in p.relative_to(root).parts):
+                  raise SystemExit(f'forbidden release path: {p.relative_to(root)}')
+              if not p.is_file():
+                  continue
+              if p.suffix.lower() in forbidden:
+                  raise SystemExit(f'forbidden build artifact: {p.relative_to(root)}')
+              h=p.read_bytes()[:4]
+              if h.startswith(b'\x7fELF') or h[:2]==b'MZ':
+                  raise SystemExit(f'forbidden native binary: {p.relative_to(root)}')
+          print('RELEASE_NATIVE_BINARY_HYGIENE=PASS')
+          PY
+          cd /tmp/release/Wheelchair-1.2.4
+          find . -type f ! -name SHA256SUMS -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > SHA256SUMS
+          cd /tmp/release
+          find Wheelchair-1.2.4 -exec touch -t 200001010000 {} +
+          find Wheelchair-1.2.4 \( -type f -o -type d \) | LC_ALL=C sort > /tmp/files124.txt
+          zip -X -q /tmp/Wheelchair-1.2.4.zip -@ < /tmp/files124.txt
+          sha256sum /tmp/Wheelchair-1.2.4.zip | sed 's#/tmp/##' > /tmp/Wheelchair-1.2.4.zip.sha256
+          mkdir -p /tmp/verify
+          unzip -q /tmp/Wheelchair-1.2.4.zip -d /tmp/verify
+          cd /tmp/verify/Wheelchair-1.2.4
+          sha256sum -c SHA256SUMS
+          test "$(cat VERSION)" = '1.2.4'
+          grep -q '^WHEELCHAIR_1_2_4_QUORUM=PASS$' RELEASE_GATES_1_2_4.txt
+          grep -q '^WHEELCHAIR_1_2_4_COMPLETE=PASS$' RELEASE_GATES_1_2_4.txt
+          grep -q '^GENERIC_NATIVE_OPTIMIZATION_1_2_4=PASS$' RELEASE_GATES_1_2_4.txt
+          grep -q '^NEWTON_JV_NATIVE_BYTE_IDENTITY_ON_1_2_4=PASS$' RELEASE_GATES_1_2_4.txt
+          grep -q '^RANK_N_1_2_2_TECHNICAL_PEAK_PROTECTED_ON_1_2_4=PASS$' RELEASE_GATES_1_2_4.txt
+          grep -q '^SCE_1_2_3_TECHNICAL_PEAK_PROTECTED_ON_1_2_4=PASS$' RELEASE_GATES_1_2_4.txt
+          echo 'WHEELCHAIR_1_2_4_PACKAGE_REEXTRACT=PASS'
+          cat /tmp/Wheelchair-1.2.4.zip.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Wheelchair-1.2.4-release
+          path: |
+            /tmp/Wheelchair-1.2.4.zip
+            /tmp/Wheelchair-1.2.4.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+      - name: Publish to main/dist
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          rm -rf /tmp/release-main
+          git worktree add --detach /tmp/release-main origin/main
+          mkdir -p /tmp/release-main/dist
+          cp /tmp/Wheelchair-1.2.4.zip /tmp/release-main/dist/Wheelchair-1.2.4.zip
+          cp /tmp/Wheelchair-1.2.4.zip.sha256 /tmp/release-main/dist/Wheelchair-1.2.4.zip.sha256
+          cd /tmp/release-main
+          git config user.name 'wheelchair-release-bot'
+          git config user.email 'wheelchair-release-bot@users.noreply.github.com'
+          git add dist/Wheelchair-1.2.4.zip dist/Wheelchair-1.2.4.zip.sha256
+          git commit -m 'Release Wheelchair 1.2.4 generic native optimization'
+          git push origin HEAD:main
