@@ -5,9 +5,8 @@ cd "$ROOT"
 mkdir -p build/complete122
 
 # Reuse the complete mature 1.2.1 regression body, replacing only historical
-# assertions whose physical/build envelope is intentionally superseded by
-# 1.2.2 Rank-N. All mathematical, runtime, serial-spine, WH/WHEX, periodic and
-# Newton/Jv invariants remain intact.
+# assertions whose physical/build or host-tool syntax envelope is intentionally
+# superseded by 1.2.2. Mathematical/runtime/parallel invariants stay intact.
 python3 - <<'PY'
 from pathlib import Path
 src=Path('test_complete.sh').read_text(encoding='utf-8')
@@ -18,6 +17,9 @@ src=src.replace('ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\ncd "$ROOT"',
 # hash-protected Rank-N assembly bootstrap generator. The 1.2.2 inherited gate
 # keeps the sovereign-backend proof and narrows only that proxy.
 src=src.replace('./test_109.sh','./test_109_122.sh')
+# Keep the scheduler/resource machine-code assertions unchanged while using a
+# parser-version-independent spelling of its diagnostic summary expression.
+src=src.replace('./test_scheduler.sh','./test_scheduler_122.sh')
 # 1.1.0's non-erasable Rank-N rejection was a physical Rank-1 ceiling, not a
 # permanent semantic invariant. 1.2.2 replaces it with positive native proof.
 src=src.replace('./test_whex_semantic_parallel_121.sh','./test_whex_semantic_parallel_122.sh')
