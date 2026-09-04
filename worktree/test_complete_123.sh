@@ -36,6 +36,10 @@ src=src.replace('ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\ncd "$ROOT"',
 src=src.replace('./test_109.sh','sh test_109_122.sh')
 src=src.replace('./test_scheduler.sh','sh test_scheduler_122.sh')
 src=src.replace('./test_operator_span_mature_1011.sh','sh "'+sys.argv[1]+'"')
+# GNU objdump changed EVEX broadcast spelling; keep the actual 136-byte
+# induction, fused backedge and zero-call assertions while accepting both text
+# spellings of the same machine-code addressing mode.
+src=src.replace('./test_true_parallel_113.sh','sh test_true_parallel_123.sh')
 src=src.replace('./test_whex_semantic_parallel_121.sh','sh test_whex_semantic_parallel_122.sh')
 # 1.2.3 extends whex_semantics.py. Preserve 1.2.2 behavior through canonical and
 # native byte authorities instead of the obsolete whole-file semantic SHA.
