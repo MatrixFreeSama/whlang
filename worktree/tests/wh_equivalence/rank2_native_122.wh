@@ -1,0 +1,7 @@
+program rank2_native_122
+tolerance 1e-12
+input n: u64 range 4..1000000
+for i in n, j in 4 { x[i, j]: f64 = cast(f64, i * 4 + j) }
+for i in n, j in 4 { checksum += x[i, j] }
+output checksum
+test (4) => { checksum = 120.0 }
