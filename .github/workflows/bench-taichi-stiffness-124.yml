@@ -1,0 +1,156 @@
+name: Taichi Global Stiffness 1.2.4
+
+on:
+  push:
+    branches: [bench-taichi-global-stiffness-1.2.4]
+    paths:
+      - '.github/workflows/bench-taichi-stiffness-124.yml'
+
+jobs:
+  bench:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4, 5, 6, 7, 8]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bench-taichi-global-stiffness-1.2.4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build Wheelchair and qualify host
+        id: qual
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/bench
+          {
+            echo "SLOT=${{ matrix.slot }}"
+            lscpu | grep -E 'Vendor ID|Model name|CPU family|^Model:|Socket|Thread|Core' || true
+          } | tee /tmp/bench/cpu.txt
+          cd worktree
+          python3 tools/apply_123.py
+          sh build.sh
+          ./build/topologyc --probe | tee /tmp/bench/probe.txt
+          if grep -q 'AVX-512F: usable' /tmp/bench/probe.txt; then
+            echo 'qualified=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'qualified=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install Taichi 1.7.4
+        if: steps.qual.outputs.qualified == 'true'
+        run: |
+          python -m pip install --disable-pip-version-check --no-input 'taichi==1.7.4'
+          python - <<'PY' | tee /tmp/bench/taichi-version.txt
+          import taichi as ti
+          print('TAICHI_VERSION=' + '.'.join(map(str, ti.__version__)))
+          PY
+      - name: Compile matched binaries
+        if: steps.qual.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd worktree
+          cp build/topologyc /tmp/topologyc-124
+          for q in 1 2 4; do
+            cp /tmp/topologyc-124 build/topologyc
+            ./whexc ../benchmarks/global_operator_124/stiffness.whex -o "build/stiffness_wh_q${q}" --executors "$q" >/dev/null
+          done
+          cp /tmp/topologyc-124 build/topologyc
+          gcc -O3 -march=native -mtune=native -flto -ffast-math -mprefer-vector-width=512 -pthread \
+            ../benchmarks/global_operator_124/Global_Stiffness_expert_C_matched.c -o build/stiffness_c512
+          gcc --version | head -1 | tee /tmp/bench/gcc.txt
+      - name: Benchmark Wheelchair and expert C
+        if: steps.qual.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          cd worktree
+          python - <<'PY' | tee /tmp/bench/native.txt
+          import os, random, statistics, subprocess, time
+          from pathlib import Path
+          B=Path('build'); RUNS=11; WARM=3
+          def cpus(q): return ','.join(map(str, sorted(os.sched_getaffinity(0))[:q]))
+          def run(cmd): return subprocess.check_output(cmd, text=True).strip()
+          def wh(n,q): return ['taskset','-c',cpus(q),str(B/f'stiffness_wh_q{q}'),str(n)]
+          def cc(n,q): return ['taskset','-c',cpus(q),str(B/'stiffness_c512'),str(n),str(q)]
+          rng=random.Random(0x7A1C124)
+          for n in (10_000_000,100_000_000):
+            for q in (1,2,4):
+              cmds={'WH':wh(n,q),'C512':cc(n,q)}
+              first={k:run(v) for k,v in cmds.items()}
+              if first['WH'] != first['C512']:
+                raise SystemExit(f'native checksum mismatch n={n} q={q}: {first}')
+              for cmd in cmds.values():
+                for _ in range(WARM): run(cmd)
+              s={k:[] for k in cmds}
+              for _ in range(RUNS):
+                order=list(cmds); rng.shuffle(order)
+                for k in order:
+                  t=time.perf_counter_ns(); out=run(cmds[k]); dt=(time.perf_counter_ns()-t)/1e6
+                  if out != first[k]: raise SystemExit('native checksum drift')
+                  s[k].append(dt)
+              m={k:statistics.median(v) for k,v in s.items()}
+              print(f'NATIVE N={n} Q={q} WH_MS={m["WH"]:.6f} C512_MS={m["C512"]:.6f} C/WH={m["C512"]/m["WH"]:.4f}x CHECKSUM={first["WH"]}')
+          PY
+      - name: Benchmark Taichi steady-state kernel
+        if: steps.qual.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cpus_for () { python - "$1" <<'PY'
+          import os,sys
+          q=int(sys.argv[1]); print(','.join(map(str,sorted(os.sched_getaffinity(0))[:q])))
+          PY
+          }
+          for q in 1 2 4; do
+            taskset -c "$(cpus_for "$q")" python benchmarks/taichi_global_stiffness_124/taichi_stiffness.py --threads "$q" --runs 11 --warm 3 | tee "/tmp/bench/taichi_q${q}.txt"
+          done
+      - name: Compare all three
+        if: steps.qual.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          python - <<'PY' | tee /tmp/bench/summary.txt
+          import re, struct
+          from pathlib import Path
+          native={}
+          rx=re.compile(r'NATIVE N=(\d+) Q=(\d+) WH_MS=([0-9.]+) C512_MS=([0-9.]+).*CHECKSUM=checksum_bits=0x([0-9a-fA-F]+)')
+          for line in Path('/tmp/bench/native.txt').read_text().splitlines():
+            m=rx.search(line)
+            if m:
+              n,q=int(m[1]),int(m[2]); bits=int(m[5],16)
+              native[(n,q)]=(float(m[3]),float(m[4]),struct.unpack('>d',bits.to_bytes(8,'big'))[0])
+          taichi={}
+          rt=re.compile(r'TAICHI N=(\d+) Q=(\d+) MEDIAN_MS=([0-9.]+).*CHECKSUM=([^ ]+) DRIFT=([^ ]+)')
+          for q in (1,2,4):
+            for line in Path(f'/tmp/bench/taichi_q{q}.txt').read_text().splitlines():
+              m=rt.search(line)
+              if m:
+                taichi[(int(m[1]),int(m[2]))]=(float(m[3]),float(m[4]))
+          if set(native)!=set(taichi): raise SystemExit(f'missing cases native={native.keys()} taichi={taichi.keys()}')
+          ratios=[]
+          for key in sorted(native):
+            wh,c,ref=native[key]; t,val=taichi[key]
+            rel=abs(val-ref)/max(abs(ref),1.0)
+            if rel>1e-10: raise SystemExit(f'Taichi numeric mismatch {key}: rel={rel} taichi={val} ref={ref}')
+            ratios.append(t/wh)
+            n,q=key
+            print(f'FINAL N={n} Q={q} WH={wh:.6f}ms C512={c:.6f}ms TAICHI={t:.6f}ms TAICHI/WH={t/wh:.2f}x TAICHI/C={t/c:.2f}x RELERR={rel:.3e}')
+          import statistics
+          print(f'TAICHI_MEDIAN_SLOWDOWN_VS_WH={statistics.median(ratios):.2f}x')
+          print('TAICHI_GLOBAL_STIFFNESS_NUMERIC=PASS')
+          PY
+      - name: Seal result
+        if: steps.qual.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          cat /tmp/bench/cpu.txt /tmp/bench/probe.txt /tmp/bench/taichi-version.txt /tmp/bench/gcc.txt /tmp/bench/native.txt /tmp/bench/taichi_q1.txt /tmp/bench/taichi_q2.txt /tmp/bench/taichi_q4.txt /tmp/bench/summary.txt > /tmp/bench/result.txt
+          echo 'TAICHI_STIFFNESS_BENCHMARK=PASS' >> /tmp/bench/result.txt
+      - uses: actions/upload-artifact@v4
+        if: steps.qual.outputs.qualified == 'true'
+        with:
+          name: taichi-stiffness-${{ matrix.slot }}
+          path: /tmp/bench/result.txt
+          if-no-files-found: error
