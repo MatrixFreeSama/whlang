@@ -121,14 +121,26 @@ python3 wheelchairc.py tests/wh_equivalence/rank2_native_122.wh -o "$TMP/r2wh" -
 [ "$($TMP/r2wh 4)" = "$($TMP/r2.4 4)" ]
 echo 'WH_WHEX_RANK2_NATIVE_EQUIVALENCE=PASS'
 
-# Disassemble all sections, including the appended generated RX image. The
-# dynamic-axis probe must exhibit the AVX-512F logical right-shift realization.
-objdump -D "$TMP/r2dynamic" > "$TMP/r2dynamic.asm"
-grep -Eiq 'vpsrlq' "$TMP/r2dynamic.asm"
-if grep -Eq 'call.*<eval_slot>' "$TMP/r2dynamic.asm"; then
-  echo 'Rank-N scalar eval-slot fallback detected' >&2; exit 1
+# The release image deliberately erases ELF section headers after AOT emission,
+# so ordinary objdump section traversal cannot see the appended kernel. Extract
+# the third PT_LOAD, which tensor_runtime.ld defines as the generated RX segment,
+# and disassemble those exact native bytes as a raw x86-64 image.
+set -- $(readelf -lW "$TMP/r2dynamic" | awk '$1=="LOAD" {n++; if(n==3){print $2,$5; exit}}')
+[ "$#" -eq 2 ]
+rx_off=$(( $1 ))
+rx_size=$(( $2 ))
+[ "$rx_size" -gt 0 ]
+dd if="$TMP/r2dynamic" of="$TMP/r2dynamic.rx" bs=1 skip="$rx_off" count="$rx_size" status=none
+objdump -D -b binary -m i386:x86-64 "$TMP/r2dynamic.rx" > "$TMP/r2dynamic.rx.asm"
+grep -Eiq 'vpsrlq' "$TMP/r2dynamic.rx.asm"
+# The generated evaluator is a fused native episode. It must contain no CALL at
+# all; runtime reaches it by a patched direct jump and there is no scalar oracle.
+if grep -Eiq '[[:space:]]call[q]?[[:space:]]' "$TMP/r2dynamic.rx.asm"; then
+  echo 'Rank-N generated RX contains a call edge' >&2; exit 1
 fi
+grep -q 'call vec_vpsrlq_imm' build/generated_122/tensor_rankn_frontend_x86_64.S
 echo 'RANK_N_AVX512_COORDINATE_RECOVERY=PASS'
+echo 'RANK_N_GENERATED_RX_CALL_EDGES=0'
 echo 'RANK_N_SCALAR_FALLBACK=0'
 
 # Existing mathematical Rank-N erasure still has precedence and byte identity.
