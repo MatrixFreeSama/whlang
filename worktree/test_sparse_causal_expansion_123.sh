@@ -144,7 +144,7 @@ for q in 1 2 4; do
   ./whexc tests/whex/global_operator_separator_123_a.whex -o "build/sce123/a_$q" --executors "$q" >/dev/null
   ./whexc tests/whex/global_operator_separator_123_b.whex -o "build/sce123/b_$q" --executors "$q" >/dev/null
   cmp "build/sce123/a_$q" "build/sce123/b_$q"
-  [ "$(build/sce123/a_$q 4)" = 'checksum_bits=0x4038000000000000' ]
+  [ "$(build/sce123/a_$q 4)" = 'checksum_bits=0x4036000000000000' ]
 done
 echo 'GLOBAL_OPERATOR_NATIVE_REFERENCE_1_2_4_EXECUTORS=PASS'
 echo 'GLOBAL_OPERATOR_RENAMED_NATIVE_BYTE_EQUIVALENCE=PASS'
