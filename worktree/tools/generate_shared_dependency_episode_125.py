@@ -9,14 +9,15 @@ text = SRC.read_text(encoding='utf-8')
 
 # Compile-time reciprocal generation for tolerant FP. Strict mode remains on the
 # mature exact-power-of-two path. This helper executes in the AOT compiler only;
-# no division instruction is copied into generated runtime code. Subnormal
-# reciprocals are deliberately rejected so the compile result cannot depend on
-# an inherited FTZ/DAZ MXCSR environment; those cases retain the proved vector
-# division recipe instead.
+# no division instruction is copied into generated runtime code. The reciprocal
+# calculation temporarily installs the canonical IEEE binary64 MXCSR state and
+# restores the caller state immediately. Subnormal reciprocal results are still
+# rejected, keeping emitted runtime behavior independent of a consumer FTZ/DAZ
+# environment; those cases retain the proved vector division recipe.
 anchor = '''.rpf_no:\n    xor eax,eax\n    mov edx,1\n    ret\n\n# gen_load_f64_bits'''
 if anchor not in text:
     raise SystemExit('reciprocal helper anchor missing')
-helper = '''.rpf_no:\n    xor eax,eax\n    mov edx,1\n    ret\n\n# tolerant_recip_f64_bits(rax=f64 bits) -> rounded normal binary64 reciprocal bits.\n# Reject zero, NaN, infinity and subnormal results. Used only when tensor_tolerant_fp is set.\ntolerant_recip_f64_bits:\n    mov rcx,rax\n    mov rdx,rcx\n    btr rdx,63\n    test rdx,rdx\n    jz .trf_no\n    mov r8,rdx\n    shr r8,52\n    and r8d,0x7ff\n    cmp r8d,0x7ff\n    je .trf_no\n    movq xmm0,rcx\n    mov rcx,0x3ff0000000000000\n    movq xmm1,rcx\n    divsd xmm1,xmm0\n    movq rax,xmm1\n    mov rcx,rax\n    shr rcx,52\n    and ecx,0x7ff\n    test ecx,ecx\n    jz .trf_no\n    cmp ecx,0x7ff\n    je .trf_no\n    xor edx,edx\n    ret\n.trf_no:\n    xor eax,eax\n    mov edx,1\n    ret\n\n# gen_load_f64_bits'''
+helper = '''.rpf_no:\n    xor eax,eax\n    mov edx,1\n    ret\n\n# tolerant_recip_f64_bits(rax=f64 bits) -> rounded normal binary64 reciprocal bits.\n# Reject zero, NaN, infinity and subnormal results. Used only when tensor_tolerant_fp is set.\ntolerant_recip_f64_bits:\n    mov rcx,rax\n    mov rdx,rcx\n    btr rdx,63\n    test rdx,rdx\n    jz .trf_no\n    mov r8,rdx\n    shr r8,52\n    and r8d,0x7ff\n    cmp r8d,0x7ff\n    je .trf_no\n    movq xmm0,rcx\n    sub rsp,16\n    stmxcsr dword ptr [rsp]\n    mov dword ptr [rsp+4],0x1f80\n    ldmxcsr dword ptr [rsp+4]\n    mov rcx,0x3ff0000000000000\n    movq xmm1,rcx\n    divsd xmm1,xmm0\n    movq rax,xmm1\n    ldmxcsr dword ptr [rsp]\n    add rsp,16\n    mov rcx,rax\n    shr rcx,52\n    and ecx,0x7ff\n    test ecx,ecx\n    jz .trf_no\n    cmp ecx,0x7ff\n    je .trf_no\n    xor edx,edx\n    ret\n.trf_no:\n    xor eax,eax\n    mov edx,1\n    ret\n\n# gen_load_f64_bits'''
 text = text.replace(anchor, helper, 1)
 
 # Extend the ordinary vector division lowering. Exact reciprocal stays first, so
@@ -67,5 +68,6 @@ WIDE.write_text(wide, encoding='utf-8')
 print('SHARED_DEPENDENCY_EPISODE_BASE_1_2_5=DERIVED')
 print('SHARED_DEPENDENCY_EPISODE_WIDE_1_2_5=DERIVED')
 print('SHARED_DEPENDENCY_EPISODE_RUNTIME_RESERVED_ZMM12_15=PROTECTED')
+print('SHARED_DEPENDENCY_EPISODE_AOT_MXCSR_CANONICAL=PASS')
 print('SHARED_DEPENDENCY_EPISODE_SUBNORMAL_RECIPROCAL_REJECT=PASS')
 print('SHARED_DEPENDENCY_EPISODE_SCALAR_FALLBACK=0')
