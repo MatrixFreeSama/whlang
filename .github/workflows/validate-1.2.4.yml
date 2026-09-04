@@ -1,3 +1,4 @@
+# authority rerun after 1.0.9 sovereignty-gate refinement
 name: Validate Wheelchair 1.2.4 Generic Native
 on:
   push:
