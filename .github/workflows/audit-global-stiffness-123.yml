@@ -1,5 +1,5 @@
 name: Benchmark Wheelchair Generic Product-Subtract Contraction
-# trigger: contraction benchmark
+# trigger: contraction benchmark v2
 on:
   push:
     branches: [main]
