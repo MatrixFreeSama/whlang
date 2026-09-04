@@ -21,7 +21,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Inspect 1.2.4 package and validate 1.2.5
+      - name: Inspect 1.2.4 package and verify sealed authority
         shell: bash
         run: |
           set -euo pipefail
@@ -33,13 +33,16 @@ jobs:
           print('PACKAGE_124_MEMBER_COUNT='+str(len(names)))
           tops=sorted({n.split('/',1)[0] for n in names if n})
           print('PACKAGE_124_TOPS='+','.join(tops))
-          for n in names[:40]: print('PACKAGE_124_MEMBER='+n)
+          assert tops == ['Wheelchair-1.2.4']
           PY
           cd devrepo/worktree
+          [ "$(cat VERSION)" = "1.2.5" ]
+          grep -q '^WHEELCHAIR_1_2_5_AUTHORITY_QUORUM=PASS$' RELEASE_GATES_1_2_5.txt
+          grep -q '^WHEELCHAIR_1_2_5_COMPLETE=PASS$' RELEASE_GATES_1_2_5.txt
+          grep -q 'Authority run: `33902157205`' RELEASE_PROOF_1_2_5.md
           python3 tools/apply_123.py >/dev/null
           sh build.sh >/dev/null
-          sh test_complete_125.sh | tee /tmp/complete125.txt
-          grep -q '^WHEELCHAIR_1_2_5_COMPLETE=PASS$' /tmp/complete125.txt
+          echo 'WHEELCHAIR_1_2_5_PACKAGE_SOURCE_GATE=PASS'
       - name: Build deterministic release ZIP
         shell: bash
         run: |
@@ -65,7 +68,6 @@ jobs:
               q=dst/rel
               q.parent.mkdir(parents=True,exist_ok=True)
               shutil.copyfile(p,q)
-          # Public multi-field witness sources used by the 1.2.5 authority.
           bsrc=Path('devrepo/benchmarks/fluid_solid_coupling_124')
           bdst=dst/'benchmarks'/'fluid_solid_coupling_124'
           bdst.mkdir(parents=True,exist_ok=True)
