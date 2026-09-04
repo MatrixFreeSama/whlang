@@ -1,5 +1,5 @@
 name: Benchmark Wheelchair Generic Product-Subtract Contraction
-# trigger: contraction benchmark v3
+# trigger: three-way same-host validation
 on:
   push:
     branches: [main]
@@ -14,53 +14,74 @@ jobs:
         image: [ubuntu-22.04, ubuntu-24.04]
         slot: [1,2,3]
     runs-on: ${{ matrix.image }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
           ref: bench-global-stiffness-1.2.3
           fetch-depth: 0
-      - shell: bash
+      - name: Build experimental generic contraction lane
         id: isa
+        shell: bash
         run: |
           set -euo pipefail
           cd worktree
           python3 tools/apply_123.py
           sh build.sh
+          cp build/topologyc build/topologyc-product-subtract
           ./build/topologyc --probe | tee /tmp/probe.txt
           if grep -q 'AVX-512F: usable' /tmp/probe.txt; then echo 'qualified=true' >> "$GITHUB_OUTPUT"; else echo 'qualified=false' >> "$GITHUB_OUTPUT"; fi
-      - name: Compile contestants and audit generated RX
+      - name: Compile baseline optimized and expert C
         if: steps.isa.outputs.qualified == 'true'
         shell: bash
         run: |
           set -euo pipefail
           cd worktree
-          for q in 1 2 4; do ./whexc ../benchmarks/global_stiffness_123/stiffness.whex -o "build/global_stiffness_wh_q${q}" --executors "$q" >/dev/null; done
+          as --64 compiler/tensor_frontend_x86_64.S -o build/tensor_frontend_baseline.o
+          ld -nostdlib -static -z noexecstack build/topologyc_core.o build/tensor_frontend_baseline.o build/general_frontend.o build/runtime_blob.o build/general_runtime_blob.o -o build/topologyc-baseline
+          for q in 1 2 4; do
+            cp build/topologyc-baseline build/topologyc
+            ./whexc ../benchmarks/global_stiffness_123/stiffness.whex -o "build/global_stiffness_base_q${q}" --executors "$q" >/dev/null
+            cp build/topologyc-product-subtract build/topologyc
+            ./whexc ../benchmarks/global_stiffness_123/stiffness.whex -o "build/global_stiffness_opt_q${q}" --executors "$q" >/dev/null
+          done
+          cp build/topologyc-product-subtract build/topologyc
           gcc -O3 -march=native -mtune=native -flto -ffast-math -pthread ../benchmarks/global_stiffness_123/Global_Stiffness_expert_C_matched.c -o build/global_stiffness_c
-          sh tools/disassemble_generated.sh build/global_stiffness_wh_q1 > /tmp/wh.dis 2>&1
-          count(){ grep -Eic "$1" /tmp/wh.dis || true; }
-          printf 'WH_VFNMADD_COUNT=%s\n' "$(count vfnmadd)" | tee /tmp/audit.txt
-          printf 'WH_VMULPD_COUNT=%s\n' "$(count vmulpd)" | tee -a /tmp/audit.txt
-          printf 'WH_VSUBPD_COUNT=%s\n' "$(count vsubpd)" | tee -a /tmp/audit.txt
-          printf 'WH_GENERATED_CALLS=%s\n' "$(count 'call')" | tee -a /tmp/audit.txt
-          test "$(count vfnmadd)" -gt 0
-          test "$(count 'call')" -eq 0
-      - name: Quick same-host benchmark
+          gcc --version | head -1 | tee /tmp/gcc.txt
+      - name: Audit optimized generated RX
         if: steps.isa.outputs.qualified == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          python3 benchmarks/global_stiffness_123/bench.py | tee /tmp/result.txt
-          cat /tmp/audit.txt
+          cd worktree
+          sh tools/disassemble_generated.sh build/global_stiffness_opt_q1 > /tmp/wh-opt.dis 2>&1
+          sh tools/disassemble_generated.sh build/global_stiffness_base_q1 > /tmp/wh-base.dis 2>&1
+          count_opt(){ grep -Eic "$1" /tmp/wh-opt.dis || true; }
+          count_base(){ grep -Eic "$1" /tmp/wh-base.dis || true; }
+          {
+            printf 'BASE_VFNMADD_COUNT=%s\n' "$(count_base vfnmadd)"
+            printf 'OPT_VFNMADD_COUNT=%s\n' "$(count_opt vfnmadd)"
+            printf 'BASE_VMULPD_COUNT=%s\n' "$(count_base vmulpd)"
+            printf 'OPT_VMULPD_COUNT=%s\n' "$(count_opt vmulpd)"
+            printf 'BASE_VSUBPD_COUNT=%s\n' "$(count_base vsubpd)"
+            printf 'OPT_VSUBPD_COUNT=%s\n' "$(count_opt vsubpd)"
+            printf 'OPT_GENERATED_CALLS=%s\n' "$(count_opt call)"
+          } | tee /tmp/audit.txt
+          test "$(count_base vfnmadd)" -eq 0
+          test "$(count_opt vfnmadd)" -gt 0
+          test "$(count_opt call)" -eq 0
+      - name: Three-way 21-run same-host benchmark
+        if: steps.isa.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 benchmarks/global_stiffness_123/bench_threeway.py | tee /tmp/result.txt
       - name: Preserve Newton native peak bytes
         if: steps.isa.outputs.qualified == 'true'
         shell: bash
         run: |
           set -euo pipefail
           cd worktree
-          cp build/topologyc build/topologyc-product-subtract
-          as --64 compiler/tensor_frontend_x86_64.S -o build/tensor_frontend_baseline.o
-          ld -nostdlib -static -z noexecstack build/topologyc_core.o build/tensor_frontend_baseline.o build/general_frontend.o build/runtime_blob.o build/general_runtime_blob.o -o build/topologyc-baseline
           for q in 1 2 4; do
             cp build/topologyc-baseline build/topologyc
             ./whexc tests/whex/newton_jv_mature_regression.whex -o "build/newton_base_q${q}" --executors "$q" >/dev/null
@@ -68,12 +89,28 @@ jobs:
             ./whexc tests/whex/newton_jv_mature_regression.whex -o "build/newton_opt_q${q}" --executors "$q" >/dev/null
             cmp "build/newton_base_q${q}" "build/newton_opt_q${q}"
           done
+          cp build/topologyc-product-subtract build/topologyc
           echo 'NEWTON_JV_NATIVE_BYTE_IDENTITY_AFTER_PRODUCT_SUBTRACT=PASS'
+      - name: Regress mature Rank-N and SCE
+        if: steps.isa.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd worktree
+          sh test_rank_n_122.sh | tee /tmp/rankn.txt
+          grep -q '^WHEELCHAIR_RANK_N_1_2_2=PASS$' /tmp/rankn.txt
+          sh test_sparse_causal_expansion_123.sh | tee /tmp/sce.txt
+          grep -q '^WHEELCHAIR_SPARSE_CAUSAL_EXPANSION_1_2_3=PASS$' /tmp/sce.txt
+          echo 'PRODUCT_SUBTRACT_OLD_TECHNICAL_PEAKS=PASS'
       - uses: actions/upload-artifact@v4
         if: steps.isa.outputs.qualified == 'true'
         with:
-          name: product-subtract-${{ matrix.image }}-${{ matrix.slot }}
+          name: product-subtract-threeway-${{ matrix.image }}-${{ matrix.slot }}
           path: |
             /tmp/result.txt
             /tmp/audit.txt
+            /tmp/probe.txt
+            /tmp/gcc.txt
+            /tmp/rankn.txt
+            /tmp/sce.txt
           if-no-files-found: error
