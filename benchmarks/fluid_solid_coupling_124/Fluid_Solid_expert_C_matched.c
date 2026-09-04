@@ -5,10 +5,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef COUPLED_MODE
+#define COUPLED_MODE 0
+#endif
+
 #define CHUNK 65536ULL
 static uint64_t N;
 static int E;
-static int COUPLED;
 static double *partials;
 typedef struct { int e; } Arg;
 
@@ -27,9 +30,11 @@ static inline double mu(uint64_t i){
 static inline double elastic(uint64_t i){
     return 1.25 + (double)((i*19ULL + 1ULL) & 255ULL) * (1.0/1024.0);
 }
+#if COUPLED_MODE
 static inline double gamma_c(uint64_t i){
     return 0.125 + (double)((i*5ULL + 7ULL) & 63ULL) * (1.0/4096.0);
 }
+#endif
 
 static inline double slot(uint64_t i){
     uint64_t im1 = i ? i-1 : N-1;
@@ -38,12 +43,12 @@ static inline double slot(uint64_t i){
     double ui=solid(i), um=solid(im1), up=solid(ip1);
     double F = rho(i) * (2.0*fi - fm - fp) + mu(i) * (fp - fm);
     double S = elastic(i) * (2.0*ui - um - up) + 0.0625 * (up - um);
-    if(COUPLED){
-        double g=gamma_c(i);
-        double d=fi-ui;
-        F += g*d;
-        S -= g*d;
-    }
+#if COUPLED_MODE
+    double g=gamma_c(i);
+    double d=fi-ui;
+    F += g*d;
+    S -= g*d;
+#endif
     return F*F + S*S;
 }
 
@@ -76,9 +81,9 @@ static double tree_reduce(uint64_t m){
     return partials[0];
 }
 int main(int argc,char**argv){
-    if(argc!=4) return 2;
-    N=strtoull(argv[1],0,10); E=atoi(argv[2]); COUPLED=atoi(argv[3]);
-    if(N<4 || N>100000000 || (E!=1 && E!=2 && E!=4) || (COUPLED!=0 && COUPLED!=1)) return 2;
+    if(argc!=3) return 2;
+    N=strtoull(argv[1],0,10); E=atoi(argv[2]);
+    if(N<4 || N>100000000 || (E!=1 && E!=2 && E!=4)) return 2;
     uint64_t chunks=(N+CHUNK-1)/CHUNK;
     if(posix_memalign((void**)&partials,64,chunks*sizeof(double))) return 3;
     pthread_t th[4]; Arg a[4];
