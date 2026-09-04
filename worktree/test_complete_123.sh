@@ -12,6 +12,12 @@ python3 tools/apply_123.py
 python3 - <<'PY'
 from pathlib import Path
 src=Path('test_complete_122.sh').read_text(encoding='utf-8')
+# The derived 1.2.2 harness lives under build/complete123. Keep the release root
+# inherited from this caller instead of deriving ROOT from the temporary path.
+root_old='ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\ncd "$ROOT"'
+if src.count(root_old)!=1:
+    raise SystemExit('1.2.3 complete-harness root anchor changed')
+src=src.replace(root_old,'ROOT=$(pwd)\ncd "$ROOT"',1)
 old="sh test_wh_equivalence_122.sh"
 new="sh test_wh_equivalence_123.sh"
 if src.count(old)!=1:
