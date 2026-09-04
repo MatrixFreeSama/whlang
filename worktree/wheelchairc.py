@@ -43,6 +43,7 @@ def main():
         plan=wh_structural.semantic_plan(parser)
         blob=wh_structural.canonical_core_bytes(data)
         episode=sde.analyze(data)
+        plan['shared_dependency_episode']=episode
         rc,out,err=_compile_native(blob,a.output,a.executors,rank_n=("rank_n_product" in data),episode=episode)
         if rc:
             sys.stderr.write(err or out); return rc
@@ -67,9 +68,9 @@ def main():
     data, parser = wh_surface.compile_surface(text,a.source)
     static_data, static_lowering = wh_surface.lower_static_general_constructs(data)
     lowered_data, gtr = wh_surface.recover_topology_program(static_data)
-    # Compile-lane identity is decided before native compilation.  Unrecovered
+    # Compile-lane identity is decided before native compilation. Unrecovered
     # general semantics are never presented to the tensor frontend, while GTR
-    # outputs remain byte-equivalent to WHEX topology cores.  This is routing
+    # outputs remain byte-equivalent to WHEX topology cores. This is routing
     # metadata, not a failure-driven fallback.
     native_data = lowered_data
     if not gtr.get('active'):
@@ -81,13 +82,17 @@ def main():
     if rc:
         sys.stderr.write(err or out); return rc
     if a.semantic_plan is not None:
-        # General programs deliberately do not fabricate a structural proof.
-        a.semantic_plan.parent.mkdir(parents=True,exist_ok=True)
-        a.semantic_plan.write_text(json.dumps({
+        # Recovered general topology carries the same episode proof; unrecovered
+        # general programs deliberately do not fabricate one.
+        semantic={
             'semantic_format':'wheelchair.wh.general/1',
             'structural_recovery':gtr,
             'serial_introduction_audit':'not_claimed_for_unrecovered_general_lane'
-        },ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+        }
+        if episode is not None:
+            semantic['shared_dependency_episode']=episode
+        a.semantic_plan.parent.mkdir(parents=True,exist_ok=True)
+        a.semantic_plan.write_text(json.dumps(semantic,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
     print(json.dumps({
         'source':str(a.source), 'output':str(a.output),
         'surface_lane':'wheelchair.wh.legacy_general/1',
