@@ -1,0 +1,168 @@
+name: Wheelchair 1.2.5 vs Taichi vs Expert C Simple Triplet
+
+on:
+  push:
+    branches: [bench-simple-taichi-c-125]
+    paths:
+      - '.github/workflows/bench-simple-taichi-c-125.yml'
+
+jobs:
+  bench:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bench-simple-taichi-c-125
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Unpack formal 1.2.5 and qualify host
+        id: qual
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/bench /tmp/rel
+          {
+            echo "SLOT=${{ matrix.slot }}"
+            lscpu | grep -E 'Vendor ID|Model name|CPU family|^Model:|Socket|Thread|Core' || true
+          } | tee /tmp/bench/cpu.txt
+          unzip -q dist/Wheelchair-1.2.5.zip -d /tmp/rel
+          cd /tmp/rel/Wheelchair-1.2.5
+          find . -type f -name '*.sh' -exec chmod +x {} +
+          chmod +x wheelchairc whexc topologyc* 2>/dev/null || true
+          python3 tools/apply_123.py >/dev/null
+          sh build.sh >/dev/null
+          ./build/topologyc --probe | tee /tmp/bench/probe.txt
+          if grep -q 'AVX-512F: usable' /tmp/bench/probe.txt; then
+            echo 'qualified=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'qualified=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install Taichi 1.7.4
+        if: steps.qual.outputs.qualified == 'true'
+        run: |
+          python -m pip install --disable-pip-version-check --no-input 'taichi==1.7.4'
+          python - <<'PY' | tee /tmp/bench/taichi-version.txt
+          import taichi as ti
+          print('TAICHI_VERSION=' + '.'.join(map(str, ti.__version__)))
+          PY
+      - name: Compile Wheelchair and Expert C
+        if: steps.qual.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/rel/Wheelchair-1.2.5
+          for q in 1 2 4; do
+            ./build/topologyc tests/topology_cases/heat_diffusion_step_tolerant.wh -o "/tmp/bench/heat_wh_q${q}" --executors "$q" >/dev/null
+            ./build/topologyc tests/topology_cases/wave_leapfrog_step_tolerant.wh -o "/tmp/bench/wave_wh_q${q}" --executors "$q" >/dev/null
+            ./build/topologyc tests/topology_cases/sparse_nonlinear_operator_tolerant.wh -o "/tmp/bench/sparse_wh_q${q}" --executors "$q" >/dev/null
+          done
+          cd "$GITHUB_WORKSPACE"
+          gcc -O3 -march=native -mtune=native -flto -ffast-math -mprefer-vector-width=512 -pthread \
+            benchmarks/simple_taichi_c_125/Expert_C_simple_triplet.c -o /tmp/bench/expert_c
+          gcc --version | head -1 | tee /tmp/bench/gcc.txt
+      - name: Benchmark Wheelchair and Expert C
+        if: steps.qual.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          python - <<'PY' | tee /tmp/bench/native.txt
+          import os, random, statistics, struct, subprocess, time, re
+          RUNS=11; WARM=3
+          cpulist=sorted(os.sched_getaffinity(0))
+          def cpus(q): return ','.join(map(str,cpulist[:q]))
+          def run(cmd): return subprocess.check_output(cmd,text=True).strip()
+          def bits_to_double(bits): return struct.unpack('>d',int(bits,16).to_bytes(8,'big'))[0]
+          rx=re.compile(r'checksum_bits=0x([0-9a-fA-F]+)')
+          rng=random.Random(0x12551A)
+          for workload in ('heat','wave','sparse'):
+            for n in (10_000_000,100_000_000):
+              for q in (1,2,4):
+                aff=cpus(q)
+                cmds={
+                  'WH':['taskset','-c',aff,f'/tmp/bench/{workload}_wh_q{q}',str(n)],
+                  'C512':['taskset','-c',aff,'/tmp/bench/expert_c',workload,str(n),str(q)]
+                }
+                first={k:run(v) for k,v in cmds.items()}
+                vals={k:bits_to_double(rx.search(v).group(1)) for k,v in first.items()}
+                rel=abs(vals['WH']-vals['C512'])/max(abs(vals['WH']),1.0)
+                if rel>2e-8: raise SystemExit(f'numeric mismatch {workload} n={n} q={q}: rel={rel} {first}')
+                for cmd in cmds.values():
+                  for _ in range(WARM): run(cmd)
+                samples={k:[] for k in cmds}
+                for _ in range(RUNS):
+                  order=list(cmds); rng.shuffle(order)
+                  for k in order:
+                    t=time.perf_counter_ns(); out=run(cmds[k]); dt=(time.perf_counter_ns()-t)/1e6
+                    if not rx.search(out): raise SystemExit('missing checksum')
+                    samples[k].append(dt)
+                med={k:statistics.median(v) for k,v in samples.items()}
+                print(f'NATIVE WORKLOAD={workload} N={n} Q={q} WH_MS={med["WH"]:.6f} C512_MS={med["C512"]:.6f} WH/C={med["WH"]/med["C512"]:.4f}x WH_CHECKSUM={vals["WH"]:.17g} C_RELERR={rel:.3e}')
+          PY
+      - name: Benchmark Taichi steady-state kernels
+        if: steps.qual.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cpus_for () { python - "$1" <<'PY'
+          import os,sys
+          q=int(sys.argv[1]); print(','.join(map(str,sorted(os.sched_getaffinity(0))[:q])))
+          PY
+          }
+          for q in 1 2 4; do
+            taskset -c "$(cpus_for "$q")" python benchmarks/simple_taichi_c_125/taichi_simple_triplet.py --threads "$q" --runs 11 --warm 8 | tee "/tmp/bench/taichi_q${q}.txt"
+          done
+      - name: Compare all three
+        if: steps.qual.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          python - <<'PY' | tee /tmp/bench/summary.txt
+          import math,re,statistics
+          from pathlib import Path
+          native={}; taichi={}
+          rn=re.compile(r'NATIVE WORKLOAD=(\w+) N=(\d+) Q=(\d+) WH_MS=([0-9.]+) C512_MS=([0-9.]+).*WH_CHECKSUM=([^ ]+)')
+          for line in Path('/tmp/bench/native.txt').read_text().splitlines():
+            m=rn.search(line)
+            if m: native[(m[1],int(m[2]),int(m[3]))]=(float(m[4]),float(m[5]),float(m[6]))
+          rt=re.compile(r'TAICHI WORKLOAD=(\w+) N=(\d+) Q=(\d+) MEDIAN_MS=([0-9.]+) CHECKSUM=([^ ]+) DRIFT=([^ ]+)')
+          for q in (1,2,4):
+            for line in Path(f'/tmp/bench/taichi_q{q}.txt').read_text().splitlines():
+              m=rt.search(line)
+              if m: taichi[(m[1],int(m[2]),int(m[3]))]=(float(m[4]),float(m[5]),float(m[6]))
+          if set(native)!=set(taichi): raise SystemExit(f'missing cases native={len(native)} taichi={len(taichi)}')
+          all_tw=[]; all_tc=[]; wins=0
+          by={w:[] for w in ('heat','wave','sparse')}
+          for key in sorted(native):
+            wh,c,ref=native[key]; t,val,drift=taichi[key]
+            rel=abs(val-ref)/max(abs(ref),1.0)
+            if rel>2e-8: raise SystemExit(f'Taichi numeric mismatch {key}: rel={rel}')
+            tw=t/wh; tc=t/c; all_tw.append(tw); all_tc.append(tc); by[key[0]].append(tw)
+            if t<wh: wins+=1
+            w,n,q=key
+            print(f'FINAL WORKLOAD={w} N={n} Q={q} WH={wh:.6f}ms C512={c:.6f}ms TAICHI={t:.6f}ms TAICHI/WH={tw:.3f}x TAICHI/C={tc:.3f}x RELERR={rel:.3e}')
+          def gm(xs): return math.exp(sum(math.log(x) for x in xs)/len(xs))
+          for w,xs in by.items(): print(f'WORKLOAD_SUMMARY {w} TAICHI_MEDIAN_VS_WH={statistics.median(xs):.3f}x TAICHI_GEOMEAN_VS_WH={gm(xs):.3f}x')
+          print(f'OVERALL TAICHI_WINS_VS_WH={wins}/{len(all_tw)}')
+          print(f'OVERALL TAICHI_MEDIAN_VS_WH={statistics.median(all_tw):.3f}x')
+          print(f'OVERALL TAICHI_GEOMEAN_VS_WH={gm(all_tw):.3f}x')
+          print(f'OVERALL TAICHI_MEDIAN_VS_C={statistics.median(all_tc):.3f}x')
+          print(f'OVERALL TAICHI_GEOMEAN_VS_C={gm(all_tc):.3f}x')
+          print('SIMPLE_TRIPLET_NUMERIC=PASS')
+          print('SIMPLE_TRIPLET_DUEL=PASS')
+          PY
+      - name: Seal artifact
+        if: steps.qual.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          cat /tmp/bench/cpu.txt /tmp/bench/probe.txt /tmp/bench/taichi-version.txt /tmp/bench/gcc.txt /tmp/bench/native.txt /tmp/bench/taichi_q1.txt /tmp/bench/taichi_q2.txt /tmp/bench/taichi_q4.txt /tmp/bench/summary.txt > /tmp/bench/result.txt
+      - uses: actions/upload-artifact@v4
+        if: steps.qual.outputs.qualified == 'true'
+        with:
+          name: simple-triplet-${{ matrix.slot }}
+          path: /tmp/bench/result.txt
+          if-no-files-found: error
+          retention-days: 30
