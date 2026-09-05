@@ -1,7 +1,8 @@
 program field_shape_overlap
+tolerance 1e-12
 input n: u64 range 4..1000000
-for i in n, j in 4 { x[i, j]: u64 = i * 4 + j }
-for i in n, j in 4 { y[i, j]: u64 = x[i, j] + 1 }
+for i in n, j in 4 { x[i, j]: f64 = cast(f64, i * 4 + j) }
+for i in n, j in 4 { y[i, j]: f64 = x[i, j] + 1.0 }
 for i in n, j in 4 { checksum += y[i, j] }
 output checksum
-test (4) => { checksum = 136 }
+test (4) => { checksum = 136.0 }
