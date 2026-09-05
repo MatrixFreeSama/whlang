@@ -1,0 +1,171 @@
+name: MoonBit vs Wheelchair 1.2.5 CPU Triplet
+
+on:
+  push:
+    branches: [bench-moonbit-wh-125]
+    paths:
+      - '.github/workflows/bench-moonbit-wh-125.yml'
+      - 'benchmarks/moonbit_wh_125/**'
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bench-moonbit-wh-125
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Unpack Wheelchair and qualify host
+        id: qual
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/bench /tmp/rel
+          {
+            echo "SLOT=${{ matrix.slot }}"
+            lscpu | grep -E 'Vendor ID|Model name|CPU family|^Model:|Socket|Thread|Core' || true
+          } | tee /tmp/bench/cpu.txt
+          unzip -q dist/Wheelchair-1.2.5.zip -d /tmp/rel
+          cd /tmp/rel/Wheelchair-1.2.5
+          find . -type f -name '*.sh' -exec chmod +x {} +
+          chmod +x wheelchairc whexc topologyc* 2>/dev/null || true
+          python3 tools/apply_123.py >/dev/null
+          sh build.sh >/dev/null
+          ./build/topologyc --probe | tee /tmp/bench/probe.txt
+          if grep -q 'AVX-512F: usable' /tmp/bench/probe.txt; then
+            echo 'qualified=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'qualified=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install current MoonBit toolchain
+        if: steps.qual.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          export PATH="$HOME/.moon/bin:$PATH"
+          {
+            moon version || true
+            moonc -v || moonc --version || true
+            cc --version | head -1
+          } | tee /tmp/bench/moonbit-version.txt
+
+      - name: Compile MoonBit release binaries
+        if: steps.qual.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.moon/bin:$PATH"
+          cd benchmarks/moonbit_wh_125
+          cp src/main/main.mbt.in /tmp/main.mbt.in
+          first=1
+          for w in heat wave sparse; do
+            for n in 10000000 100000000; do
+              python - "$w" "$n" <<'PY'
+          from pathlib import Path
+          import sys
+          w,n=sys.argv[1],sys.argv[2]
+          s=Path('/tmp/main.mbt.in').read_text()
+          s=s.replace('__CALL__',w).replace('__N__',n)
+          Path('src/main/main.mbt').write_text(s)
+          PY
+              if [ "$first" = 1 ]; then
+                moon build --target native --release src/main -v 2>&1 | tee /tmp/bench/moonbit-build.txt
+                first=0
+              else
+                moon build --target native --release src/main >/dev/null
+              fi
+              cp _build/native/release/build/src/main/main.exe "/tmp/bench/moonbit_${w}_${n}"
+            done
+          done
+          rm -f src/main/main.mbt
+          file /tmp/bench/moonbit_heat_10000000 | tee -a /tmp/bench/moonbit-build.txt
+
+      - name: Compile Wheelchair and expert C single-core lanes
+        if: steps.qual.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/rel/Wheelchair-1.2.5
+          ./build/topologyc tests/topology_cases/heat_diffusion_step_tolerant.wh -o /tmp/bench/heat_wh --executors 1 >/dev/null
+          ./build/topologyc tests/topology_cases/wave_leapfrog_step_tolerant.wh -o /tmp/bench/wave_wh --executors 1 >/dev/null
+          ./build/topologyc tests/topology_cases/sparse_nonlinear_operator_tolerant.wh -o /tmp/bench/sparse_wh --executors 1 >/dev/null
+          cd "$GITHUB_WORKSPACE"
+          gcc -O3 -march=native -mtune=native -flto -ffast-math -mprefer-vector-width=512 \
+            benchmarks/moonbit_wh_125/expert_c_simple_triplet.c -o /tmp/bench/expert_c
+          gcc --version | head -1 | tee /tmp/bench/gcc.txt
+
+      - name: Benchmark MoonBit vs Wheelchair vs expert C
+        if: steps.qual.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          python - <<'PY' | tee /tmp/bench/result.txt
+          import math, os, random, re, statistics, struct, subprocess, time
+          RUNS=11; WARM=3
+          cpus=sorted(os.sched_getaffinity(0)); cpu=str(cpus[0])
+          rx=re.compile(r'checksum_bits=0x([0-9a-fA-F]+)')
+          rng=random.Random(0xM00 if False else 0xB17A125)
+          def run(cmd): return subprocess.check_output(cmd,text=True).strip()
+          def native_val(out):
+            m=rx.search(out)
+            if not m: raise RuntimeError('missing native checksum: '+out)
+            return struct.unpack('>d',int(m.group(1),16).to_bytes(8,'big'))[0]
+          ratios=[]; ratios_c=[]; wins=0
+          for w in ('heat','wave','sparse'):
+            for n in (10_000_000,100_000_000):
+              cmds={
+                'WH':['taskset','-c',cpu,f'/tmp/bench/{w}_wh',str(n)],
+                'MB':['taskset','-c',cpu,f'/tmp/bench/moonbit_{w}_{n}'],
+                'C':['taskset','-c',cpu,'/tmp/bench/expert_c',w,str(n)],
+              }
+              first={k:run(v) for k,v in cmds.items()}
+              vals={'WH':native_val(first['WH']),'C':native_val(first['C']),'MB':float(first['MB'].splitlines()[-1])}
+              rel_mb=abs(vals['MB']-vals['WH'])/max(abs(vals['WH']),1.0)
+              rel_c=abs(vals['C']-vals['WH'])/max(abs(vals['WH']),1.0)
+              if rel_mb>2e-8 or rel_c>2e-8:
+                raise SystemExit(f'numeric mismatch {w} n={n}: MB={rel_mb} C={rel_c} vals={vals}')
+              for cmd in cmds.values():
+                for _ in range(WARM): run(cmd)
+              samples={k:[] for k in cmds}
+              for _ in range(RUNS):
+                order=list(cmds); rng.shuffle(order)
+                for k in order:
+                  t0=time.perf_counter_ns(); out=run(cmds[k]); samples[k].append((time.perf_counter_ns()-t0)/1e6)
+              med={k:statistics.median(v) for k,v in samples.items()}
+              r=med['MB']/med['WH']; rc=med['MB']/med['C']
+              ratios.append(r); ratios_c.append(rc); wins += med['MB']<med['WH']
+              print(f'FINAL WORKLOAD={w} N={n} Q=1 WH={med["WH"]:.6f}ms MOONBIT={med["MB"]:.6f}ms C512={med["C"]:.6f}ms MOONBIT/WH={r:.3f}x MOONBIT/C={rc:.3f}x RELERR={rel_mb:.3e}')
+          gm=lambda xs: math.exp(sum(math.log(x) for x in xs)/len(xs))
+          print(f'OVERALL MOONBIT_WINS_VS_WH={wins}/{len(ratios)}')
+          print(f'OVERALL MOONBIT_MEDIAN_VS_WH={statistics.median(ratios):.3f}x')
+          print(f'OVERALL MOONBIT_GEOMEAN_VS_WH={gm(ratios):.3f}x')
+          print(f'OVERALL MOONBIT_MEDIAN_VS_C={statistics.median(ratios_c):.3f}x')
+          print(f'OVERALL MOONBIT_GEOMEAN_VS_C={gm(ratios_c):.3f}x')
+          print('MOONBIT_DUEL_NUMERIC=PASS')
+          PY
+
+      - name: Seal metadata
+        if: steps.qual.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          cat /tmp/bench/cpu.txt /tmp/bench/probe.txt /tmp/bench/moonbit-version.txt /tmp/bench/moonbit-build.txt /tmp/bench/gcc.txt /tmp/bench/result.txt > /tmp/bench/sealed.txt
+
+      - uses: actions/upload-artifact@v4
+        if: steps.qual.outputs.qualified == 'true'
+        with:
+          name: moonbit-wh-${{ matrix.slot }}
+          path: /tmp/bench/sealed.txt
+          retention-days: 30
