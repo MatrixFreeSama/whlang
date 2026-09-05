@@ -39,7 +39,7 @@ def main():
     plan['shared_dependency_episode']=episode
     if a.semantic_plan is not None:
         a.semantic_plan.write_text(json.dumps(plan,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
-    print(json.dumps({'source':str(a.source),'output':str(a.output),'core_sha256':whex_surface.core_hash(data),'repair_count':len(parser.repairs),'repairs':[r.as_dict() for r in parser.repairs],'bottom_layer_modified':True,'compiler_release':'1.2.5','semantic_sha256':plan['semantic_sha256'],'shared_dependency_episode':episode},ensure_ascii=False,indent=2))
+    print(json.dumps({'source':str(a.source),'output':str(a.output),'core_sha256':whex_surface.core_hash(data),'repair_count':len(parser.repairs),'repairs':[r.as_dict() for r in parser.repairs],'bottom_layer_modified':True,'compiler_release':'1.2.6','semantic_sha256':plan['semantic_sha256'],'shared_dependency_episode':episode},ensure_ascii=False,indent=2))
     return 0
 if __name__=='__main__':
     try: raise SystemExit(main())
