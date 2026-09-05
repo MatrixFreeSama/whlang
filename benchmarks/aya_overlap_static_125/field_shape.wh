@@ -1,0 +1,7 @@
+program field_shape_overlap
+input n: u64 range 4..1000000
+for i in n, j in 4 { x[i, j]: u64 = i * 4 + j }
+for i in n, j in 4 { y[i, j]: u64 = x[i, j] + 1 }
+for i in n, j in 4 { checksum += y[i, j] }
+output checksum
+test (4) => { checksum = 136 }
