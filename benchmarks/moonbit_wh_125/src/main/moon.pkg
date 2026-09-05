@@ -1,1 +1,9 @@
 pkgtype(kind: "executable")
+
+options(
+  link: {
+    "native": {
+      "cc-flags": "-O3 -march=native -mtune=native -ffast-math -mprefer-vector-width=512",
+    },
+  },
+)
