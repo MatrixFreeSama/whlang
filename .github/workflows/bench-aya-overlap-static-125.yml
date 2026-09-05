@@ -15,102 +15,64 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: bench-aya-overlap-static-1.2.5
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '25'
-
       - name: Build Wheelchair 1.2.5
         run: |
-          set -euo pipefail
           cd worktree
           sh build.sh >/tmp/wh_build.txt
           grep -q 'WHEELCHAIR_BUILD=PASS' /tmp/wh_build.txt
-
       - name: Build pinned Aya
         run: |
-          set -euo pipefail
           git clone --filter=blob:none https://github.com/aya-prover/aya-dev.git /tmp/aya-dev
           cd /tmp/aya-dev
           git checkout 5296b348775881e3c797bbc8d1c898a1ac959e00
           ./gradlew :cli-console:installDist --no-daemon -x test >/tmp/aya_build.txt
           ./cli-console/build/install/cli-console/bin/cli-console --version
-
-      - name: Benchmark exact shared static-shape acceptance
+      - name: Benchmark shared static-shape acceptance
         run: |
-          set -euo pipefail
           python3 - <<'PY' | tee overlap_result.txt
           import re, statistics, subprocess, time
           from pathlib import Path
-
-          repo = Path.cwd()
-          whroot = repo / 'worktree'
-          whsrc = whroot / 'tests/wh_equivalence/rank2_native_122.wh'
-          ayasrc = repo / 'benchmarks/aya_overlap_static_125/field_shape.aya'
-          whbin = Path('/tmp/rank2_native_122_wh')
-          ayaroot = Path('/tmp/aya-dev')
-          aya = ayaroot / 'cli-console/build/install/cli-console/bin/cli-console'
-          module_path = ayaroot / 'cli-impl/src/test/resources/shared/src'
-
-          def run(cmd, cwd):
-              t0 = time.perf_counter_ns()
-              cp = subprocess.run(['taskset','-c','0',*map(str,cmd)], cwd=cwd,
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-              dt = (time.perf_counter_ns() - t0) / 1e6
-              if cp.returncode != 0:
-                  print('COMMAND_FAILED:', ' '.join(map(str,cmd)))
-                  print(cp.stdout)
-                  print(cp.stderr)
-                  raise SystemExit(cp.returncode)
-              return dt, cp.stdout
-
-          # Exact entry point used by the retained Rank-N release gate.
-          whcmd = ['python3', whroot / 'wheelchairc.py', whsrc, '-o', whbin, '--executors', '4']
-          ayacmd = [aya, '--module-path', module_path, ayasrc, '--no-color']
-
-          wh_cold, _ = run(whcmd, whroot)
-          aya_cold, _ = run(ayacmd, ayaroot)
-          native = subprocess.run(['taskset','-c','0',str(whbin),'4'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
-          if native.stdout.strip() != 'checksum_bits=0x405e000000000000':
-              raise SystemExit('Wheelchair released Rank-2 checksum mismatch: '+native.stdout)
-
-          for _ in range(5): run(whcmd, whroot)
-          for _ in range(5): run(ayacmd, ayaroot)
-          wh = [run(whcmd, whroot)[0] for _ in range(21)]
-          av = [run(ayacmd, ayaroot)[0] for _ in range(21)]
-
-          def metrics(p):
-              s = p.read_text(encoding='utf-8')
-              return len([ln for ln in s.splitlines() if ln.strip()]), len(s.encode('utf-8')), len(re.sub(r'\s+', '', s))
-
-          wm = metrics(whsrc); am = metrics(ayasrc)
-          wmed = statistics.median(wh); amed = statistics.median(av)
-          cpu = next((ln.split(':',1)[1].strip() for ln in Path('/proc/cpuinfo').read_text().splitlines() if ln.startswith('model name')), 'unknown')
-          print('HOST_CPU=' + cpu)
+          repo=Path.cwd(); whroot=repo/'worktree'; ayaroot=Path('/tmp/aya-dev')
+          whsrc=whroot/'tests/whex/rank2_native_122.whex'
+          ayasrc=repo/'benchmarks/aya_overlap_static_125/field_shape.aya'
+          whbin=Path('/tmp/rank2_native_whex')
+          aya=ayaroot/'cli-console/build/install/cli-console/bin/cli-console'
+          mp=ayaroot/'cli-impl/src/test/resources/shared/src'
+          def run(cmd,cwd):
+            t=time.perf_counter_ns(); p=subprocess.run(['taskset','-c','0',*map(str,cmd)],cwd=cwd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+            dt=(time.perf_counter_ns()-t)/1e6
+            if p.returncode: print(p.stdout,p.stderr); raise SystemExit(p.returncode)
+            return dt
+          whcmd=['python3',whroot/'surface/whex_surface.py','native',whsrc,'-o',whbin,'--executors','4']
+          ayacmd=[aya,'--module-path',mp,ayasrc,'--no-color']
+          wcold=run(whcmd,whroot); acold=run(ayacmd,ayaroot)
+          out=subprocess.run(['taskset','-c','0',str(whbin),'4'],stdout=subprocess.PIPE,text=True,check=True).stdout.strip()
+          assert out=='checksum_bits=0x405e000000000000',out
+          for _ in range(5): run(whcmd,whroot)
+          for _ in range(5): run(ayacmd,ayaroot)
+          ws=[run(whcmd,whroot) for _ in range(21)]; xs=[run(ayacmd,ayaroot) for _ in range(21)]
+          def m(p):
+            s=p.read_text(); return len([x for x in s.splitlines() if x.strip()]),len(s.encode()),len(re.sub(r'\s+','',s))
+          wm=m(whsrc); am=m(ayasrc); w=statistics.median(ws); a=statistics.median(xs)
+          cpu=next((x.split(':',1)[1].strip() for x in Path('/proc/cpuinfo').read_text().splitlines() if x.startswith('model name')),'unknown')
+          print('HOST_CPU='+cpu)
           print('AYA_COMMIT=5296b348775881e3c797bbc8d1c898a1ac959e00')
-          print('WHEELCHAIR_VERSION=1.2.5')
-          print('TASK=rank2_fixed_width_field_static_shape')
-          print('WH_TIMING_BOUNDARY=whole_process_source_to_native_static_ELF_executors4')
-          print('AYA_TIMING_BOUNDARY=whole_process_source_to_successful_typecheck')
-          print(f'WH_COLD_AOT_MS={wh_cold:.6f}')
-          print(f'AYA_COLD_TYPECHECK_MS={aya_cold:.6f}')
-          print(f'WH_WARM_MEDIAN_AOT_MS={wmed:.6f}')
-          print(f'AYA_WARM_MEDIAN_TYPECHECK_MS={amed:.6f}')
-          print(f'AYA_OVER_WH_RATIO={amed/wmed:.6f}')
-          print('WH_SAMPLES_MS=' + ','.join(f'{x:.6f}' for x in wh))
-          print('AYA_SAMPLES_MS=' + ','.join(f'{x:.6f}' for x in av))
+          print('WHEELCHAIR_VERSION=1.2.5 WHEELCHAIR_SURFACE=WHEX')
+          print(f'WH_COLD_AOT_MS={wcold:.6f} AYA_COLD_TYPECHECK_MS={acold:.6f}')
+          print(f'WH_WARM_MEDIAN_AOT_MS={w:.6f} AYA_WARM_MEDIAN_TYPECHECK_MS={a:.6f} AYA_OVER_WH_RATIO={a/w:.6f}')
+          print('WH_SAMPLES_MS='+','.join(f'{v:.6f}' for v in ws))
+          print('AYA_SAMPLES_MS='+','.join(f'{v:.6f}' for v in xs))
           print(f'WH_NONBLANK_LOC={wm[0]} WH_BYTES={wm[1]} WH_NONWS={wm[2]}')
           print(f'AYA_NONBLANK_LOC={am[0]} AYA_BYTES={am[1]} AYA_NONWS={am[2]}')
-          print('WH_NATIVE_CHECKSUM=checksum_bits=0x405e000000000000')
+          print('WH_NATIVE_CHECKSUM='+out)
           print('BOTH_SHARED_STATIC_SHAPE_ACCEPT=PASS')
           PY
-
       - uses: actions/upload-artifact@v4
         with:
           name: aya-wheelchair-overlap-static-125
-          path: |
-            overlap_result.txt
-            worktree/tests/wh_equivalence/rank2_native_122.wh
-            benchmarks/aya_overlap_static_125/field_shape.aya
+          path: overlap_result.txt
           retention-days: 30
