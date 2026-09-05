@@ -1,0 +1,98 @@
+name: Validate Wheelchair 1.2.6 Schedulerless Causal
+
+on:
+  push:
+    branches:
+      - build-1.2.6-schedulerless-causal
+  workflow_dispatch:
+
+jobs:
+  schedulerless-causal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Wheelchair 1.2.6
+        working-directory: worktree
+        run: |
+          set -euxo pipefail
+          ./build.sh | tee build_126.log
+          test "$(cat VERSION)" = "1.2.6"
+          grep -Fq 'SCHEDULERLESS_CAUSAL_RUNTIME_1_2_6=BUILT' build_126.log
+          grep -Fq 'SCHEDULERLESS_CAUSAL_GLOBAL_READY_QUEUE=0' build_126.log
+          grep -Fq 'SCHEDULERLESS_CAUSAL_ROOT_SCHEDULER=0' build_126.log
+          grep -Fq 'SCHEDULERLESS_CAUSAL_RUNTIME_COST_SELECTOR=0' build_126.log
+          grep -Fq 'WHEELCHAIR_BUILD=PASS' build_126.log
+
+      - name: Preserve mature 1.2.5 technical peaks
+        working-directory: worktree
+        run: |
+          set -euxo pipefail
+          sh ./test_109_125.sh | tee regression_109_125.log
+          sh ./test_shared_dependency_episode_125.sh | tee regression_shared_dependency_125.log
+          sh ./test_generic_native_125.sh | tee regression_generic_native_125.log
+          sh ./test_rank_n_122.sh | tee regression_rankn_122.log
+          sh ./test_true_parallel_123.sh | tee regression_true_parallel_123.log
+          sh ./test_sparse_causal_expansion_123.sh | tee regression_sce_123.log
+          grep -Fq 'SHARED_DEPENDENCY_NO_FOREIGN_HIGH_LEVEL_BACKEND=PASS' regression_109_125.log
+          grep -Fq 'WHEELCHAIR_SHARED_DEPENDENCY_EPISODE_1_2_5=PASS' regression_shared_dependency_125.log
+          grep -Fq 'WHEELCHAIR_1_2_4_GENERIC_NATIVE_PEAKS_ON_1_2_5=PASS' regression_generic_native_125.log
+          grep -Fq 'WHEELCHAIR_RANK_N_1_2_2=PASS' regression_rankn_122.log
+          grep -Fq 'WHEELCHAIR_SPARSE_CAUSAL_EXPANSION_1_2_3=PASS' regression_sce_123.log
+
+      - name: Validate schedulerless sparse causal execution
+        working-directory: worktree
+        run: |
+          set -euxo pipefail
+          sh ./test_schedulerless_causal_126.sh | tee schedulerless_126.log
+          grep -Fq 'SCHEDULERLESS_CAUSAL_RANDOM_DAG_300=PASS' schedulerless_126.log
+          grep -Fq 'SCHEDULERLESS_CAUSAL_MULTISOURCE=PASS' schedulerless_126.log
+          grep -Fq 'SCHEDULERLESS_CAUSAL_GLOBAL_READY_SCAN=0' schedulerless_126.log
+          grep -Fq 'SCHEDULERLESS_CAUSAL_GLOBAL_QUEUE_OPS=0' schedulerless_126.log
+          grep -Fq 'SCHEDULERLESS_CAUSAL_ROOT_SCHEDULER_OPS=0' schedulerless_126.log
+          grep -Fq 'SCHEDULERLESS_CAUSAL_PARENT_CHAIN_UPDATES=0' schedulerless_126.log
+          grep -Fq 'SCHEDULERLESS_CAUSAL_RUNTIME_COST_SELECTOR=0' schedulerless_126.log
+          grep -Fq 'SCHEDULERLESS_CAUSAL_SERIAL_FALLBACK=0' schedulerless_126.log
+          grep -Fq 'WHEELCHAIR_SCHEDULERLESS_CAUSAL_1_2_6=PASS' schedulerless_126.log
+
+      - name: Build Expert C Q1 control
+        run: |
+          set -euxo pipefail
+          gcc -O3 -march=native -std=c11 -Wall -Wextra -Werror \
+            benchmarks/schedulerless_causal_126/Expert_C_causal_q1.c \
+            -o benchmarks/schedulerless_causal_126/expert_c_causal_q1
+
+      - name: Run scheduler-overhead benchmark matrix
+        run: |
+          set -euxo pipefail
+          python3 benchmarks/schedulerless_causal_126/benchmark_schedulerless_126.py \
+            --reps 3 \
+            --out benchmarks/schedulerless_causal_126/results_ci.csv \
+            | tee benchmarks/schedulerless_causal_126/benchmark_ci.log
+          grep -Fq 'SCHEDULERLESS_CAUSAL_BENCHMARK_MATRIX=PASS' benchmarks/schedulerless_causal_126/benchmark_ci.log
+
+      - name: Static anti-serial-spine audit
+        run: |
+          set -euxo pipefail
+          ! grep -R -n -E 'root_epoch|root_remaining|pending_count|work_steal|global_ready_queue' \
+            worktree/runtime/schedulerless_causal_x86_64.S worktree/runtime/schedulerless_126
+          ! nm -an worktree/build/topology-fabric-schedulerless | grep -E 'root_epoch|root_remaining|pending_count|first_child|next_sibling|work_steal|global_ready_queue'
+          readelf -d worktree/build/topology-fabric-schedulerless 2>&1 | grep -Fq 'There is no dynamic section'
+
+      - name: Archive validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: schedulerless-causal-126-evidence
+          if-no-files-found: warn
+          retention-days: 90
+          path: |
+            worktree/build_126.log
+            worktree/schedulerless_126.log
+            worktree/regression_*.log
+            worktree/RELEASE_GATES_1_2_6.txt
+            worktree/SCHEDULERLESS_SPARSE_CAUSAL_CHARTER_1_2_6.md
+            benchmarks/schedulerless_causal_126/results_ci.csv
+            benchmarks/schedulerless_causal_126/benchmark_ci.log
