@@ -5,7 +5,10 @@ on:
     branches: [bench-1.2.5-zig-duel]
     paths:
       - 'worktree/**'
-      - 'benchmarks/fluid_solid_coupling_124/**'
+      - 'benchmarks/fluid_solid_coupling_124/Fluid_Solid_expert_C_matched.c'
+      - 'benchmarks/fluid_solid_coupling_124/Fluid_Solid_zig_matched.zig'
+      - 'benchmarks/fluid_solid_coupling_124/Fluid_Solid_zig_avx512.zig'
+      - 'benchmarks/fluid_solid_coupling_124/fsi_coupled.whex'
       - '.github/workflows/benchmark-zig-wheelchair-125.yml'
   workflow_dispatch:
 
