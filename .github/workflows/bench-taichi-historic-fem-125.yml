@@ -1,0 +1,159 @@
+name: Taichi Historical FEM vs Wheelchair 1.2.5
+
+on:
+  push:
+    branches: [bench-taichi-historic-fem-125]
+    paths:
+      - '.github/workflows/bench-taichi-historic-fem-125.yml'
+      - 'benchmarks/taichi_historic_fem_125/**'
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bench-taichi-historic-fem-125
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Unpack Wheelchair 1.2.5 and qualify host
+        id: qual
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/bench /tmp/rel
+          {
+            echo "SLOT=${{ matrix.slot }}"
+            lscpu | grep -E 'Vendor ID|Model name|CPU family|^Model:|Socket|Thread|Core' || true
+          } | tee /tmp/bench/cpu.txt
+          unzip -q dist/Wheelchair-1.2.5.zip -d /tmp/rel
+          cd /tmp/rel/Wheelchair-1.2.5
+          find . -type f -name '*.sh' -exec chmod +x {} +
+          chmod +x wheelchairc whexc topologyc* 2>/dev/null || true
+          python3 tools/apply_123.py >/dev/null
+          sh build.sh >/dev/null
+          ./build/topologyc --probe | tee /tmp/bench/probe.txt
+          if grep -q 'AVX-512F: usable' /tmp/bench/probe.txt; then
+            echo 'qualified=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'qualified=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Taichi 1.7.4
+        if: steps.qual.outputs.qualified == 'true'
+        run: |
+          python -m pip install --disable-pip-version-check --no-input 'taichi==1.7.4'
+          python - <<'PY' | tee /tmp/bench/taichi-version.txt
+          import taichi as ti
+          print('TAICHI_VERSION=' + '.'.join(map(str, ti.__version__)))
+          PY
+
+      - name: Compile Wheelchair human-WH FEM lane
+        if: steps.qual.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/rel/Wheelchair-1.2.5
+          for q in 1 2 4; do
+            ./wheelchairc tests/general_108/fem_gtr_equiv.wh -o "/tmp/bench/fem_wh_q${q}" --executors "$q" > "/tmp/bench/wh_plan_q${q}.json"
+          done
+
+      - name: Benchmark Wheelchair whole-process wall time
+        if: steps.qual.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          python - <<'PY' | tee /tmp/bench/wheelchair.txt
+          import os, random, statistics, struct, subprocess, time, re
+          RUNS=11; WARM=3
+          ns=(262_144,8_388_608,33_554_432)
+          cpulist=sorted(os.sched_getaffinity(0))
+          rx=re.compile(r'checksum_bits=0x([0-9a-fA-F]+)')
+          rng=random.Random(0xF3A125)
+          def cpus(q): return ','.join(map(str,cpulist[:q]))
+          def run(cmd): return subprocess.check_output(cmd,text=True).strip()
+          def bits_to_double(bits): return struct.unpack('>d',int(bits,16).to_bytes(8,'big'))[0]
+          for n in ns:
+            for q in (1,2,4):
+              cmd=['taskset','-c',cpus(q),f'/tmp/bench/fem_wh_q{q}',str(n)]
+              out=run(cmd); m=rx.search(out)
+              if not m: raise SystemExit('missing Wheelchair checksum')
+              ref=bits_to_double(m.group(1))
+              for _ in range(WARM): run(cmd)
+              samples=[]
+              for _ in range(RUNS):
+                t0=time.perf_counter_ns(); out=run(cmd); samples.append((time.perf_counter_ns()-t0)/1e6)
+              med=statistics.median(samples)
+              print(f'WH FEM N={n} Q={q} MEDIAN_MS={med:.6f} CHECKSUM={ref:.17g}')
+          PY
+
+      - name: Benchmark Taichi warm steady-state FEM kernel
+        if: steps.qual.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cpus_for () { python - "$1" <<'PY'
+          import os,sys
+          q=int(sys.argv[1]); print(','.join(map(str,sorted(os.sched_getaffinity(0))[:q])))
+          PY
+          }
+          for q in 1 2 4; do
+            taskset -c "$(cpus_for "$q")" python benchmarks/taichi_historic_fem_125/taichi_historic_fem.py --threads "$q" --runs 11 --warm 8 | tee "/tmp/bench/taichi_q${q}.txt"
+          done
+
+      - name: Compare Taichi and Wheelchair
+        if: steps.qual.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          python - <<'PY' | tee /tmp/bench/summary.txt
+          import math,re,statistics
+          from pathlib import Path
+          wh={}; ti={}
+          rw=re.compile(r'WH FEM N=(\d+) Q=(\d+) MEDIAN_MS=([0-9.]+) CHECKSUM=([^ ]+)')
+          for line in Path('/tmp/bench/wheelchair.txt').read_text().splitlines():
+            m=rw.search(line)
+            if m: wh[(int(m[1]),int(m[2]))]=(float(m[3]),float(m[4]))
+          rt=re.compile(r'TAICHI FEM N=(\d+) Q=(\d+) MEDIAN_MS=([0-9.]+) CHECKSUM=([^ ]+) DRIFT=([^ ]+)')
+          for q in (1,2,4):
+            for line in Path(f'/tmp/bench/taichi_q{q}.txt').read_text().splitlines():
+              m=rt.search(line)
+              if m: ti[(int(m[1]),int(m[2]))]=(float(m[3]),float(m[4]),float(m[5]))
+          if set(wh)!=set(ti): raise SystemExit(f'case mismatch wh={set(wh)} ti={set(ti)}')
+          ratios=[]; wins=0
+          def gm(xs): return math.exp(sum(math.log(x) for x in xs)/len(xs))
+          for key in sorted(wh):
+            wms,wv=wh[key]; tms,tv,drift=ti[key]
+            rel=abs(tv-wv)/max(abs(wv),1.0)
+            if rel>5e-10: raise SystemExit(f'numeric mismatch {key}: rel={rel} wh={wv} ti={tv}')
+            r=tms/wms; ratios.append(r)
+            if tms<wms: wins+=1
+            n,q=key
+            print(f'FINAL FEM N={n} Q={q} WH={wms:.6f}ms TAICHI={tms:.6f}ms TAICHI/WH={r:.3f}x RELERR={rel:.3e}')
+          print(f'OVERALL TAICHI_WINS_VS_WH={wins}/{len(ratios)}')
+          print(f'OVERALL TAICHI_MEDIAN_VS_WH={statistics.median(ratios):.3f}x')
+          print(f'OVERALL TAICHI_GEOMEAN_VS_WH={gm(ratios):.3f}x')
+          print('HISTORIC_FEM_NUMERIC=PASS')
+          print('HISTORIC_FEM_DUEL=PASS')
+          PY
+
+      - name: Seal artifact
+        if: steps.qual.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          cat /tmp/bench/cpu.txt /tmp/bench/probe.txt /tmp/bench/taichi-version.txt /tmp/bench/wheelchair.txt /tmp/bench/taichi_q1.txt /tmp/bench/taichi_q2.txt /tmp/bench/taichi_q4.txt /tmp/bench/summary.txt > /tmp/bench/result.txt
+
+      - uses: actions/upload-artifact@v4
+        if: steps.qual.outputs.qualified == 'true'
+        with:
+          name: taichi-historic-fem-${{ matrix.slot }}
+          path: /tmp/bench/result.txt
+          retention-days: 30
