@@ -1,0 +1,5 @@
+open import prelude
+open import data::vec::base using (Vec, vmap)
+
+def fieldStep {n : Nat} (xs : Vec n (Vec 4 Nat)) : Vec n (Vec 4 Nat) =>
+  vmap (fn row => vmap (fn x => x) row) xs
