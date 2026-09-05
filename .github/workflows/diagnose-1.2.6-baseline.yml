@@ -1,0 +1,54 @@
+name: Diagnose Wheelchair 1.2.6 Against 1.2.5 Baseline
+
+on:
+  push:
+    branches:
+      - build-1.2.6-schedulerless-causal
+  workflow_dispatch:
+
+jobs:
+  baseline-differential:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@v4
+        with:
+          path: candidate
+      - name: Checkout exact clean baseline
+        uses: actions/checkout@v4
+        with:
+          ref: build-1.2.5-multifield
+          path: baseline125
+      - name: Differential compiler gate
+        run: |
+          set -u
+          lscpu > cpu.txt
+          echo "candidate=$(git -C candidate rev-parse HEAD)" | tee result.txt
+          echo "baseline=$(git -C baseline125 rev-parse HEAD)" | tee -a result.txt
+          (
+            cd baseline125/worktree
+            ./build.sh > ../../baseline_build.log 2>&1
+            ./whexc surface/whex_examples/heat_en.whex -o build/diag_heat_1 --executors 1 > ../../baseline_heat.log 2>&1
+          )
+          echo "BASELINE_HEAT_RC=$?" | tee -a result.txt
+          (
+            cd candidate/worktree
+            ./build.sh > ../../candidate_build.log 2>&1
+            ./whexc surface/whex_examples/heat_en.whex -o build/diag_heat_1 --executors 1 > ../../candidate_heat.log 2>&1
+          )
+          echo "CANDIDATE_HEAT_RC=$?" | tee -a result.txt
+          sha256sum baseline125/worktree/build/topologyc candidate/worktree/build/topologyc | tee -a result.txt
+      - name: Archive differential evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline-differential-126
+          retention-days: 30
+          path: |
+            result.txt
+            cpu.txt
+            baseline_build.log
+            candidate_build.log
+            baseline_heat.log
+            candidate_heat.log
