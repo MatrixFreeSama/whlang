@@ -1,0 +1,51 @@
+fn uval(i : Int64) -> Double {
+  0.25 + ((17L * i + 3L) & 1023L).to_double() * (1.0 / 1024.0)
+}
+
+fn pval(i : Int64) -> Double {
+  -0.125 + ((29L * i + 7L) & 1023L).to_double() * (1.0 / 1024.0)
+}
+
+fn xval(i : Int64) -> Double {
+  -0.375 + ((31L * i + 5L) & 1023L).to_double() * (1.0 / 1024.0)
+}
+
+fn heat(n : Int64) -> Double {
+  let mut s = 0.0
+  for i = 0L; i < n; i = i + 1L {
+    let im = if i == 0L { n - 1L } else { i - 1L }
+    let ip = if i + 1L == n { 0L } else { i + 1L }
+    let u = uval(i)
+    s = s + u + 0.125 * (uval(im) - 2.0 * u + uval(ip))
+  }
+  s
+}
+
+fn wave(n : Int64) -> Double {
+  let mut s = 0.0
+  for i = 0L; i < n; i = i + 1L {
+    let im = if i == 0L { n - 1L } else { i - 1L }
+    let ip = if i + 1L == n { 0L } else { i + 1L }
+    let u = uval(i)
+    s = s + 2.0 * u - pval(i) + 0.0625 * (uval(im) - 2.0 * u + uval(ip))
+  }
+  s
+}
+
+fn sparse(n : Int64) -> Double {
+  let mut s = 0.0
+  for i = 0L; i < n; i = i + 1L {
+    let x = xval(i)
+    let j1 = (17L * i + 3L) % n
+    let j2 = (29L * i + 7L) % n
+    let j3 = (43L * i + 11L) % n
+    s = s + 1.75 * x - 0.125 * xval(j1) + 0.0625 * xval(j2) - 0.03125 * xval(j3) + 0.015625 * x * x * x
+  }
+  s
+}
+
+fn main {
+  let n = __N__L
+  let result = __CALL__(n)
+  println(result)
+}
