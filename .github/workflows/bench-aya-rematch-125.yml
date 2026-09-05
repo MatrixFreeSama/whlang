@@ -5,6 +5,7 @@ on:
     branches: [bench-aya-rematch-1.2.5]
     paths:
       - '.github/workflows/bench-aya-rematch-125.yml'
+      - 'benchmarks/aya_toggle_rematch_125/**'
 
 jobs:
   bench:
@@ -85,8 +86,7 @@ jobs:
           src=root/'benchmarks/aya_toggle_rematch_125/toggle.aya'
           cases=(100_000,1_000_000)
 
-          def cpus1(): return str(sorted(os.sched_getaffinity(0))[0])
-          cpu=cpus1()
+          cpu=str(sorted(os.sched_getaffinity(0))[0])
           def wh_cmd(n): return ['taskset','-c',cpu,str(wh),'1',str(n)]
           def wh_run(n): return subprocess.check_output(wh_cmd(n),text=True).strip()
 
@@ -103,7 +103,7 @@ jobs:
               xs.append(dt)
             wh_results[n]=(statistics.median(xs),first,xs)
 
-          child=pexpect.spawn('taskset',[ '-c',cpu,str(aya),'--repl','--repl-type','plain','--no-color'],encoding='utf-8',timeout=180,maxread=65536)
+          child=pexpect.spawn('taskset',['-c',cpu,str(aya),'--repl','--repl-type','plain','--no-color'],encoding='utf-8',timeout=180,maxread=65536)
           child.expect_exact('> ')
           child.sendline(f':load {src}')
           child.expect_exact('> ')
@@ -137,7 +137,8 @@ jobs:
           whm=metrics(root/'benchmarks/aya_toggle_rematch_125/toggle.wh')
           ayam=metrics(src)
 
-          print(f'CPU={subprocess.check_output(["bash","-lc","lscpu | sed -n \"s/^Model name:[[:space:]]*//p\" | head -1"],text=True).strip()}')
+          cpu_name=subprocess.check_output(['bash','-lc','lscpu | sed -n "s/^Model name:[[:space:]]*//p" | head -1'],text=True).strip()
+          print(f'CPU={cpu_name}')
           print(f'PINNED_CPU={cpu}')
           print(f'WH_SOURCE_NONBLANK_LOC={whm[0]} WH_SOURCE_BYTES={whm[1]} WH_SOURCE_NONWS_CHARS={whm[2]}')
           print(f'AYA_SOURCE_NONBLANK_LOC={ayam[0]} AYA_SOURCE_BYTES={ayam[1]} AYA_SOURCE_NONWS_CHARS={ayam[2]}')
