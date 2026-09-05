@@ -1,0 +1,61 @@
+name: FEM source expression density
+
+on:
+  push:
+    branches: [bench-taichi-historic-fem-125]
+    paths:
+      - '.github/workflows/bench-fem-code-length-125.yml'
+  workflow_dispatch:
+
+jobs:
+  metrics:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bench-taichi-historic-fem-125
+      - name: Count comparable FEM source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/w125
+          mkdir -p /tmp/w125
+          unzip -q dist/Wheelchair-1.2.5.zip -d /tmp/w125
+          python - <<'PY'
+          from pathlib import Path
+          import re, tokenize, io
+
+          whp=Path('/tmp/w125/Wheelchair-1.2.5/tests/general_108/fem_gtr_equiv.wh')
+          tip=Path('benchmarks/taichi_historic_fem_125/taichi_historic_fem.py')
+          wh=whp.read_text()
+          ti=tip.read_text()
+
+          # Comparable semantic core: no benchmark timing/warm-up harness.
+          wh_core='\n'.join(line for line in wh.splitlines() if not line.lstrip().startswith('test ')).strip()+'\n'
+          s=ti.index('@ti.func')
+          e=ti.index('\nfor n in (262_144', s)
+          ti_core=ti[s:e].strip()+'\n'
+
+          tok_re=re.compile(r'[A-Za-z_][A-Za-z_0-9]*|(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?|==|!=|<=|>=|->|::|:=|\S')
+          def metrics(name, src, comment_prefixes):
+              lines=src.splitlines()
+              active=[x for x in lines if x.strip() and not any(x.lstrip().startswith(p) for p in comment_prefixes)]
+              toks=tok_re.findall(src)
+              print(f'{name}_TOTAL_LINES={len(lines)}')
+              print(f'{name}_ACTIVE_LINES={len(active)}')
+              print(f'{name}_CHARS={len(src)}')
+              print(f'{name}_BYTES={len(src.encode())}')
+              print(f'{name}_TOKENS={len(toks)}')
+              return len(active),len(src),len(toks)
+
+          print('=== FULL FILES ===')
+          wf=metrics('WH_FULL',wh,('#','//'))
+          tf=metrics('TAICHI_FULL',ti,('#',))
+          print('=== COMPARABLE FEM CORE ===')
+          wc=metrics('WH_CORE',wh_core,('#','//'))
+          tc=metrics('TAICHI_CORE',ti_core,('#',))
+          print(f'CORE_ACTIVE_LINE_RATIO_TAICHI_OVER_WH={tc[0]/wc[0]:.6f}')
+          print(f'CORE_CHAR_RATIO_TAICHI_OVER_WH={tc[1]/wc[1]:.6f}')
+          print(f'CORE_TOKEN_RATIO_TAICHI_OVER_WH={tc[2]/wc[2]:.6f}')
+          print('FEM_CODE_LENGTH_METRICS=PASS')
+          PY
