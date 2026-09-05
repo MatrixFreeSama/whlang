@@ -1,0 +1,110 @@
+name: Aya flagship proof-domain audit vs Wheelchair 1.2.5
+
+on:
+  push:
+    branches: [bench-aya-flagship-1.2.5]
+    paths:
+      - '.github/workflows/bench-aya-flagship-125.yml'
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bench-aya-flagship-1.2.5
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Audit Wheelchair native proof-language surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd worktree
+          sh build.sh >/tmp/wh_build.txt
+          python - <<'PY' | tee /tmp/wh_proof_surface.txt
+          import sys
+          sys.path.insert(0,'surface')
+          import wh_surface
+          keys=set(wh_surface.ALIASES)
+          required={'Type','inductive','Path','forall','def','refl','Pi','Sigma'}
+          present=sorted(x for x in required if x in keys)
+          missing=sorted(required-set(present))
+          print('WHEELCHAIR_VERSION=1.2.5')
+          print('WH_NATIVE_KEYWORDS=' + ','.join(sorted(keys)))
+          print('FORMAL_REQUIRED_PRESENT=' + ','.join(present))
+          print('FORMAL_REQUIRED_MISSING=' + ','.join(missing))
+          print('WHEELCHAIR_NATIVE_DEPENDENT_PROOF_SURFACE=' + ('PRESENT' if not missing else 'UNSUPPORTED'))
+          PY
+
+      - name: Build pinned current Aya
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none https://github.com/aya-prover/aya-dev.git /tmp/aya-dev
+          cd /tmp/aya-dev
+          git checkout 5296b348775881e3c797bbc8d1c898a1ac959e00
+          ./gradlew :cli-console:installDist --no-daemon -x test >/tmp/aya_build.txt
+          /tmp/aya-dev/cli-console/build/install/cli-console/bin/cli-console --version | tee /tmp/aya_version.txt
+
+      - name: Benchmark Aya flagship type checking and source length
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' | tee /tmp/aya_flagship_result.txt
+          import re, statistics, subprocess, time
+          from pathlib import Path
+
+          root=Path('/tmp/aya-dev')
+          aya=root/'cli-console/build/install/cli-console/bin/cli-console'
+          mp=root/'cli-impl/src/test/resources/shared/src'
+          vec=mp/'data/vec/properties.aya'
+          eq=mp/'relation/binary/equality.aya'
+
+          def run_file(p):
+            t=time.perf_counter_ns()
+            cp=subprocess.run([str(aya),'--module-path',str(mp),str(p),'--no-color'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+            dt=(time.perf_counter_ns()-t)/1e6
+            if cp.returncode != 0:
+              raise SystemExit(f'Aya failed {p}: {cp.stderr}\n{cp.stdout}')
+            return dt
+
+          def bench(p):
+            for _ in range(3): run_file(p)
+            xs=[run_file(p) for _ in range(11)]
+            return statistics.median(xs), xs
+
+          vm,vx=bench(vec)
+          em,ex=bench(eq)
+
+          vtxt=vec.read_text(encoding='utf-8')
+          etxt=eq.read_text(encoding='utf-8')
+          assoc=re.search(r'@suppress\(MostGeneralSolution\)\ndef \+\+-assoc.*?(?=\n\ndef vmap-distrib)',vtxt,re.S).group(0)
+          fext=re.search(r'def funExt .*?(?=\n\ndef pmapd)',etxt,re.S).group(0)
+
+          def metrics(s):
+            return len([ln for ln in s.splitlines() if ln.strip()]), len(s.encode()), len(re.sub(r'\s+','',s))
+
+          print('AYA_COMMIT=5296b348775881e3c797bbc8d1c898a1ac959e00')
+          print(f'VEC_PROPERTIES_MEDIAN_MS={vm:.6f}')
+          print('VEC_PROPERTIES_SAMPLES_MS='+','.join(f'{x:.6f}' for x in vx))
+          print(f'EQUALITY_LIBRARY_MEDIAN_MS={em:.6f}')
+          print('EQUALITY_LIBRARY_SAMPLES_MS='+','.join(f'{x:.6f}' for x in ex))
+          a=metrics(assoc); f=metrics(fext)
+          print(f'ASSOC_PROOF_NONBLANK_LOC={a[0]} ASSOC_PROOF_BYTES={a[1]} ASSOC_PROOF_NONWS={a[2]}')
+          print(f'FUNEXT_PROOF_NONBLANK_LOC={f[0]} FUNEXT_PROOF_BYTES={f[1]} FUNEXT_PROOF_NONWS={f[2]}')
+          print('AYA_FLAGSHIP_NATIVE_PROOFS=PASS')
+          PY
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: aya-flagship-vs-wheelchair-125
+          path: |
+            /tmp/wh_proof_surface.txt
+            /tmp/aya_version.txt
+            /tmp/aya_flagship_result.txt
+          retention-days: 30
