@@ -1,0 +1,193 @@
+name: Deep Assembly Audit Wheelchair 1.2.5 FSI
+
+on:
+  push:
+    branches: [audit-1.2.5-assembly]
+    paths:
+      - '.github/workflows/audit-assembly-125.yml'
+  workflow_dispatch:
+
+env:
+  ZIG_VERSION: '0.16.0'
+
+jobs:
+  audit:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1,2,3,4,5,6,7,8]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build and qualify AVX-512 host
+        id: probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "SLOT=${{ matrix.slot }}" | tee /tmp/host.txt
+          lscpu | grep -E 'Vendor ID|Model name|CPU family|^Model:|Socket|Thread|Core|Flags' | tee -a /tmp/host.txt || true
+          cd worktree
+          python3 tools/apply_123.py
+          sh build.sh
+          ./build/topologyc --probe | tee /tmp/probe.txt
+          if grep -q 'AVX-512F: usable' /tmp/probe.txt; then
+            echo 'qualified=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'qualified=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install Zig 0.16.0
+        if: steps.probe.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz
+          tar -xJf /tmp/zig.tar.xz -C /tmp
+          echo "/tmp/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
+      - name: Build exact authority binaries
+        if: steps.probe.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd worktree
+          ./whexc ../benchmarks/fluid_solid_coupling_124/fsi_coupled.whex -o build/fsi_wh_q1 --executors 1 >/dev/null
+          ./whexc ../benchmarks/fluid_solid_coupling_124/fsi_coupled.whex -o build/fsi_wh_q4 --executors 4 >/dev/null
+          COMMON='-O3 -march=native -mtune=native -flto -ffast-math -mprefer-vector-width=512 -pthread'
+          gcc $COMMON -DCOUPLED_MODE=1 ../benchmarks/fluid_solid_coupling_124/Fluid_Solid_expert_C_matched.c -o build/fsi_c
+          zig build-exe ../benchmarks/fluid_solid_coupling_124/Fluid_Solid_zig_avx512.zig -O ReleaseFast -mcpu=native -fllvm -femit-bin=build/fsi_zig
+      - name: Disassemble and classify machine shape
+        if: steps.probe.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd worktree
+          mkdir -p /tmp/asm125
+          tools/disassemble_generated.sh build/fsi_wh_q1 > /tmp/asm125/wheelchair_generated_q1.asm
+          tools/disassemble_generated.sh build/fsi_wh_q4 > /tmp/asm125/wheelchair_generated_q4.asm
+          objdump -d -Mintel build/fsi_wh_q1 > /tmp/asm125/wheelchair_full_q1.asm
+          objdump -d -Mintel build/fsi_c > /tmp/asm125/expert_c_full.asm
+          objdump -d -Mintel build/fsi_zig > /tmp/asm125/expert_zig_full.asm
+          nm -an build/fsi_c > /tmp/asm125/expert_c_nm.txt || true
+          nm -an build/fsi_zig > /tmp/asm125/expert_zig_nm.txt || true
+          python3 - <<'PY' | tee /tmp/asm125/summary.txt
+          import collections, pathlib, re, subprocess
+          root=pathlib.Path('/tmp/asm125')
+          print(open('/tmp/host.txt').read())
+          print(open('/tmp/probe.txt').read())
+
+          def parse(text):
+              rows=[]
+              for ln in text.splitlines():
+                  m=re.search(r'^\s*[0-9a-f]+:\s+(?:[0-9a-f]{2}\s+)+\s*([a-z][a-z0-9_.]*)\s*(.*)$',ln,re.I)
+                  if m: rows.append((m.group(1).lower(),m.group(2).lower(),ln))
+              return rows
+
+          def summarize(name,path):
+              text=path.read_text(errors='replace')
+              rows=parse(text)
+              m=collections.Counter(x[0] for x in rows)
+              zmm=sum('zmm' in x[1] for x in rows)
+              ymm=sum('ymm' in x[1] for x in rows)
+              xmm=sum('xmm' in x[1] for x in rows)
+              masks=sum(bool(re.search(r'\bk[0-7]\b',x[1])) for x in rows)
+              stackvec=sum(('zmm' in x[1] or 'ymm' in x[1] or 'xmm' in x[1]) and ('[rsp' in x[1] or '[rbp' in x[1]) for x in rows)
+              memvec=sum(('zmm' in x[1] or 'ymm' in x[1] or 'xmm' in x[1]) and '[' in x[1] for x in rows)
+              branches=sum(x[0].startswith('j') for x in rows)
+              calls=m['call']+m['callq']
+              print(f'=== {name} ===')
+              print(f'instructions={len(rows)} zmm_refs={zmm} ymm_refs={ymm} xmm_refs={xmm} mask_refs={masks} vector_mem_refs={memvec} vector_stack_refs={stackvec} branches={branches} calls={calls}')
+              keys=['vpmullq','vpmuludq','vpmulld','vpaddq','vpsubq','vpand','vpandq','vpor','vpxor','vpsllq','vpsrlq','vcvtuqq2pd','vcvtqq2pd','vcvttpd2qq','vaddpd','vsubpd','vmulpd','vdivpd','vfmadd132pd','vfmadd213pd','vfmadd231pd','vfnmadd132pd','vfnmadd213pd','vfnmadd231pd','vbroadcastsd','vmovapd','vmovupd','vmovdqu64','vextractf64x4','vextractf128','vinsertf64x4','vpermpd','vpermq','kmovw','kmovq','kortestw','kandw','knotw','popcnt','imul','idiv']
+              for k in keys:
+                  c=sum(v for op,v in m.items() if op.startswith(k))
+                  if c: print(f'{k}={c}')
+              regs=collections.Counter()
+              for _,ops,_ in rows:
+                  for r in re.findall(r'\bzmm([0-9]+)\b',ops): regs[int(r)]+=1
+              if regs: print('zmm_usage='+' '.join(f'z{r}:{c}' for r,c in sorted(regs.items())))
+              top=m.most_common(25)
+              print('top_mnemonics='+' '.join(f'{k}:{v}' for k,v in top))
+              return rows,text
+
+          wh_rows,wh_text=summarize('WHEELCHAIR_GENERATED_Q1',root/'wheelchair_generated_q1.asm')
+          summarize('WHEELCHAIR_GENERATED_Q4',root/'wheelchair_generated_q4.asm')
+          c_rows,c_text=summarize('EXPERT_C_FULL',root/'expert_c_full.asm')
+          z_rows,z_text=summarize('EXPERT_ZIG_FULL',root/'expert_zig_full.asm')
+
+          def split_functions(text):
+              fun=[]; cur=None; buf=[]
+              for ln in text.splitlines():
+                  h=re.match(r'^([0-9a-f]+) <([^>]+)>:$',ln.strip())
+                  if h:
+                      if cur is not None: fun.append((cur,buf))
+                      cur=h.group(2); buf=[ln]
+                  elif cur is not None: buf.append(ln)
+              if cur is not None: fun.append((cur,buf))
+              return fun
+          def hot(name,text,out):
+              scored=[]
+              for fn,lines in split_functions(text):
+                  body='\n'.join(lines)
+                  score=len(re.findall(r'\bzmm\d+\b',body,re.I))*10 + len(re.findall(r'\bv(?:fm|add|sub|mul|p)[a-z0-9]+\b',body,re.I))
+                  if score: scored.append((score,fn,body))
+              scored.sort(reverse=True)
+              print(f'=== HOT_FUNCTIONS_{name} ===')
+              with open(out,'w') as f:
+                  for score,fn,body in scored[:8]:
+                      print(f'{fn} score={score}')
+                      f.write(f'\n===== {fn} score={score} =====\n{body}\n')
+          hot('C',c_text,root/'expert_c_hot.asm')
+          hot('ZIG',z_text,root/'expert_zig_hot.asm')
+
+          # Print Wheelchair's densest contiguous windows by ZMM/vector density.
+          lines=wh_text.splitlines()
+          scored=[]
+          W=80
+          for i in range(max(0,len(lines)-W+1)):
+              block='\n'.join(lines[i:i+W])
+              s=len(re.findall(r'\bzmm\d+\b',block,re.I))*3 + len(re.findall(r'\bv[a-z0-9]+\b',block,re.I))
+              if s: scored.append((s,i,block))
+          scored.sort(reverse=True)
+          with open(root/'wheelchair_hot_windows.asm','w') as f:
+              seen=[]
+              for s,i,b in scored:
+                  if any(abs(i-j)<W for j in seen): continue
+                  seen.append(i)
+                  f.write(f'\n===== window line {i+1} score={s} =====\n{b}\n')
+                  if len(seen)>=6: break
+          print('ASSEMBLY_CLASSIFICATION=PASS')
+          PY
+      - name: Try hardware-counter audit
+        if: steps.probe.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          set +e
+          cd worktree
+          CPU=$(python3 - <<'PY'
+          import os
+          print(min(os.sched_getaffinity(0)))
+          PY
+          )
+          {
+            echo "CPU=$CPU"
+            for spec in 'WH:build/fsi_wh_q1:100000000' 'C:build/fsi_c:100000000 1' 'ZIG:build/fsi_zig:100000000 1'; do
+              name=${spec%%:*}; rest=${spec#*:}; bin=${rest%%:*}; args=${rest#*:}
+              echo "=== PERF_$name ==="
+              taskset -c "$CPU" perf stat -x, -e cycles,instructions,branches,branch-misses "$bin" $args >/dev/null
+            done
+          } 2>&1 | tee /tmp/asm125/perf.txt
+          exit 0
+      - name: Seal audit artifact
+        if: steps.probe.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          cat /tmp/host.txt /tmp/probe.txt > /tmp/asm125/host_and_probe.txt
+          sha256sum worktree/build/fsi_wh_q1 worktree/build/fsi_c worktree/build/fsi_zig > /tmp/asm125/binary_sha256.txt
+      - uses: actions/upload-artifact@v4
+        if: steps.probe.outputs.qualified == 'true'
+        with:
+          name: assembly-audit-125-${{ matrix.slot }}
+          path: /tmp/asm125
+          if-no-files-found: error
+          retention-days: 30
