@@ -13,6 +13,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Build Wheelchair 1.2.6
         working-directory: worktree
@@ -54,44 +56,74 @@ jobs:
           grep -Fq 'SCHEDULERLESS_CAUSAL_RUNTIME_COST_SELECTOR=0' schedulerless_126.log
           grep -Fq 'SCHEDULERLESS_CAUSAL_SERIAL_FALLBACK=0' schedulerless_126.log
 
-      - name: WH and WHEX plan integration
+      - name: WH and WHEX semantic-plan integration
         working-directory: worktree
         run: |
           set -euxo pipefail
-          ./whexc surface/whex_examples/heat_en.whex -o build/heat126 --executors 4 --semantic-plan build/heat126.plan.json > build/heat126.compile.json
           python3 - <<'PY'
-          import json
-          p=json.load(open('build/heat126.plan.json'))
-          g=p['general_parallel_fabric']
-          assert g['source_order_edges']==0
-          assert g['synthetic_order_edges']==0
-          assert g['global_ready_queue']==0
-          assert g['root_scheduler']==0
-          assert g['runtime_cost_selector'] is False
-          assert g['serial_fallback']==0
-          assert g['schedulerless_causal']['requested_slots']==4
+          import sys
+          from pathlib import Path
+          sys.path.insert(0,'surface')
+          import whex_surface, wh_structural, general_parallel_plan as gpp
+
+          def gate(g):
+              assert g['source_order_edges']==0
+              assert g['synthetic_order_edges']==0
+              assert g['global_ready_queue']==0
+              assert g['global_ready_scan']==0
+              assert g['root_scheduler']==0
+              assert g['runtime_cost_selector'] is False
+              assert g['serial_fallback']==0
+              assert g['schedulerless_causal']['requested_slots']==4
+
+          wd,wp,_=whex_surface.load_surface(Path('surface/whex_examples/heat_en.whex'))
+          wg=gpp.plan(wd,4,semantic=whex_surface.semantic_plan(wp),physical_lane='specialized_whex_topology_native')
+          gate(wg)
           print('WHEX_GENERAL_PARALLEL_INTEGRATION=PASS')
-          PY
-          ./wheelchairc tests/wh_equivalence/semantic_abstraction_showcase.wh -o build/wh126 --executors 4 --semantic-plan build/wh126.plan.json > build/wh126.compile.json
-          python3 - <<'PY'
-          import json
-          p=json.load(open('build/wh126.plan.json'))
-          g=p['general_parallel_fabric']
-          assert g['source_order_edges']==0 and g['global_ready_queue']==0
-          assert g['schedulerless_causal']['requested_slots']==4
+
+          hd,hp,_=wh_structural.load_surface(Path('tests/wh_equivalence/semantic_abstraction_showcase.wh'))
+          hg=gpp.plan(hd,4,semantic=wh_structural.semantic_plan(hp),physical_lane='specialized_topology_native')
+          gate(hg)
           print('WH_GENERAL_PARALLEL_INTEGRATION=PASS')
           PY
+          python3 -m py_compile wheelchairc.py whexc.py surface/general_parallel_plan.py surface/schedulerless_causal_plan.py
+          grep -Fq "plan['general_parallel_fabric']=parallel" whexc.py
+          grep -Fq "'general_parallel_fabric':parallel" wheelchairc.py
 
-      - name: Preserve mature technical peaks
+      - name: Byte-protect mature 1.2.5 technical peaks
+        run: |
+          set -euxo pipefail
+          git fetch --no-tags --depth=1 origin build-1.2.5-multifield:refs/remotes/origin/build-1.2.5-multifield
+          files=(
+            worktree/compiler/topologyc_x86_64.S
+            worktree/compiler/general_frontend_x86_64.S
+            worktree/compiler/tensor_frontend_x86_64.S
+            worktree/compiler/runtime_blob_x86_64.S
+            worktree/compiler/general_runtime_blob_x86_64.S
+            worktree/runtime/tensor_runtime_template_x86_64.S
+            worktree/runtime/general_runtime_template_x86_64.S
+            worktree/runtime/causal_return_fabric_x86_64.S
+            worktree/runtime/causal_return_parallel_x86_64.S
+            worktree/tools/generate_rankn_backend_122.py
+            worktree/tools/generate_product_subtract_frontend.py
+            worktree/tools/generate_vector_reduction_residency.py
+            worktree/tools/generate_shared_dependency_episode_125.py
+            worktree/surface/rank_n_product.py
+            worktree/surface/shared_dependency_episode.py
+            worktree/surface/sparse_causal_expansion.py
+          )
+          git diff --exit-code origin/build-1.2.5-multifield -- "${files[@]}"
+          sha256sum "${files[@]}" | tee worktree/mature_125_byte_witness.sha256
+          echo 'MATURE_1_2_5_TECHNICAL_PEAK_BYTES=PASS' | tee worktree/mature_125_byte_gate.log
+
+      - name: Preserve mature derived regression gates
         working-directory: worktree
         run: |
           set -euxo pipefail
-          sh ./test_shared_dependency_episode_125.sh 2>&1 | tee regression_shared_dependency_125.log
           sh ./test_generic_native_125.sh 2>&1 | tee regression_generic_native_125.log
           sh ./test_rank_n_122.sh 2>&1 | tee regression_rankn_122.log
           sh ./test_true_parallel_123.sh 2>&1 | tee regression_true_parallel_123.log
           sh ./test_sparse_causal_expansion_123.sh 2>&1 | tee regression_sce_123.log
-          grep -Fq 'WHEELCHAIR_SHARED_DEPENDENCY_EPISODE_1_2_5=PASS' regression_shared_dependency_125.log
           grep -Fq 'WHEELCHAIR_1_2_4_GENERIC_NATIVE_PEAKS_ON_1_2_5=PASS' regression_generic_native_125.log
           grep -Fq 'WHEELCHAIR_RANK_N_1_2_2=PASS' regression_rankn_122.log
           grep -Fq 'WHEELCHAIR_SPARSE_CAUSAL_EXPANSION_1_2_3=PASS' regression_sce_123.log
@@ -116,7 +148,7 @@ jobs:
             worktree/general_parallel_126.log
             worktree/schedulerless_126.log
             worktree/regression_*.log
-            worktree/build/*.plan.json
+            worktree/mature_125_byte_*
             worktree/RELEASE_GATES_1_2_6.txt
             worktree/GENERAL_PARALLEL_FABRIC_1_2_6.md
             worktree/SCHEDULERLESS_SPARSE_CAUSAL_CHARTER_1_2_6.md

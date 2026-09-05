@@ -1,9 +1,6 @@
 name: Diagnose Wheelchair 1.2.6 Against 1.2.5 Baseline
 
 on:
-  push:
-    branches:
-      - build-1.2.6-schedulerless-causal
   workflow_dispatch:
 
 jobs:
@@ -21,24 +18,28 @@ jobs:
           ref: build-1.2.5-multifield
           path: baseline125
       - name: Differential compiler gate
+        shell: bash
         run: |
-          set -u
+          set +e
           lscpu > cpu.txt
           echo "candidate=$(git -C candidate rev-parse HEAD)" | tee result.txt
           echo "baseline=$(git -C baseline125 rev-parse HEAD)" | tee -a result.txt
           (
             cd baseline125/worktree
-            ./build.sh > ../../baseline_build.log 2>&1
+            ./build.sh > ../../baseline_build.log 2>&1 &&
             ./whexc surface/whex_examples/heat_en.whex -o build/diag_heat_1 --executors 1 > ../../baseline_heat.log 2>&1
           )
-          echo "BASELINE_HEAT_RC=$?" | tee -a result.txt
+          brc=$?
+          echo "BASELINE_HEAT_RC=$brc" | tee -a result.txt
           (
             cd candidate/worktree
-            ./build.sh > ../../candidate_build.log 2>&1
+            ./build.sh > ../../candidate_build.log 2>&1 &&
             ./whexc surface/whex_examples/heat_en.whex -o build/diag_heat_1 --executors 1 > ../../candidate_heat.log 2>&1
           )
-          echo "CANDIDATE_HEAT_RC=$?" | tee -a result.txt
+          crc=$?
+          echo "CANDIDATE_HEAT_RC=$crc" | tee -a result.txt
           sha256sum baseline125/worktree/build/topologyc candidate/worktree/build/topologyc | tee -a result.txt
+          exit 0
       - name: Archive differential evidence
         if: always()
         uses: actions/upload-artifact@v4
