@@ -117,7 +117,7 @@ jobs:
           RUNS=11; WARM=3
           cpus=sorted(os.sched_getaffinity(0)); cpu=str(cpus[0])
           rx=re.compile(r'checksum_bits=0x([0-9a-fA-F]+)')
-          rng=random.Random(0xM00 if False else 0xB17A125)
+          rng=random.Random(0xB17A125)
           def run(cmd): return subprocess.check_output(cmd,text=True).strip()
           def native_val(out):
             m=rx.search(out)
