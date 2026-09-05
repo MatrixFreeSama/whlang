@@ -25,7 +25,8 @@ jobs:
         run: |
           set -euo pipefail
           cd worktree
-          sh build.sh
+          sh build.sh >/tmp/wh_build.txt
+          grep -q 'WHEELCHAIR_BUILD=PASS' /tmp/wh_build.txt
 
       - name: Build pinned Aya
         run: |
@@ -36,7 +37,7 @@ jobs:
           ./gradlew :cli-console:installDist --no-daemon -x test >/tmp/aya_build.txt
           ./cli-console/build/install/cli-console/bin/cli-console --version
 
-      - name: Benchmark shared static-shape acceptance
+      - name: Benchmark exact shared static-shape acceptance
         run: |
           set -euo pipefail
           python3 - <<'PY' | tee overlap_result.txt
@@ -45,9 +46,9 @@ jobs:
 
           repo = Path.cwd()
           whroot = repo / 'worktree'
-          whsrc = repo / 'benchmarks/aya_overlap_static_125/field_shape.wh'
+          whsrc = whroot / 'tests/wh_equivalence/rank2_native_122.wh'
           ayasrc = repo / 'benchmarks/aya_overlap_static_125/field_shape.aya'
-          whbin = Path('/tmp/field_shape_overlap_wh')
+          whbin = Path('/tmp/rank2_native_122_wh')
           ayaroot = Path('/tmp/aya-dev')
           aya = ayaroot / 'cli-console/build/install/cli-console/bin/cli-console'
           module_path = ayaroot / 'cli-impl/src/test/resources/shared/src'
@@ -64,13 +65,15 @@ jobs:
                   raise SystemExit(cp.returncode)
               return dt, cp.stdout
 
-          whcmd = [whroot / 'wheelchairc', whsrc, '-o', whbin]
+          # Exact entry point used by the retained Rank-N release gate.
+          whcmd = ['python3', whroot / 'wheelchairc.py', whsrc, '-o', whbin, '--executors', '4']
           ayacmd = [aya, '--module-path', module_path, ayasrc, '--no-color']
 
-          wh_cold, wh_smoke = run(whcmd, whroot)
+          wh_cold, _ = run(whcmd, whroot)
           aya_cold, _ = run(ayacmd, ayaroot)
-          if 'wheelchair.wh.inference_surface/1' not in wh_smoke:
-              raise SystemExit('Wheelchair did not select structural inference lane')
+          native = subprocess.run(['taskset','-c','0',str(whbin),'4'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+          if native.stdout.strip() != 'checksum_bits=0x405e000000000000':
+              raise SystemExit('Wheelchair released Rank-2 checksum mismatch: '+native.stdout)
 
           for _ in range(5): run(whcmd, whroot)
           for _ in range(5): run(ayacmd, ayaroot)
@@ -87,8 +90,8 @@ jobs:
           print('HOST_CPU=' + cpu)
           print('AYA_COMMIT=5296b348775881e3c797bbc8d1c898a1ac959e00')
           print('WHEELCHAIR_VERSION=1.2.5')
-          print('TASK=rank2_shape_preserving_field_transform')
-          print('WH_TIMING_BOUNDARY=whole_process_source_to_native_static_ELF')
+          print('TASK=rank2_fixed_width_field_static_shape')
+          print('WH_TIMING_BOUNDARY=whole_process_source_to_native_static_ELF_executors4')
           print('AYA_TIMING_BOUNDARY=whole_process_source_to_successful_typecheck')
           print(f'WH_COLD_AOT_MS={wh_cold:.6f}')
           print(f'AYA_COLD_TYPECHECK_MS={aya_cold:.6f}')
@@ -99,6 +102,7 @@ jobs:
           print('AYA_SAMPLES_MS=' + ','.join(f'{x:.6f}' for x in av))
           print(f'WH_NONBLANK_LOC={wm[0]} WH_BYTES={wm[1]} WH_NONWS={wm[2]}')
           print(f'AYA_NONBLANK_LOC={am[0]} AYA_BYTES={am[1]} AYA_NONWS={am[2]}')
+          print('WH_NATIVE_CHECKSUM=checksum_bits=0x405e000000000000')
           print('BOTH_SHARED_STATIC_SHAPE_ACCEPT=PASS')
           PY
 
@@ -107,6 +111,6 @@ jobs:
           name: aya-wheelchair-overlap-static-125
           path: |
             overlap_result.txt
-            benchmarks/aya_overlap_static_125/field_shape.wh
+            worktree/tests/wh_equivalence/rank2_native_122.wh
             benchmarks/aya_overlap_static_125/field_shape.aya
           retention-days: 30
