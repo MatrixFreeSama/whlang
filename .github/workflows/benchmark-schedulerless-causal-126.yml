@@ -1,0 +1,79 @@
+name: Benchmark Wheelchair 1.2.6 Schedulerless Causal
+
+on:
+  push:
+    branches:
+      - build-1.2.6-schedulerless-causal
+    paths:
+      - '.github/workflows/benchmark-schedulerless-causal-126.yml'
+      - 'worktree/runtime/schedulerless_causal_x86_64.S'
+      - 'worktree/runtime/schedulerless_126/**'
+      - 'worktree/surface/schedulerless_causal_plan.py'
+      - 'benchmarks/schedulerless_causal_126/**'
+  workflow_dispatch:
+
+jobs:
+  authority:
+    strategy:
+      fail-fast: false
+      matrix:
+        replicate: [1, 2, 3]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Build candidate and Expert C
+        run: |
+          set -euxo pipefail
+          ./worktree/build.sh
+          gcc -O3 -march=native -std=c11 -Wall -Wextra -Werror \
+            benchmarks/schedulerless_causal_126/Expert_C_causal_q1.c \
+            -o benchmarks/schedulerless_causal_126/expert_c_causal_q1
+          lscpu | tee benchmarks/schedulerless_causal_126/cpu_${{ matrix.replicate }}.txt
+      - name: Validate schedulerless invariants
+        run: |
+          set -euxo pipefail
+          sh worktree/test_schedulerless_causal_126.sh | tee benchmarks/schedulerless_causal_126/invariants_${{ matrix.replicate }}.log
+      - name: Benchmark
+        run: |
+          set -euxo pipefail
+          python3 benchmarks/schedulerless_causal_126/benchmark_schedulerless_126.py \
+            --reps 9 \
+            --out benchmarks/schedulerless_causal_126/results_${{ matrix.replicate }}.csv \
+            | tee benchmarks/schedulerless_causal_126/run_${{ matrix.replicate }}.log
+      - name: Summarize ratios
+        run: |
+          python3 - <<'PY'
+          import csv, math, statistics, pathlib
+          rep='${{ matrix.replicate }}'
+          p=pathlib.Path(f'benchmarks/schedulerless_causal_126/results_{rep}.csv')
+          rows=list(csv.DictReader(p.open()))
+          ratios=[float(r['schedulerless_over_125']) for r in rows]
+          geo=math.exp(sum(math.log(x) for x in ratios)/len(ratios))
+          wins=sum(x<1.0 for x in ratios)
+          losses=sum(x>1.0 for x in ratios)
+          q1=[float(r['schedulerless_over_expert_c_q1']) for r in rows if r['schedulerless_over_expert_c_q1']]
+          q1geo=math.exp(sum(math.log(x) for x in q1)/len(q1))
+          byslots={}
+          for s in ('1','2','4'):
+              xs=[float(r['schedulerless_over_125']) for r in rows if r['slots']==s]
+              byslots[s]=math.exp(sum(math.log(x) for x in xs)/len(xs))
+          out=(f'REPLICATE={rep}\nROWS={len(rows)}\nWINS_VS_125={wins}\nLOSSES_VS_125={losses}\n'
+               f'GEOMEAN_SCHEDULERLESS_OVER_125={geo:.9f}\n'
+               f'GEOMEAN_OVER_125_Q1={byslots["1"]:.9f}\nGEOMEAN_OVER_125_Q2={byslots["2"]:.9f}\nGEOMEAN_OVER_125_Q4={byslots["4"]:.9f}\n'
+               f'GEOMEAN_SCHEDULERLESS_OVER_EXPERT_C_Q1={q1geo:.9f}\n')
+          pathlib.Path(f'benchmarks/schedulerless_causal_126/summary_{rep}.txt').write_text(out)
+          print(out,end='')
+          PY
+      - name: Archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: schedulerless-causal-126-authority-${{ matrix.replicate }}
+          retention-days: 30
+          path: |
+            benchmarks/schedulerless_causal_126/results_${{ matrix.replicate }}.csv
+            benchmarks/schedulerless_causal_126/summary_${{ matrix.replicate }}.txt
+            benchmarks/schedulerless_causal_126/run_${{ matrix.replicate }}.log
+            benchmarks/schedulerless_causal_126/invariants_${{ matrix.replicate }}.log
+            benchmarks/schedulerless_causal_126/cpu_${{ matrix.replicate }}.txt
