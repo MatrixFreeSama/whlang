@@ -31,8 +31,6 @@ ld -nostdlib -static -z noexecstack -T runtime/general_runtime.ld \
 ./tools/generate_general_runtime_offsets.sh "$BUILD/general_runtime_template" compiler/general_runtime_offsets.inc
 
 # Handwritten assembly compiler: general sovereign lane + topology HPC lane.
-# The mature 1.2.3 frontend remains byte-frozen. 1.2.4 derives its accepted
-# generic native-codegen recipes from that frozen source at build time.
 as --64 compiler/topologyc_x86_64.S -o "$BUILD/topologyc_core.o"
 as --64 "$BUILD/tensor_frontend_shared_base_125.S" -o "$BUILD/tensor_frontend.o"
 as --64 "$BUILD/tensor_frontend_shared_wide_125.S" -o "$BUILD/tensor_frontend_sdep.o"
@@ -41,32 +39,36 @@ as --64 compiler/runtime_blob_x86_64.S -o "$BUILD/runtime_blob.o"
 as --64 compiler/general_runtime_blob_x86_64.S -o "$BUILD/general_runtime_blob.o"
 ld -nostdlib -static -z noexecstack \
   "$BUILD/topologyc_core.o" "$BUILD/tensor_frontend.o" "$BUILD/general_frontend.o" \
-  "$BUILD/runtime_blob.o" "$BUILD/general_runtime_blob.o" \
-  -o "$BUILD/topologyc"
-
+  "$BUILD/runtime_blob.o" "$BUILD/general_runtime_blob.o" -o "$BUILD/topologyc"
 ld -nostdlib -static -z noexecstack \
   "$BUILD/topologyc_core.o" "$BUILD/tensor_frontend_sdep.o" "$BUILD/general_frontend.o" \
-  "$BUILD/runtime_blob.o" "$BUILD/general_runtime_blob.o" \
-  -o "$BUILD/topologyc-sdep"
+  "$BUILD/runtime_blob.o" "$BUILD/general_runtime_blob.o" -o "$BUILD/topologyc-sdep"
 
 as --64 "$BUILD/generated_122/tensor_rankn_frontend_x86_64.S" -o "$BUILD/tensor_rankn_frontend.o"
 as --64 "$BUILD/generated_122/runtime_rankn_blob_x86_64.S" -o "$BUILD/runtime_rankn_blob.o"
 ld -nostdlib -static -z noexecstack \
   "$BUILD/topologyc_core.o" "$BUILD/tensor_rankn_frontend.o" "$BUILD/general_frontend.o" \
-  "$BUILD/runtime_rankn_blob.o" "$BUILD/general_runtime_blob.o" \
-  -o "$BUILD/topologyc-rankn"
+  "$BUILD/runtime_rankn_blob.o" "$BUILD/general_runtime_blob.o" -o "$BUILD/topologyc-rankn"
 
-# Execution Fabric remains a distinct native runtime layer.
+# Execution fabrics. The 1.2.5 witnesses remain buildable for regression and
+# benchmark control. 1.2.6 adds a distinct scheduler-erased sparse causal lane;
+# it does not replace static tensor/WHEX hot paths with a heavier generic runtime.
 as --64 runtime/causal_return_fabric_x86_64.S -o "$BUILD/causal_return_fabric.o"
 ld -nostdlib -static -z noexecstack "$BUILD/causal_return_fabric.o" -o "$BUILD/topology-fabric"
 as --64 runtime/causal_return_parallel_x86_64.S -o "$BUILD/causal_return_parallel.o"
 ld -nostdlib -static -z noexecstack "$BUILD/causal_return_parallel.o" -o "$BUILD/topology-fabric-run"
+as --64 runtime/schedulerless_causal_x86_64.S -o "$BUILD/schedulerless_causal.o"
+ld -nostdlib -static -z noexecstack "$BUILD/schedulerless_causal.o" -o "$BUILD/topology-fabric-schedulerless"
 
-for f in "$BUILD/topologyc" "$BUILD/topologyc-sdep" "$BUILD/topologyc-rankn" "$BUILD/tensor_runtime_template" "$BUILD/tensor_rankn_runtime_template" "$BUILD/general_runtime_template" "$BUILD/topology-fabric" "$BUILD/topology-fabric-run"; do
+for f in "$BUILD/topologyc" "$BUILD/topologyc-sdep" "$BUILD/topologyc-rankn" "$BUILD/tensor_runtime_template" "$BUILD/tensor_rankn_runtime_template" "$BUILD/general_runtime_template" "$BUILD/topology-fabric" "$BUILD/topology-fabric-run" "$BUILD/topology-fabric-schedulerless"; do
   readelf -d "$f" 2>&1 | grep -q 'There is no dynamic section'
 done
 
 echo 'GENERIC_PRODUCT_SUBTRACT_CONTRACTION=BUILT'
 echo 'GENERIC_VECTOR_REDUCTION_RESIDENCY=BUILT'
 echo 'SHARED_DEPENDENCY_EPISODE_1_2_5=BUILT'
+echo 'SCHEDULERLESS_CAUSAL_RUNTIME_1_2_6=BUILT'
+echo 'SCHEDULERLESS_CAUSAL_GLOBAL_READY_QUEUE=0'
+echo 'SCHEDULERLESS_CAUSAL_ROOT_SCHEDULER=0'
+echo 'SCHEDULERLESS_CAUSAL_RUNTIME_COST_SELECTOR=0'
 echo 'WHEELCHAIR_BUILD=PASS'
