@@ -50,19 +50,24 @@ ld -nostdlib -static -z noexecstack \
   "$BUILD/topologyc_core.o" "$BUILD/tensor_rankn_frontend.o" "$BUILD/general_frontend.o" \
   "$BUILD/runtime_rankn_blob.o" "$BUILD/general_runtime_blob.o" -o "$BUILD/topologyc-rankn"
 
-# Execution fabrics. The 1.2.5 witnesses remain buildable for regression and
-# benchmark control. 1.2.6 adds a distinct scheduler-erased sparse causal lane;
-# it does not replace static tensor/WHEX hot paths with a heavier generic runtime.
+# 1.2.5 execution fabrics remain byte-preserved witnesses. They are no longer
+# the semantic authority for new general parallel lowering.
 as --64 runtime/causal_return_fabric_x86_64.S -o "$BUILD/causal_return_fabric.o"
 ld -nostdlib -static -z noexecstack "$BUILD/causal_return_fabric.o" -o "$BUILD/topology-fabric"
 as --64 runtime/causal_return_parallel_x86_64.S -o "$BUILD/causal_return_parallel.o"
 ld -nostdlib -static -z noexecstack "$BUILD/causal_return_parallel.o" -o "$BUILD/topology-fabric-run"
+
+# 1.2.6 universal schedulerless causal authority. topology-parallel is the
+# general public execution-fabric identity; the descriptive name is retained as
+# a byte-identical audit alias.
 as --64 runtime/schedulerless_causal_x86_64.S -o "$BUILD/schedulerless_causal.o"
 ld -nostdlib -static -z noexecstack "$BUILD/schedulerless_causal.o" -o "$BUILD/topology-fabric-schedulerless"
+cp "$BUILD/topology-fabric-schedulerless" "$BUILD/topology-parallel"
 
-for f in "$BUILD/topologyc" "$BUILD/topologyc-sdep" "$BUILD/topologyc-rankn" "$BUILD/tensor_runtime_template" "$BUILD/tensor_rankn_runtime_template" "$BUILD/general_runtime_template" "$BUILD/topology-fabric" "$BUILD/topology-fabric-run" "$BUILD/topology-fabric-schedulerless"; do
+for f in "$BUILD/topologyc" "$BUILD/topologyc-sdep" "$BUILD/topologyc-rankn" "$BUILD/tensor_runtime_template" "$BUILD/tensor_rankn_runtime_template" "$BUILD/general_runtime_template" "$BUILD/topology-fabric" "$BUILD/topology-fabric-run" "$BUILD/topology-fabric-schedulerless" "$BUILD/topology-parallel"; do
   readelf -d "$f" 2>&1 | grep -q 'There is no dynamic section'
 done
+cmp "$BUILD/topology-fabric-schedulerless" "$BUILD/topology-parallel"
 
 echo 'GENERIC_PRODUCT_SUBTRACT_CONTRACTION=BUILT'
 echo 'GENERIC_VECTOR_REDUCTION_RESIDENCY=BUILT'
@@ -71,4 +76,7 @@ echo 'SCHEDULERLESS_CAUSAL_RUNTIME_1_2_6=BUILT'
 echo 'SCHEDULERLESS_CAUSAL_GLOBAL_READY_QUEUE=0'
 echo 'SCHEDULERLESS_CAUSAL_ROOT_SCHEDULER=0'
 echo 'SCHEDULERLESS_CAUSAL_RUNTIME_COST_SELECTOR=0'
+echo 'GENERAL_PARALLEL_FABRIC_1_2_6=BUILT'
+echo 'GENERAL_PARALLEL_FABRIC_AUTHORITY=topology-parallel'
+echo 'GENERAL_PARALLEL_1_2_5_WITNESSES=PRESERVED'
 echo 'WHEELCHAIR_BUILD=PASS'

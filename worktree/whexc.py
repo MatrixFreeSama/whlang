@@ -5,6 +5,7 @@ ROOT=Path(__file__).resolve().parent
 sys.path.insert(0,str(ROOT/'surface'))
 import whex_surface
 import shared_dependency_episode as sde
+import general_parallel_plan as gpp
 
 
 def compile_native(data, output: Path, executors: int, isa_limit: str | None):
@@ -31,15 +32,26 @@ def main():
     ap.add_argument('source',type=Path); ap.add_argument('-o','--output',type=Path,required=True)
     ap.add_argument('--executors',type=int,choices=[1,2,4],default=1)
     ap.add_argument('--isa-limit',choices=['native','avx512f','avx512dq','avx2'],default=None,help='backend capability ceiling for ISA audit/testing; never selects a scalar fallback')
-    ap.add_argument('--semantic-plan',type=Path,default=None,help='write compile-time Region/Effect/Dependency/parallelism plan JSON')
+    ap.add_argument('--semantic-plan',type=Path,default=None,help='write Region/Effect/Dependency semantics plus universal schedulerless causal plan')
     a=ap.parse_args()
     data,parser,_=whex_surface.load_surface(a.source)
     episode=compile_native(data,a.output,a.executors,a.isa_limit)
     plan=whex_surface.semantic_plan(parser)
+    parallel=gpp.plan(data,a.executors,semantic=plan,physical_lane='specialized_whex_topology_native')
+    plan['general_parallel_fabric']=parallel
     plan['shared_dependency_episode']=episode
     if a.semantic_plan is not None:
         a.semantic_plan.write_text(json.dumps(plan,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
-    print(json.dumps({'source':str(a.source),'output':str(a.output),'core_sha256':whex_surface.core_hash(data),'repair_count':len(parser.repairs),'repairs':[r.as_dict() for r in parser.repairs],'bottom_layer_modified':True,'compiler_release':'1.2.6','semantic_sha256':plan['semantic_sha256'],'shared_dependency_episode':episode},ensure_ascii=False,indent=2))
+    print(json.dumps({
+        'source':str(a.source),'output':str(a.output),
+        'core_sha256':whex_surface.core_hash(data),
+        'repair_count':len(parser.repairs),'repairs':[r.as_dict() for r in parser.repairs],
+        'bottom_layer_modified':True,'compiler_release':'1.2.6',
+        'semantic_sha256':plan['semantic_sha256'],
+        'general_parallel_fabric':parallel,
+        'parallel_fabric_authority':'topology-parallel',
+        'shared_dependency_episode':episode
+    },ensure_ascii=False,indent=2))
     return 0
 if __name__=='__main__':
     try: raise SystemExit(main())

@@ -6,6 +6,7 @@ sys.path.insert(0,str(ROOT/'surface'))
 import wh_surface
 import wh_structural
 import shared_dependency_episode as sde
+import general_parallel_plan as gpp
 
 
 def _compile_native(core_bytes: bytes, output: Path, executors: int, *, rank_n: bool=False, episode: dict | None=None) -> tuple[int,str,str]:
@@ -28,7 +29,7 @@ def main():
     ap.add_argument('source',type=Path); ap.add_argument('-o','--output',type=Path,required=True)
     ap.add_argument('--executors',type=int,choices=[1,2,4],default=1)
     ap.add_argument('--semantic-plan',type=Path,default=None,
-                    help='write the recovered WH structural semantic plan when the structural surface is selected')
+                    help='write structural/general semantics plus the universal schedulerless causal plan')
     a=ap.parse_args()
 
     if a.source.suffix.lower() != '.wh':
@@ -37,10 +38,12 @@ def main():
     structural=wh_structural.looks_structural(text)
 
     if structural:
-        # Lane identity is decided from the source grammar before compilation.
-        # Failure in the structural lane is terminal: never retry general or scalar.
+        # Lane identity is decided from source grammar before compilation.
+        # Failure is terminal: never retry a scalar/general implementation.
         data, parser = wh_structural.compile_surface(text,a.source)
         plan=wh_structural.semantic_plan(parser)
+        parallel=gpp.plan(data,a.executors,semantic=plan,physical_lane='specialized_topology_native')
+        plan['general_parallel_fabric']=parallel
         blob=wh_structural.canonical_core_bytes(data)
         episode=sde.analyze(data)
         plan['shared_dependency_episode']=episode
@@ -56,6 +59,7 @@ def main():
             'core_sha256':wh_structural.core_hash(data),
             'native_core_sha256':wh_structural.core_hash(data),
             'general_topology_recovery':{'active':False,'reason':'structural_lane_selected_before_native_compilation'},
+            'general_parallel_fabric':parallel,
             'semantic_sha256':plan.get('semantic_sha256'),
             'shared_dependency_episode':episode,
             'requested_executors':a.executors,
@@ -68,10 +72,12 @@ def main():
     data, parser = wh_surface.compile_surface(text,a.source)
     static_data, static_lowering = wh_surface.lower_static_general_constructs(data)
     lowered_data, gtr = wh_surface.recover_topology_program(static_data)
-    # Compile-lane identity is decided before native compilation. Unrecovered
-    # general semantics are never presented to the tensor frontend, while GTR
-    # outputs remain byte-equivalent to WHEX topology cores. This is routing
-    # metadata, not a failure-driven fallback.
+    # General parallel semantics are derived before native lane selection. No
+    # source-order edge is allowed to appear merely because the direct-general
+    # code emitter remains a separate physical specialization.
+    parallel=gpp.plan(lowered_data,a.executors,physical_lane=(
+        'recovered_topology_native' if gtr.get('active') else 'direct_general_native'
+    ))
     native_data = lowered_data
     if not gtr.get('active'):
         native_data = dict(lowered_data)
@@ -81,16 +87,30 @@ def main():
     rc,out,err=_compile_native(blob,a.output,a.executors,episode=episode)
     if rc:
         sys.stderr.write(err or out); return rc
+    semantic={
+        'semantic_format':'wheelchair.wh.general/1',
+        'structural_recovery':gtr,
+        'general_parallel_fabric':parallel,
+        'serial_introduction_audit':{
+            'synthetic_order_edges':0,
+            'global_ready_queue':0,
+            'root_scheduler':0,
+            'runtime_cost_selector':0,
+            'hidden_serial_fallback':0,
+        },
+        # Direct-general native code is retained as a technical peak while the
+        # universal causal plan is authoritative for inter-binding independence.
+        # We never claim the native program_slot is parallel when it is not.
+        'native_physicalization':{
+            'lane':'recovered_topology_native' if gtr.get('active') else 'direct_general_native',
+            'executor_materialization':a.executors if gtr.get('active') else 1,
+            'parallel_fabric_authority':'topology-parallel',
+            'peak_preservation':'specialized_native_path_may_be_narrower_only_by_proved_semantic_equivalence',
+        },
+    }
+    if episode is not None:
+        semantic['shared_dependency_episode']=episode
     if a.semantic_plan is not None:
-        # Recovered general topology carries the same episode proof; unrecovered
-        # general programs deliberately do not fabricate one.
-        semantic={
-            'semantic_format':'wheelchair.wh.general/1',
-            'structural_recovery':gtr,
-            'serial_introduction_audit':'not_claimed_for_unrecovered_general_lane'
-        }
-        if episode is not None:
-            semantic['shared_dependency_episode']=episode
         a.semantic_plan.parent.mkdir(parents=True,exist_ok=True)
         a.semantic_plan.write_text(json.dumps(semantic,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
     print(json.dumps({
@@ -101,9 +121,11 @@ def main():
         'native_core_sha256':wh_surface.core_hash(native_data),
         'static_general_lowering':static_lowering,
         'general_topology_recovery':gtr,
+        'general_parallel_fabric':parallel,
         'shared_dependency_episode':episode,
         'requested_executors':a.executors,
         'effective_executors':a.executors if gtr.get('active') else 1,
+        'parallel_fabric_executors':parallel.get('materialized_slots',0),
         'repair_count':len(parser.repairs),
         'repairs':[r.as_dict() for r in parser.repairs]
     },ensure_ascii=False,indent=2))
