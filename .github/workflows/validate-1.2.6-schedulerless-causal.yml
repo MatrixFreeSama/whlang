@@ -18,7 +18,7 @@ jobs:
         working-directory: worktree
         run: |
           set -euxo pipefail
-          ./build.sh | tee build_126.log
+          ./build.sh 2>&1 | tee build_126.log
           test "$(cat VERSION)" = "1.2.6"
           grep -Fq 'SCHEDULERLESS_CAUSAL_RUNTIME_1_2_6=BUILT' build_126.log
           grep -Fq 'SCHEDULERLESS_CAUSAL_GLOBAL_READY_QUEUE=0' build_126.log
@@ -30,12 +30,12 @@ jobs:
         working-directory: worktree
         run: |
           set -euxo pipefail
-          sh ./test_109_125.sh | tee regression_109_125.log
-          sh ./test_shared_dependency_episode_125.sh | tee regression_shared_dependency_125.log
-          sh ./test_generic_native_125.sh | tee regression_generic_native_125.log
-          sh ./test_rank_n_122.sh | tee regression_rankn_122.log
-          sh ./test_true_parallel_123.sh | tee regression_true_parallel_123.log
-          sh ./test_sparse_causal_expansion_123.sh | tee regression_sce_123.log
+          sh -x ./test_109_125.sh 2>&1 | tee regression_109_125.log
+          sh -x ./test_shared_dependency_episode_125.sh 2>&1 | tee regression_shared_dependency_125.log
+          sh -x ./test_generic_native_125.sh 2>&1 | tee regression_generic_native_125.log
+          sh -x ./test_rank_n_122.sh 2>&1 | tee regression_rankn_122.log
+          sh -x ./test_true_parallel_123.sh 2>&1 | tee regression_true_parallel_123.log
+          sh -x ./test_sparse_causal_expansion_123.sh 2>&1 | tee regression_sce_123.log
           grep -Fq 'SHARED_DEPENDENCY_NO_FOREIGN_HIGH_LEVEL_BACKEND=PASS' regression_109_125.log
           grep -Fq 'WHEELCHAIR_SHARED_DEPENDENCY_EPISODE_1_2_5=PASS' regression_shared_dependency_125.log
           grep -Fq 'WHEELCHAIR_1_2_4_GENERIC_NATIVE_PEAKS_ON_1_2_5=PASS' regression_generic_native_125.log
@@ -46,7 +46,7 @@ jobs:
         working-directory: worktree
         run: |
           set -euxo pipefail
-          sh ./test_schedulerless_causal_126.sh | tee schedulerless_126.log
+          sh -x ./test_schedulerless_causal_126.sh 2>&1 | tee schedulerless_126.log
           grep -Fq 'SCHEDULERLESS_CAUSAL_RANDOM_DAG_300=PASS' schedulerless_126.log
           grep -Fq 'SCHEDULERLESS_CAUSAL_MULTISOURCE=PASS' schedulerless_126.log
           grep -Fq 'SCHEDULERLESS_CAUSAL_GLOBAL_READY_SCAN=0' schedulerless_126.log
@@ -70,7 +70,7 @@ jobs:
           python3 benchmarks/schedulerless_causal_126/benchmark_schedulerless_126.py \
             --reps 3 \
             --out benchmarks/schedulerless_causal_126/results_ci.csv \
-            | tee benchmarks/schedulerless_causal_126/benchmark_ci.log
+            2>&1 | tee benchmarks/schedulerless_causal_126/benchmark_ci.log
           grep -Fq 'SCHEDULERLESS_CAUSAL_BENCHMARK_MATRIX=PASS' benchmarks/schedulerless_causal_126/benchmark_ci.log
 
       - name: Static anti-serial-spine audit
