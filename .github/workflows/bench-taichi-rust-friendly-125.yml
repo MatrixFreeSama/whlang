@@ -1,0 +1,134 @@
+name: Taichi vs Rust Friendly CPU Triplet
+
+on:
+  push:
+    branches: [bench-taichi-rust-friendly-125]
+    paths:
+      - '.github/workflows/bench-taichi-rust-friendly-125.yml'
+
+jobs:
+  bench:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bench-taichi-rust-friendly-125
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Host and toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/bench
+          {
+            echo "SLOT=${{ matrix.slot }}"
+            lscpu | grep -E 'Vendor ID|Model name|CPU family|^Model:|Socket|Thread|Core' || true
+            echo "AFFINITY=$(python - <<'PY'
+          import os
+          print(','.join(map(str,sorted(os.sched_getaffinity(0)))))
+          PY
+          )"
+            rustc --version
+          } | tee /tmp/bench/host.txt
+      - name: Install Taichi 1.7.4
+        run: |
+          python -m pip install --disable-pip-version-check --no-input 'taichi==1.7.4'
+          python - <<'PY' | tee /tmp/bench/taichi-version.txt
+          import taichi as ti
+          print('TAICHI_VERSION=' + '.'.join(map(str, ti.__version__)))
+          PY
+      - name: Compile optimized Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustc benchmarks/taichi_rust_friendly_125/rust_simple_triplet.rs \
+            -C opt-level=3 -C target-cpu=native -C lto=fat -C codegen-units=1 \
+            -C panic=abort -C overflow-checks=off \
+            -o /tmp/bench/rust_triplet
+          file /tmp/bench/rust_triplet | tee /tmp/bench/rust-build.txt
+      - name: Benchmark Rust whole-process wall time
+        shell: bash
+        run: |
+          python - <<'PY' | tee /tmp/bench/rust.txt
+          import os, random, re, statistics, subprocess, time
+          RUNS=11; WARM=3
+          cpulist=sorted(os.sched_getaffinity(0))
+          def cpus(q): return ','.join(map(str,cpulist[:q]))
+          def cmd(w,n,q): return ['taskset','-c',cpus(q),'/tmp/bench/rust_triplet',w,str(n),str(q)]
+          rx=re.compile(r'checksum=([^ ]+)')
+          rng=random.Random(0x7A1C125)
+          for w in ('heat','wave','sparse'):
+            for n in (10_000_000,100_000_000):
+              for q in (1,2,4):
+                c=cmd(w,n,q)
+                ref=subprocess.check_output(c,text=True).strip()
+                for _ in range(WARM): subprocess.check_output(c,text=True)
+                samples=[]
+                for _ in range(RUNS):
+                  t=time.perf_counter_ns(); out=subprocess.check_output(c,text=True).strip(); dt=(time.perf_counter_ns()-t)/1e6
+                  if not rx.search(out): raise SystemExit('missing Rust checksum')
+                  samples.append(dt)
+                print(f'RUST WORKLOAD={w} N={n} Q={q} MEDIAN_MS={statistics.median(samples):.6f} CHECKSUM={rx.search(ref).group(1)}')
+          PY
+      - name: Benchmark Taichi warm steady-state kernels
+        shell: bash
+        run: |
+          set -euo pipefail
+          cpus_for () { python - "$1" <<'PY'
+          import os,sys
+          q=int(sys.argv[1]); print(','.join(map(str,sorted(os.sched_getaffinity(0))[:q])))
+          PY
+          }
+          for q in 1 2 4; do
+            taskset -c "$(cpus_for "$q")" python benchmarks/taichi_rust_friendly_125/taichi_simple_triplet.py --threads "$q" --runs 11 --warm 8 | tee "/tmp/bench/taichi_q${q}.txt"
+          done
+      - name: Compare Taichi and Rust
+        shell: bash
+        run: |
+          python - <<'PY' | tee /tmp/bench/summary.txt
+          import math,re,statistics
+          from pathlib import Path
+          rust={}; tai={}
+          rr=re.compile(r'RUST WORKLOAD=(\w+) N=(\d+) Q=(\d+) MEDIAN_MS=([0-9.]+) CHECKSUM=([^ ]+)')
+          for line in Path('/tmp/bench/rust.txt').read_text().splitlines():
+            m=rr.search(line)
+            if m: rust[(m[1],int(m[2]),int(m[3]))]=(float(m[4]),float(m[5]))
+          rt=re.compile(r'TAICHI WORKLOAD=(\w+) N=(\d+) Q=(\d+) MEDIAN_MS=([0-9.]+) CHECKSUM=([^ ]+) DRIFT=([^ ]+)')
+          for q in (1,2,4):
+            for line in Path(f'/tmp/bench/taichi_q{q}.txt').read_text().splitlines():
+              m=rt.search(line)
+              if m: tai[(m[1],int(m[2]),int(m[3]))]=(float(m[4]),float(m[5]))
+          if set(rust)!=set(tai): raise SystemExit(f'missing cases rust={len(rust)} taichi={len(tai)}')
+          ratios=[]; wins=0; by={w:[] for w in ('heat','wave','sparse')}
+          for key in sorted(rust):
+            r,rv=rust[key]; t,tv=tai[key]
+            rel=abs(tv-rv)/max(abs(rv),1.0)
+            if rel>2e-8: raise SystemExit(f'numeric mismatch {key}: rel={rel}')
+            ratio=t/r; ratios.append(ratio); by[key[0]].append(ratio)
+            if t<r: wins += 1
+            w,n,q=key
+            print(f'FINAL WORKLOAD={w} N={n} Q={q} RUST={r:.6f}ms TAICHI={t:.6f}ms TAICHI/RUST={ratio:.3f}x RELERR={rel:.3e}')
+          def gm(xs): return math.exp(sum(math.log(x) for x in xs)/len(xs))
+          for w,xs in by.items():
+            print(f'WORKLOAD_SUMMARY {w} TAICHI_MEDIAN_VS_RUST={statistics.median(xs):.3f}x TAICHI_GEOMEAN_VS_RUST={gm(xs):.3f}x')
+          print(f'OVERALL TAICHI_WINS_VS_RUST={wins}/{len(ratios)}')
+          print(f'OVERALL TAICHI_MEDIAN_VS_RUST={statistics.median(ratios):.3f}x')
+          print(f'OVERALL TAICHI_GEOMEAN_VS_RUST={gm(ratios):.3f}x')
+          print('TAICHI_RUST_FRIENDLY_NUMERIC=PASS')
+          PY
+      - name: Seal artifact
+        shell: bash
+        run: |
+          cat /tmp/bench/host.txt /tmp/bench/taichi-version.txt /tmp/bench/rust-build.txt /tmp/bench/rust.txt /tmp/bench/taichi_q1.txt /tmp/bench/taichi_q2.txt /tmp/bench/taichi_q4.txt /tmp/bench/summary.txt > /tmp/bench/result.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: taichi-rust-friendly-${{ matrix.slot }}
+          path: /tmp/bench/result.txt
+          if-no-files-found: error
+          retention-days: 30
