@@ -112,6 +112,14 @@ jobs:
             -o build/fsi_coupled_c512
           zig build-exe ../benchmarks/fluid_solid_coupling_124/Fluid_Solid_zig_avx512.zig \
             -O ReleaseFast -mcpu=native -fllvm -femit-bin=build/fsi_coupled_zig
+          sha256sum ../benchmarks/fluid_solid_coupling_124/Fluid_Solid_zig_avx512.zig > /tmp/zig_source_sha256.txt
+          objdump -d build/fsi_coupled_zig > /tmp/zig_avx512.asm
+          if ! grep -Eq '\bzmm[0-9]+' /tmp/zig_avx512.asm; then
+            echo 'ZIG_ZMM_GATE=FAIL: explicit 8xf64 source did not lower to any ZMM instruction' >&2
+            exit 1
+          fi
+          echo 'ZIG_ZMM_GATE=PASS' > /tmp/zig_vector_witness.txt
+          grep -m 12 -E '\bzmm[0-9]+' /tmp/zig_avx512.asm >> /tmp/zig_vector_witness.txt
       - name: Same-host Wheelchair vs Expert C vs Expert Zig authority
         if: steps.qualify.outputs.qualified == 'true'
         shell: bash
@@ -169,7 +177,7 @@ jobs:
         if: steps.qualify.outputs.qualified == 'true'
         shell: bash
         run: |
-          cat /tmp/host.txt /tmp/probe.txt /tmp/authority.txt > /tmp/result.txt
+          cat /tmp/host.txt /tmp/probe.txt /tmp/zig_source_sha256.txt /tmp/zig_vector_witness.txt /tmp/authority.txt > /tmp/result.txt
           echo 'WHEELCHAIR_ZIG_FSI_1_2_5_HOST=PASS' >> /tmp/result.txt
       - uses: actions/upload-artifact@v4
         if: steps.qualify.outputs.qualified == 'true'
