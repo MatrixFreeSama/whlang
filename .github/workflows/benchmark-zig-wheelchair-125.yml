@@ -9,6 +9,9 @@ on:
       - '.github/workflows/benchmark-zig-wheelchair-125.yml'
   workflow_dispatch:
 
+env:
+  ZIG_VERSION: '0.16.0'
+
 jobs:
   zig-compile-and-numeric-gate:
     runs-on: ubuntu-24.04
@@ -18,10 +21,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl -fsSL https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz -o /tmp/zig.tar.xz
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz
           tar -xJf /tmp/zig.tar.xz -C /tmp
-          echo '/tmp/zig-x86_64-linux-0.16.0' >> "$GITHUB_PATH"
-      - name: Compile matched C and Zig
+          echo "/tmp/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
+      - name: Compile matched C and explicit-vector Zig
         shell: bash
         run: |
           set -euo pipefail
@@ -29,7 +32,7 @@ jobs:
           gcc -O3 -march=native -mtune=native -flto -ffast-math -pthread \
             -DCOUPLED_MODE=1 benchmarks/fluid_solid_coupling_124/Fluid_Solid_expert_C_matched.c \
             -o /tmp/fsi125/c
-          zig build-exe benchmarks/fluid_solid_coupling_124/Fluid_Solid_zig_matched.zig \
+          zig build-exe benchmarks/fluid_solid_coupling_124/Fluid_Solid_zig_avx512.zig \
             -O ReleaseFast -mcpu=native -fllvm -femit-bin=/tmp/fsi125/zig
       - name: Numeric parity smoke gate
         shell: bash
@@ -43,7 +46,7 @@ jobs:
               m=re.search(r'0x([0-9a-fA-F]+)',s)
               if not m: raise SystemExit(f'missing checksum: {s!r}')
               return struct.unpack('>d',int(m.group(1),16).to_bytes(8,'big'))[0]
-          for n in (4, 4096, 100000):
+          for n in (4, 31, 32, 33, 4096, 65535, 65536, 65537, 100000):
               for q in (1,2,4):
                   c=run(['/tmp/fsi125/c',str(n),str(q)])
                   z=run(['/tmp/fsi125/zig',str(n),str(q)])
@@ -52,7 +55,7 @@ jobs:
                   print(f'N={n} Q={q} C={cv:.17g} ZIG={zv:.17g} REL={rel:.3e}')
                   if rel > 1e-8:
                       raise SystemExit(f'Zig numeric mismatch N={n} Q={q}: {c} vs {z}')
-          print('ZIG_NUMERIC_GATE=PASS')
+          print('ZIG_EXPLICIT_VECTOR_NUMERIC_GATE=PASS')
           PY
 
   authority:
@@ -71,9 +74,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl -fsSL https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz -o /tmp/zig.tar.xz
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz
           tar -xJf /tmp/zig.tar.xz -C /tmp
-          echo '/tmp/zig-x86_64-linux-0.16.0' >> "$GITHUB_PATH"
+          echo "/tmp/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
       - name: Build Wheelchair and qualify AVX-512 host
         id: qualify
         shell: bash
@@ -90,7 +93,7 @@ jobs:
           else
             echo 'qualified=false' >> "$GITHUB_OUTPUT"
           fi
-      - name: Build Wheelchair 1.2.5, Expert C, and Zig
+      - name: Build Wheelchair 1.2.5, Expert C, and Expert Zig
         if: steps.qualify.outputs.qualified == 'true'
         shell: bash
         run: |
@@ -104,9 +107,9 @@ jobs:
           gcc $COMMON -DCOUPLED_MODE=1 \
             ../benchmarks/fluid_solid_coupling_124/Fluid_Solid_expert_C_matched.c \
             -o build/fsi_coupled_c512
-          zig build-exe ../benchmarks/fluid_solid_coupling_124/Fluid_Solid_zig_matched.zig \
+          zig build-exe ../benchmarks/fluid_solid_coupling_124/Fluid_Solid_zig_avx512.zig \
             -O ReleaseFast -mcpu=native -fllvm -femit-bin=build/fsi_coupled_zig
-      - name: Same-host Wheelchair vs Expert C vs Zig authority
+      - name: Same-host Wheelchair vs Expert C vs Expert Zig authority
         if: steps.qualify.outputs.qualified == 'true'
         shell: bash
         run: |
@@ -123,7 +126,7 @@ jobs:
               if not m: raise SystemExit(f'missing checksum: {s!r}')
               return struct.unpack('>d',int(m.group(1),16).to_bytes(8,'big'))[0]
           ratios_wc=[]; ratios_wz=[]; ratios_zc=[]
-          rng=random.Random(0x51A6125)
+          rng=random.Random(0xE7A5125)
           for n in (10_000_000,100_000_000):
             for q in (1,2,4):
               cmds={
@@ -150,11 +153,12 @@ jobs:
               wz=med['WHEELCHAIR']/med['ZIG']
               zc=med['ZIG']/med['C']
               ratios_wc.append(wc); ratios_wz.append(wz); ratios_zc.append(zc)
-              print(f'ROW MODE=coupled N={n} Q={q} WHEELCHAIR_MS={med["WHEELCHAIR"]:.6f} C512_MS={med["C"]:.6f} ZIG_MS={med["ZIG"]:.6f} WHEELCHAIR_C={wc:.4f}x WHEELCHAIR_ZIG={wz:.4f}x ZIG_C={zc:.4f}x')
+              print(f'ROW MODE=coupled N={n} Q={q} WHEELCHAIR_MS={med["WHEELCHAIR"]:.6f} C512_MS={med["C"]:.6f} ZIG_AVX512_MS={med["ZIG"]:.6f} WHEELCHAIR_C={wc:.4f}x WHEELCHAIR_ZIG={wz:.4f}x ZIG_C={zc:.4f}x')
           def geo(xs): return math.exp(sum(math.log(x) for x in xs)/len(xs))
           print(f'COUPLED_GEOMEAN_WHEELCHAIR_OVER_C={geo(ratios_wc):.4f}x')
-          print(f'COUPLED_GEOMEAN_WHEELCHAIR_OVER_ZIG={geo(ratios_wz):.4f}x')
-          print(f'COUPLED_GEOMEAN_ZIG_OVER_C={geo(ratios_zc):.4f}x')
+          print(f'COUPLED_GEOMEAN_WHEELCHAIR_OVER_ZIG_AVX512={geo(ratios_wz):.4f}x')
+          print(f'COUPLED_GEOMEAN_ZIG_AVX512_OVER_C={geo(ratios_zc):.4f}x')
+          print('ZIG_KIND=explicit_vector_8xf64')
           print('ZIG_WHEELCHAIR_125_NUMERIC_GATE=PASS')
           print('ZIG_WHEELCHAIR_125_AUTHORITY_HOST=PASS')
           PY
@@ -167,7 +171,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: steps.qualify.outputs.qualified == 'true'
         with:
-          name: zig-wheelchair-fsi-125-${{ matrix.slot }}
+          name: zig-avx512-wheelchair-fsi-125-${{ matrix.slot }}
           path: /tmp/result.txt
           if-no-files-found: error
           retention-days: 30
