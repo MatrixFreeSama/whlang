@@ -6,9 +6,11 @@ PLAN="$ROOT/surface/schedulerless_causal_plan.py"
 [ -x "$BIN" ]
 python3 -m py_compile "$PLAN"
 readelf -d "$BIN" 2>&1 | grep -q 'There is no dynamic section'
-if nm -an "$BIN" | grep -Eq 'root_epoch|root_remaining|pending_count|first_child|next_sibling|global_ready_queue|work_steal'; then
-  echo 'forbidden scheduler symbol present' >&2; exit 1
+if nm -an "$BIN" | grep -Eq 'root_epoch|root_remaining|pending_count|first_child|next_sibling|global_ready_queue|work_steal|mailbox'; then
+  echo 'forbidden scheduler/mailbox symbol present' >&2; exit 1
 fi
+nm -an "$BIN" | grep -q 'remote_head'
+nm -an "$BIN" | grep -q 'ready_next'
 python3 - "$ROOT" <<'PY'
 import json,random,subprocess,sys
 from pathlib import Path
@@ -22,8 +24,12 @@ def run(spec,slots=None):
     d=json.loads(cp.stdout)
     assert d['completed']==p['node_count'] and d['dependency_messages']==p['edge_count']
     for k in ('global_ready_scans','global_queue_ops','root_scheduler_ops','parent_chain_updates'): assert d[k]==0,(k,d[k])
+    assert d['handoff_collisions']==0,d
+    assert d['local_fallbacks']==0,d
     assert p['workload_dispatch'] is False and p['runtime_dispatch'] is False and p['runtime_cost_selector'] is False
-    assert p['serial_fallback']==0
+    assert p['serial_fallback']==0 and p['remote_collision_fallback']==0
+    assert p['collision_rule']=='slot_local_lock_free_causal_inbox'
+    assert p['remote_ingress']=='per_slot_mpsc_direct_causal'
     assert p['global_ready_queue']==p['global_ready_scan']==p['root_scheduler']==p['root_epoch']==0
     assert p['parent_demand_tree']==p['work_stealing']==p['global_phase_barrier']==0
     return p,d
@@ -44,6 +50,9 @@ else: raise SystemExit('cycle was not rejected')
 print('SCHEDULERLESS_CAUSAL_NATIVE_CASES=PASS')
 print('SCHEDULERLESS_CAUSAL_RANDOM_DAG_300=PASS')
 print('SCHEDULERLESS_CAUSAL_MULTISOURCE=PASS')
+print('SCHEDULERLESS_CAUSAL_MPSC_INBOX=PASS')
+print('SCHEDULERLESS_CAUSAL_HANDOFF_COLLISIONS=0')
+print('SCHEDULERLESS_CAUSAL_LOCAL_FALLBACKS=0')
 print('SCHEDULERLESS_CAUSAL_GLOBAL_READY_SCAN=0')
 print('SCHEDULERLESS_CAUSAL_GLOBAL_QUEUE_OPS=0')
 print('SCHEDULERLESS_CAUSAL_ROOT_SCHEDULER_OPS=0')

@@ -22,10 +22,16 @@ verify_final:
     lea rax, [rip+home_remaining]
     cmp dword ptr [rax+rbx*4], 0
     jne .vf_fail
-    lea rax, [rip+mailbox]
+    lea rax, [rip+remote_head]
+    cmp dword ptr [rax+rbx*4], EMPTY
+    jne .vf_fail
+    lea rax, [rip+remote_cache]
     cmp dword ptr [rax+rbx*4], EMPTY
     jne .vf_fail
     lea rax, [rip+slot_sp]
+    cmp dword ptr [rax+rbx*4], 0
+    jne .vf_fail
+    lea rax, [rip+slot_parked]
     cmp dword ptr [rax+rbx*4], 0
     jne .vf_fail
     inc ebx
@@ -75,5 +81,9 @@ aggregate_metrics:
     jne runtime_error
     mov rax, qword ptr [rip+total_edges]
     cmp eax, dword ptr [rip+edge_count]
+    jne runtime_error
+    cmp qword ptr [rip+total_collisions], 0
+    jne runtime_error
+    cmp qword ptr [rip+total_fallbacks], 0
     jne runtime_error
     ret

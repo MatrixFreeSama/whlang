@@ -212,6 +212,7 @@ edge_v: .skip MAX_EDGES*4
 home_remaining: .skip MAX_SLOTS*4
 slot_sp: .skip MAX_SLOTS*4
 slot_epoch: .skip MAX_SLOTS*4
+slot_parked: .skip MAX_SLOTS*4
 local_stack: .skip MAX_SLOTS*MAX_NODES*4
 node_results: .skip MAX_NODES*8
 metric_claims: .skip MAX_SLOTS*8
@@ -225,7 +226,9 @@ zero_end:
 .p2align 4
 first_out: .skip MAX_NODES*4
 next_edge: .skip MAX_EDGES*4
-mailbox: .skip MAX_SLOTS*4
+remote_head: .skip MAX_SLOTS*4
+remote_cache: .skip MAX_SLOTS*4
+ready_next: .skip MAX_NODES*4
 .p2align 3
 totals_begin:
 total_claims: .skip 8

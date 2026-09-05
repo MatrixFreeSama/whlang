@@ -15,8 +15,14 @@ clear_state:
     lea rdi, [rip+next_edge]
     mov ecx, MAX_EDGES
     rep stosd
-    lea rdi, [rip+mailbox]
+    lea rdi, [rip+remote_head]
     mov ecx, MAX_SLOTS
+    rep stosd
+    lea rdi, [rip+remote_cache]
+    mov ecx, MAX_SLOTS
+    rep stosd
+    lea rdi, [rip+ready_next]
+    mov ecx, MAX_NODES
     rep stosd
     ret
 
