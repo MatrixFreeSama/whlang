@@ -1,0 +1,6 @@
+.include "runtime/schedulerless_126/00_startup.inc"
+.include "runtime/schedulerless_126/10_proof_seed.inc"
+.include "runtime/schedulerless_126/20_lifecycle.inc"
+.include "runtime/schedulerless_126/30_execution.inc"
+.include "runtime/schedulerless_126/40_verify.inc"
+.include "runtime/schedulerless_126/50_io_state.inc"
