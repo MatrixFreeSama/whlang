@@ -75,20 +75,18 @@ objcopy -O binary "$BASE125/build/topologyc-sdep" /tmp/topologyc_sdep125.loadabl
 cmp /tmp/topologyc_wide.loadable.bin /tmp/topologyc_sdep125.loadable.bin
 echo 'WIDE_PROFILE_1_2_5_LOADABLE_BYTE_IDENTITY=PASS'
 
-# topologyc self-scanning uses the real host ISA even when --isa-limit is set.
-# Therefore emitted-program authority is dynamic only on a genuinely AVX-512F
-# host. Static compiler/loadable-byte and semantic-profile authority above is
-# mandatory on every x86-64 runner; a non-qualified host is an explicit SKIP,
-# never a fabricated PASS.
+# topologyc self-scanning uses the real host ISA. Therefore emitted-program
+# authority is dynamic only on a genuinely AVX-512F host. Static compiler and
+# semantic-profile authority above is mandatory on every x86-64 runner.
 if grep -qm1 -w avx512f /proc/cpuinfo; then
   echo 'HOST_AVX512_QUALIFIED=1'
-  "$BASE125/build/topologyc-sdep" /tmp/profile_shared.core.wh -o build/profile_baseline125_direct --isa-limit avx512f
-  build/topologyc-wide /tmp/profile_shared.core.wh -o build/profile_direct_wide --isa-limit avx512f
+  "$BASE125/build/topologyc-sdep" /tmp/profile_shared.core.wh -o build/profile_baseline125_direct
+  build/topologyc-wide /tmp/profile_shared.core.wh -o build/profile_direct_wide
   cmp build/profile_baseline125_direct build/profile_direct_wide
   echo 'WIDE_PROFILE_SAME_CORE_NATIVE_BYTE_IDENTITY=PASS'
 
-  ./wheelchairc ../benchmarks/fluid_solid_coupling_124/fsi_coupled.wh -o build/profile_wh --executors 1 --isa-limit avx512f --semantic-plan /tmp/profile_wh.plan.json >/tmp/profile_wh.json
-  ./whexc ../benchmarks/fluid_solid_coupling_124/fsi_coupled.whex -o build/profile_whex --executors 1 --isa-limit avx512f --semantic-plan /tmp/profile_whex.plan.json >/tmp/profile_whex.json
+  ./wheelchairc ../benchmarks/fluid_solid_coupling_124/fsi_coupled.wh -o build/profile_wh --executors 1 --semantic-plan /tmp/profile_wh.plan.json >/tmp/profile_wh.json
+  ./whexc ../benchmarks/fluid_solid_coupling_124/fsi_coupled.whex -o build/profile_whex --executors 1 --semantic-plan /tmp/profile_whex.plan.json >/tmp/profile_whex.json
   cmp build/profile_wh build/profile_whex
   cmp build/profile_wh build/profile_direct_wide
   python3 - <<'PY'
