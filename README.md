@@ -1,20 +1,32 @@
-# Wheelchair 1.2.7
+# Wheelchair 1.2.8
 
 Wheelchair is an ahead-of-time, native, structure-first programming language project for general programming with HPC and simulation as primary design targets.
 
 ## Official release archive
 
+[Download Wheelchair-1.2.8.zip](https://github.com/MatrixFreeSama/whlang/raw/refs/heads/main/dist/Wheelchair-1.2.8.zip) · [Archive SHA-256](https://github.com/MatrixFreeSama/whlang/blob/main/dist/Wheelchair-1.2.8.zip.sha256)
+
+The archive retains the complete release source, benchmarks, assets, and validation workflows from commit `749b12d3a9bfcafa285548018c29c74e4155fc48`. Historical release archives remain in `dist/` in the repository and are not recursively embedded in this ZIP.
+
+The extracted directory contains `worktree/`, `benchmarks/`, `assets/`, the validation workflows, and `release-evidence/`. The bundled `DIST_RELEASE.md` documents provenance, validation, and integrity checks. Use this archive or the `build-1.2.8-native256-maturity` branch for the 1.2.8 source. The archive's root `SHA256SUMS` covers the distribution; older checksum files under `worktree/` are preserved historical records.
+
+Archive SHA-256:
+
 ```text
-dist/Wheelchair-1.2.7.zip
+62fc059c4ff0055bbcc532ede7ecb2e940a876316be93f7a8b5d206d4aec1d78
 ```
 
-SHA-256:
+[Distribution validation record](dist/Wheelchair-1.2.8.release.json)
 
-```text
-7f5a3476a4a4b7ea8716b3231869ffb974505ff1e65f2ec2804187fed6fe237b
-```
+## 1.2.8: Native256 maturity
 
-Historical release archives remain in `dist/`.
+Wheelchair 1.2.8 completes the normal-build AVX2/YMM realization for the admitted structural tensor slice. It retains the native-512 physical peaks and the schedulerless General Parallel Fabric.
+
+The release adds general finite-register transformations, complete 32-byte vector spills, constant-multiply register-lifetime correctness, and a compiler-local fixup ledger sized independently from the 512-entry unique constant pool. These transformations are part of ordinary `build.sh`; release validation requires no diagnostic injection or second-stage relink.
+
+The coupled structural witness passes the AVX2 execution gate at `N = 4, 17, 100000, 10000000` with `Q = 1, 2, 4`. The executable-code audit requires YMM operations and rejects ZMM/opmask state. Three jobs passed on the exact source commit in [release validation run 34017756455](https://github.com/MatrixFreeSama/whlang/actions/runs/34017756455).
+
+See the [1.2.8 release notes](https://github.com/MatrixFreeSama/whlang/blob/749b12d3a9bfcafa285548018c29c74e4155fc48/worktree/RELEASE_NOTES_1_2_8.md) and [release proof](https://github.com/MatrixFreeSama/whlang/blob/749b12d3a9bfcafa285548018c29c74e4155fc48/worktree/RELEASE_PROOF_1_2_8.md). These are correctness and structural checks; no new speedup is inferred from them.
 
 ## 1.2.7: General Multi-ISA Physicalization
 
@@ -249,7 +261,7 @@ Workload-name dispatch is not an accepted substitute for generality.
 
 ## Current maturity boundary
 
-Wheelchair 1.2.7 is an active research compiler/language project. It does not claim every systems-language feature is complete.
+Wheelchair 1.2.8 is an active research compiler/language project. It does not claim every systems-language feature is complete.
 
 In particular:
 

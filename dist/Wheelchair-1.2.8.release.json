@@ -1,0 +1,47 @@
+{
+  "release": "1.2.8",
+  "source_commit": "749b12d3a9bfcafa285548018c29c74e4155fc48",
+  "source_files_preserved": 314,
+  "source_bytes_preserved": true,
+  "source_executable_bits_preserved": true,
+  "source_payload_format": "Complete source distribution; Linux x86-64 target",
+  "ci": {
+    "run_url": "https://github.com/MatrixFreeSama/whlang/actions/runs/34017756455",
+    "run_id": 34017756455,
+    "jobs_passed": 3,
+    "terminal_markers_verified_in_all_job_logs": true
+  },
+  "local_package_validation": {
+    "cpu": "INTEL(R) XEON(R) PLATINUM 8573C",
+    "clean_normal_build": "PASS",
+    "native256_127_regression": "PASS",
+    "native256_128_maturity": "PASS",
+    "coupled_numeric_cases": 12,
+    "executors": [
+      1,
+      2,
+      4
+    ],
+    "sizes": [
+      4,
+      17,
+      100000,
+      10000000
+    ],
+    "avx2_ymm_only_executable_audit": "PASS",
+    "release_document_seal": "PASS",
+    "new_performance_benchmark": false,
+    "build_after_zip_extraction": "PASS"
+  },
+  "archive": {
+    "filename": "Wheelchair-1.2.8.zip",
+    "bytes": 1318322,
+    "sha256": "62fc059c4ff0055bbcc532ede7ecb2e940a876316be93f7a8b5d206d4aec1d78",
+    "files": 325,
+    "crc": "PASS",
+    "all_file_checksums": "PASS",
+    "source_mapping": "PASS",
+    "extraction_permissions": "PASS",
+    "deterministic_serialization": "PASS"
+  }
+}
