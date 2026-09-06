@@ -43,24 +43,25 @@ for name,path in cases.items():
     Path(f'/tmp/peak_{name}.core.wh').write_bytes(whex_surface.canonical_core_bytes(data))
 PY
 
-# Emitted-program authority requires a real AVX-512F compiler host because
-# topologyc intentionally self-scans the host before tensor lowering. The
-# compiler/runtime execution bytes above are host-independent and mandatory.
-compare_emit_loadable() {
+# Generated Wheelchair programs are deliberately sectionless static ELFs. There
+# is no .symtab/.strtab metadata to strip, so whole-file cmp is the strongest
+# emitted execution-image authority. Compiler/runtime build ELFs above still use
+# section-aware comparisons where appropriate.
+compare_emit_image() {
   new=$1 old=$2 core=$3 name=$4
   "$old" "$core" -o "build/${name}.old.elf" --isa-limit avx512f
   "$new" "$core" -o "build/${name}.new.elf" --isa-limit avx512f
-  objcopy -O binary "build/${name}.old.elf" "/tmp/${name}.old.load.bin"
-  objcopy -O binary "build/${name}.new.elf" "/tmp/${name}.new.load.bin"
-  cmp "/tmp/${name}.new.load.bin" "/tmp/${name}.old.load.bin"
+  readelf -S "build/${name}.old.elf" 2>&1 | grep -Eq 'There are no sections|There are 0 section headers'
+  readelf -S "build/${name}.new.elf" 2>&1 | grep -Eq 'There are no sections|There are 0 section headers'
+  cmp "build/${name}.new.elf" "build/${name}.old.elf"
   echo "${name}_EMITTED_LOADABLE_BYTE_IDENTITY=PASS"
 }
 
 if grep -qm1 -w avx512f /proc/cpuinfo; then
   echo 'TECHNICAL_PEAK_HOST_AVX512_QUALIFIED=1'
-  compare_emit_loadable build/topologyc "$BASE125/build/topologyc" /tmp/peak_base.core.wh BASE_PROFILE_1_2_5
-  compare_emit_loadable build/topologyc-wide "$BASE125/build/topologyc-sdep" /tmp/peak_wide.core.wh WIDE_PROFILE_1_2_5
-  compare_emit_loadable build/topologyc-derived "$BASE125/build/topologyc-rankn" /tmp/peak_derived.core.wh DERIVED_PROFILE_1_2_5
+  compare_emit_image build/topologyc "$BASE125/build/topologyc" /tmp/peak_base.core.wh BASE_PROFILE_1_2_5
+  compare_emit_image build/topologyc-wide "$BASE125/build/topologyc-sdep" /tmp/peak_wide.core.wh WIDE_PROFILE_1_2_5
+  compare_emit_image build/topologyc-derived "$BASE125/build/topologyc-rankn" /tmp/peak_derived.core.wh DERIVED_PROFILE_1_2_5
 
   build/DERIVED_PROFILE_1_2_5.new.elf 8 >/tmp/derived126.dynamic.out
   build/DERIVED_PROFILE_1_2_5.old.elf 8 >/tmp/derived125.dynamic.out
