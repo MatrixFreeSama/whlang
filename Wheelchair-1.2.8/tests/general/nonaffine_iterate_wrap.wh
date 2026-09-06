@@ -1,0 +1,14 @@
+program nonaffine_iterate_wrap
+contract integer_overflow = wrap
+input n: u64
+iterate chain limit n {
+    state x: u64 = 1
+    state i: u64 = 0
+    while i < n
+    update x = (x ^ i) * 6364136223846793005 + 1442695040888963407
+    update i = i + 1
+    result x
+}
+publish chain
+
+test (10) => { chain = 6472881238679989328 }

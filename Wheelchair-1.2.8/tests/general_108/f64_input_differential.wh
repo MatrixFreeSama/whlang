@@ -1,0 +1,18 @@
+program f64input2
+input x: f64
+input y: f64
+let a = x + y
+let b = x - y
+let c = x * y
+let d = x / y
+let lt = x < y
+let mx = max(x,y)
+output x=x
+output y=y
+output a=a
+output b=b
+output c=c
+output d=d
+output lt=lt
+output mx=mx
+test () => { x=0.0,y=0.0,a=0.0,b=0.0,c=0.0,d=0.0,lt=false,mx=0.0 }

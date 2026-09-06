@@ -1,0 +1,9 @@
+Wheelchair 1.0.3 differential validation
+strict generated programs: 96/96 compiled; mismatches above 1e-12: 0
+tolerant generated programs: 96/96 compiled; mismatches above 1e-10: 0
+FEM aggregate scalar/vector relative differences:
+  shard0 1.5995127557820585e-15
+  shard1 8.660582187303365e-16
+  shard2 5.633284045088494e-16
+  shard3 8.21444392071458e-16
+Canonical strict Heat/Wave/Sparse generated ELFs: byte-identical vs 1.0.2.

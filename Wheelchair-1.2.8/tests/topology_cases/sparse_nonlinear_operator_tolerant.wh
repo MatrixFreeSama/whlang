@@ -1,0 +1,354 @@
+{
+  "format": "wheelchair.tensor/1",
+  "program": "sparse_nonlinear_operator",
+  "contracts": {
+    "deterministic": true,
+    "integer_overflow": "trap",
+    "floating_point": "strict_by_default",
+    "mixed_precision": "lower_precision_dominates"
+  },
+  "inputs": [
+    {
+      "name": "n",
+      "type": "u64",
+      "min": 4,
+      "max": 100000000
+    }
+  ],
+  "bindings": [
+    {
+      "name": "x",
+      "op": "map",
+      "type": "f64",
+      "axes": [
+        {
+          "name": "i",
+          "extent": {
+            "var": "n"
+          }
+        }
+      ],
+      "expr": {
+        "op": "add",
+        "args": [
+          {
+            "literal": -0.375,
+            "type": "f64"
+          },
+          {
+            "op": "div",
+            "args": [
+              {
+                "op": "cast",
+                "to": "f64",
+                "args": [
+                  {
+                    "op": "mod",
+                    "args": [
+                      {
+                        "op": "add",
+                        "args": [
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "axis": "i"
+                              },
+                              {
+                                "literal": 31,
+                                "type": "u64"
+                              }
+                            ]
+                          },
+                          {
+                            "literal": 5,
+                            "type": "u64"
+                          }
+                        ]
+                      },
+                      {
+                        "literal": 1024,
+                        "type": "u64"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "literal": 1024.0,
+                "type": "f64"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "y",
+      "op": "map",
+      "type": "f64",
+      "axes": [
+        {
+          "name": "i",
+          "extent": {
+            "var": "n"
+          }
+        }
+      ],
+      "expr": {
+        "op": "add",
+        "args": [
+          {
+            "op": "add",
+            "args": [
+              {
+                "op": "sub",
+                "args": [
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "literal": 1.75,
+                        "type": "f64"
+                      },
+                      {
+                        "load": "x",
+                        "indices": [
+                          {
+                            "axis": "i"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "literal": 0.125,
+                        "type": "f64"
+                      },
+                      {
+                        "load": "x",
+                        "indices": [
+                          {
+                            "op": "mod",
+                            "args": [
+                              {
+                                "op": "add",
+                                "args": [
+                                  {
+                                    "op": "mul",
+                                    "args": [
+                                      {
+                                        "axis": "i"
+                                      },
+                                      {
+                                        "literal": 17,
+                                        "type": "u64"
+                                      }
+                                    ]
+                                  },
+                                  {
+                                    "literal": 3,
+                                    "type": "u64"
+                                  }
+                                ]
+                              },
+                              {
+                                "var": "n"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "op": "mul",
+                "args": [
+                  {
+                    "literal": 0.0625,
+                    "type": "f64"
+                  },
+                  {
+                    "load": "x",
+                    "indices": [
+                      {
+                        "op": "mod",
+                        "args": [
+                          {
+                            "op": "add",
+                            "args": [
+                              {
+                                "op": "mul",
+                                "args": [
+                                  {
+                                    "axis": "i"
+                                  },
+                                  {
+                                    "literal": 29,
+                                    "type": "u64"
+                                  }
+                                ]
+                              },
+                              {
+                                "literal": 7,
+                                "type": "u64"
+                              }
+                            ]
+                          },
+                          {
+                            "var": "n"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "op": "add",
+            "args": [
+              {
+                "op": "mul",
+                "args": [
+                  {
+                    "literal": -0.03125,
+                    "type": "f64"
+                  },
+                  {
+                    "load": "x",
+                    "indices": [
+                      {
+                        "op": "mod",
+                        "args": [
+                          {
+                            "op": "add",
+                            "args": [
+                              {
+                                "op": "mul",
+                                "args": [
+                                  {
+                                    "axis": "i"
+                                  },
+                                  {
+                                    "literal": 43,
+                                    "type": "u64"
+                                  }
+                                ]
+                              },
+                              {
+                                "literal": 11,
+                                "type": "u64"
+                              }
+                            ]
+                          },
+                          {
+                            "var": "n"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "op": "mul",
+                "args": [
+                  {
+                    "literal": 0.015625,
+                    "type": "f64"
+                  },
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "mul",
+                        "args": [
+                          {
+                            "load": "x",
+                            "indices": [
+                              {
+                                "axis": "i"
+                              }
+                            ]
+                          },
+                          {
+                            "load": "x",
+                            "indices": [
+                              {
+                                "axis": "i"
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "load": "x",
+                        "indices": [
+                          {
+                            "axis": "i"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "checksum",
+      "op": "reduce",
+      "kind": "sum",
+      "accumulator": {
+        "base": "f64",
+        "mode": "tolerant",
+        "absolute_error": 1e-08,
+        "relative_error": 1e-10
+      },
+      "axes": [
+        {
+          "name": "k",
+          "extent": {
+            "var": "n"
+          }
+        }
+      ],
+      "expr": {
+        "load": "y",
+        "indices": [
+          {
+            "axis": "k"
+          }
+        ]
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "label": "checksum",
+      "expr": {
+        "var": "checksum"
+      }
+    }
+  ],
+  "tests": [
+    {
+      "args": [
+        4
+      ],
+      "expected": {
+        "checksum": -2.1533935400657356
+      }
+    }
+  ]
+}

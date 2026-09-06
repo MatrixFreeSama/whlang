@@ -1,0 +1,18 @@
+program whex_topology_showcase
+strict
+input n: u64 range 4..16
+axis i in n
+record constants {
+    shift = 2.0
+}
+pure generic fn value(x: u64) -> f64 = cast(f64, x) - constants.shift
+region compute effect pure parallel {
+    for i in 0..n {
+        let x[i]: f64 = value(i)
+    }
+    for i in 0..n {
+        total += x[i]
+    }
+}
+output total
+test (4) => { total = -2.0 }

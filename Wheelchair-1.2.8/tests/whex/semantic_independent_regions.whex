@@ -1,0 +1,14 @@
+program semantic_independent_regions
+strict
+input n: u64 range 4..1024
+region left effect pure parallel {
+    field a[i in n]: f64 = cast(f64, i) + 1.0
+}
+region right effect pure parallel {
+    field b[i in n]: f64 = cast(f64, i) * 2.0
+}
+region closure effect pure parallel {
+    sum total[i in n]: f64 = a[i] + b[i]
+}
+output total
+test (4) => { total = 24.0 }

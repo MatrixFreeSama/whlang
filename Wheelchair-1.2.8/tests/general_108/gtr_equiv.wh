@@ -1,0 +1,7 @@
+program gtr_equiv
+input n: u64 range 8 .. 1048576
+let dummy: u64 = 7
+tensor x[i: n]: f64 = cast(f64, i) * 0.5 + 1.0
+reduce total[i: n]: f64~(abs=0.0, rel=0.0000000001) = sum x[i]
+output total = total
+test (8) => { total = 22.0 }
