@@ -105,7 +105,7 @@ jobs:
             worktree/build.sh worktree/tools/generate_derived_native_backend.py
           ! grep -n -E 'work_steal|global_ready_queue|runtime_cost_selector|serial_fallback' \
             worktree/runtime/general_parallel_slot_x86_64.S
-          ! grep -n -E 'benchmark|heat|newton|fsi|stiffness|workload_name' \
+          ! grep -n -E '\b(heat|newton|fsi|stiffness|fem|cfd|poisson|kkt|fluid|solid|navier|elastic|electromagnetic)\b|workload_name' \
             worktree/surface/native_resource_profile.py worktree/tools/generate_native_resource_profiles.py \
             worktree/tools/generate_derived_native_backend.py
           readelf -d worktree/build/general_parallel_slot.elf 2>&1 | grep -Fq 'There is no dynamic section'

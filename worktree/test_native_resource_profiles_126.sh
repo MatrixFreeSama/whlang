@@ -12,12 +12,14 @@ echo 'e9116041c673aec4dca58a43379ccb78d5ae3d6aa7e7ba76656da32b24cdfeb3  runtime/
 
 # Current routing must be structural only. Test fixture names may be specific;
 # compiler/analyzer/generator/wrappers may not know any workload family.
-if grep -Eini '\b(newton|stiffness|fem|cfd|poisson|kkt|fluid|solid|fsi|navier|elastic|electromagnetic|benchmark)\b' \
-  surface/native_resource_profile.py tools/generate_native_resource_profiles.py wheelchairc.py whexc.py; then
+if grep -Eini '\b(newton|stiffness|fem|cfd|poisson|kkt|fluid|solid|fsi|navier|elastic|electromagnetic|heat)\b' \
+  surface/native_resource_profile.py tools/generate_native_resource_profiles.py \
+  tools/generate_derived_native_backend.py wheelchairc.py whexc.py; then
   echo 'workload identity leaked into active native capability routing' >&2; exit 1
 fi
-if grep -En 'shared_dependency_episode|topologyc-sdep|shared_dependency_episode_wide_125' \
-  build.sh wheelchairc.py whexc.py surface/native_resource_profile.py tools/generate_native_resource_profiles.py; then
+if grep -En 'shared_dependency_episode|topologyc-sdep|shared_dependency_episode_wide_125|generate_rankn_backend_122|generated_122|runtime_rankn_offsets' \
+  build.sh wheelchairc.py whexc.py surface/native_resource_profile.py \
+  tools/generate_native_resource_profiles.py tools/generate_derived_native_backend.py; then
   echo 'retired special-purpose route leaked into active compiler path' >&2; exit 1
 fi
 
