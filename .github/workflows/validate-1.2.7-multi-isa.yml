@@ -1,0 +1,123 @@
+name: Validate Wheelchair 1.2.7 Multi ISA Physicalization
+on:
+  push:
+    branches: [build-1.2.7-multi-isa-physicalization]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  multi-isa:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: build-1.2.6-final-general-parallel
+          path: baseline126
+      - name: Build 1.2.7 multi-ISA compiler
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd worktree
+          ./build.sh 2>&1 | tee /tmp/build127.log
+          grep -Fq 'MULTI_ISA_TOPOLOGYC=BUILT' /tmp/build127.log
+          grep -Fq 'PHYSICAL_VECTOR_SHAPES=native256,split512x256,native512' /tmp/build127.log
+          grep -Fq 'PHYSICAL_VECTOR_PROFILE_WORKLOAD_DISPATCH=0' /tmp/build127.log
+          grep -Fq 'PHYSICAL_VECTOR_RUNTIME_PROFITABILITY_SELECTOR=0' /tmp/build127.log
+          grep -Fq 'WHEELCHAIR_BUILD=PASS' /tmp/build127.log
+      - name: Synthetic Intel AMD matrix
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd worktree
+          PYTHONPATH=. python3 test_multi_isa_profiles_127.py | tee /tmp/synthetic127.log
+          grep -Fq 'INTEL_AVX2_NATIVE256=PASS' /tmp/synthetic127.log
+          grep -Fq 'INTEL_AVX512_NATIVE512=PASS' /tmp/synthetic127.log
+          grep -Fq 'AMD_ZEN3_NATIVE256=PASS' /tmp/synthetic127.log
+          grep -Fq 'AMD_ZEN4_SPLIT512X256=PASS' /tmp/synthetic127.log
+          grep -Fq 'AMD_ZEN5_NATIVE512=PASS' /tmp/synthetic127.log
+      - name: Native audit must match mirror classifier
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd worktree
+          ./build/topologyc --probe | tee /tmp/probe127.txt
+          ./build/topologyc --silicon-audit | tee /tmp/audit127.json
+          PYTHONPATH=. python3 - <<'PY'
+          import json
+          from pathlib import Path
+          from surface.physical_isa_profile import classify
+          audit=json.loads(Path('/tmp/audit127.json').read_text())
+          probe=Path('/tmp/probe127.txt').read_text()
+          p=classify(vendor=audit['vendor'], family=int(audit['family']), model=int(audit['model']),
+                     avx2='AVX2: available' in probe,
+                     avx512f='AVX-512F: usable' in probe,
+                     fma='FMA3: available' in probe)
+          ids={'unknown':0,'native256':1,'split512x256':2,'native512':3}
+          assert audit['physical_vector_shape_id']==ids[p.shape], (audit,p)
+          assert audit['semantic_f64_lanes']==p.semantic_lanes_f64, (audit,p)
+          if p.physical_datapath_bits:
+              assert audit['physical_datapath_bits']==p.physical_datapath_bits, (audit,p)
+          assert audit['physical_vector_uops_per_semantic']==p.physical_vector_uops_per_semantic, (audit,p)
+          print('NATIVE_MIRROR_PHYSICAL_PROFILE_EQUIVALENCE=PASS')
+          print('LIVE_PROFILE='+p.profile)
+          print('LIVE_SHAPE='+p.shape)
+          PY
+      - name: Preserve 1.2.6 general and schedulerless authority
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd worktree
+          sh test_general_parallel_native_126.sh > /tmp/general126.log
+          sh test_general_parallel_126.sh > /tmp/gensem126.log
+          sh test_schedulerless_causal_126.sh > /tmp/schedulerless126.log
+          grep -Fq 'WHEELCHAIR_GENERAL_PARALLEL_NATIVE_1_2_6=PASS' /tmp/general126.log
+          grep -Fq 'WHEELCHAIR_GENERAL_PARALLEL_1_2_6=PASS' /tmp/gensem126.log
+          grep -Fq 'WHEELCHAIR_SCHEDULERLESS_CAUSAL_1_2_6=PASS' /tmp/schedulerless126.log
+      - name: Preserve 1.2.6 emitted AVX-512 peak when host qualifies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          (cd baseline126/worktree && ./build.sh >/tmp/build126.log 2>&1)
+          cd worktree
+          if grep -qm1 -w avx512f /proc/cpuinfo; then
+            PYTHONPATH=surface python3 - <<'PY'
+          from pathlib import Path
+          import whex_surface
+          p=Path('../benchmarks/fluid_solid_coupling_124/fsi_coupled.whex')
+          data,_,_=whex_surface.load_surface(p)
+          Path('/tmp/profile127.core.wh').write_bytes(whex_surface.canonical_core_bytes(data))
+          PY
+            ./build/topologyc-wide /tmp/profile127.core.wh -o /tmp/current127.elf
+            ../baseline126/worktree/build/topologyc-wide /tmp/profile127.core.wh -o /tmp/baseline126.elf
+            cmp /tmp/current127.elf /tmp/baseline126.elf
+            echo 'NATIVE512_1_2_6_EMITTED_BYTE_IDENTITY=PASS'
+          else
+            echo 'NATIVE512_1_2_6_EMITTED_BYTE_IDENTITY=SKIP_HOST_NOT_AVX512F'
+          fi
+      - name: Static workload-blind audit
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ! grep -n -Ei '\b(newton|fsi|heat|stiffness|fem|cfd|poisson|fluid|solid)\b' \
+            worktree/surface/physical_isa_profile.py \
+            worktree/tools/generate_multi_isa_topologyc.py \
+            worktree/compiler/physical_vector_shapes.inc
+          ! grep -n -Ei 'runtime.*(profit|cost).*selector|workload.*dispatch' \
+            worktree/tools/generate_multi_isa_topologyc.py
+          echo 'MULTI_ISA_ACTIVE_SPECIAL_PURPOSE_ROUTE=0'
+          echo 'MULTI_ISA_RUNTIME_PROFITABILITY_SELECTOR=0'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wheelchair-127-multi-isa-evidence
+          path: |
+            /tmp/build127.log
+            /tmp/synthetic127.log
+            /tmp/probe127.txt
+            /tmp/audit127.json
+            /tmp/general126.log
+            /tmp/gensem126.log
+            /tmp/schedulerless126.log
+          if-no-files-found: warn
