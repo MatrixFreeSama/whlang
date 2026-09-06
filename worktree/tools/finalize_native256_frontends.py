@@ -57,7 +57,7 @@ RESIDENT_MASK = r'''vec_fused_mask_reduce_resident_fragment:
     jae .Lvfmrr256_full
     vmovq xmm13,r8
     vpbroadcastq ymm13,xmm13
-    vpcmpgtq ymm13,ymm13,ymmword ptr [rip+.Lvfmrr256_lanes]
+    vpcmpgtq ymm13,ymm13,ymmword ptr [rip+.Lvfmr256_lanes]
     vandpd ymm0,ymm0,ymm13
 .Lvfmrr256_full:
     vaddpd ymm12,ymm12,ymm0
