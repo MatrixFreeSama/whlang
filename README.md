@@ -2,267 +2,158 @@
 
 Wheelchair is an ahead-of-time, native, structure-first programming language project for general programming with HPC and simulation as primary design targets.
 
-Version 1.2.7 promotes multi-ISA physicalization into the general compiler architecture. It does **not** add workload-specific backends. The compiler reasons about program structure and hardware capabilities, then emits a static native x86-64 ELF.
-
-Wheelchair has two human-facing source styles over one structural/native core:
-
-- **WH (`.wh`)** is the inference-heavy human surface.
-- **WHEX (`.whex`)** is the explicit expert surface.
-
-For shared semantics, both surfaces converge on the same structural core and the same physicalization rules.
+## Official release archive
 
 ```text
-WH source                 WHEX source
-   |                          |
-   | structural recovery      | explicit structure
-   v                          v
-        Unified Structural Core
-                 |
-                 | proof + erasure + causal lowering
-                 v
-       General Native Physicalizer
-                 |
-                 v
-          Native x86-64 ELF
+dist/Wheelchair-1.2.7.zip
 ```
 
-The emitted program does not execute through Python, C, C++, LLVM, a JIT, or a bytecode VM.
+SHA-256:
 
-The central execution rule remains:
+```text
+7f5a3476a4a4b7ea8716b3231869ffb974505ff1e65f2ec2804187fed6fe237b
+```
+
+Historical release archives remain in `dist/`.
+
+## 1.2.7: General Multi-ISA Physicalization
+
+Wheelchair 1.2.7 makes physical vector width a general AOT property of the target silicon rather than a workload-specific routing decision.
+
+The compiler combines two independent structural dimensions:
+
+```text
+native resource profile: base | wide | derived
+physical vector shape:   native256 | split512x256 | native512
+```
+
+The resulting backend matrix is general:
+
+```text
+                    native256   split512x256   native512
+base                    yes           yes           yes
+wide                    yes           yes           yes
+derived                 yes           yes           yes
+```
+
+No workload name, benchmark identity, source path, or physics domain is accepted as a backend selector.
+
+The hard 1.2.7 invariants are:
+
+```text
+active special-purpose native route   = 0
+active workload-specific route        = 0
+active benchmark-specific route       = 0
+source-path-specific route            = 0
+runtime backend selector              = 0
+runtime profitability selector        = 0
+scalar fallback                       = 0
+hidden serial spine                   = 0
+```
+
+Physical selection is AOT-only. The sovereign native `topologyc --silicon-audit` classifies the machine shape; the human-facing drivers bind the matching compiler image before the user program is emitted. Python is not the native execution authority.
+
+Current x86-64 physical classes include:
+
+```text
+AVX2-only silicon        -> native256
+AMD Zen 4 / Zen 4c       -> split512x256
+native 512-bit datapath  -> native512
+```
+
+Vendor/family information is used only to identify physical datapath shape where ISA presence alone is insufficient. It never selects a workload recipe.
+
+## Real native256 authority
+
+1.2.7 contains a genuine AVX2/YMM tensor physicalizer, not a scalar compatibility mode.
+
+The release gate compiles and executes a neutral structural vector program through the native256 backend, including non-multiple-of-four vector tails. The emitted executable segment is audited directly for YMM state and rejects leaked ZMM/opmask state.
+
+The native256 route is available across the same generic resource classes:
+
+```text
+topologyc-native256
+topologyc-wide-native256
+topologyc-derived-native256
+```
+
+No runtime dispatcher is embedded in the emitted user program.
+
+## General parallel execution
+
+Wheelchair retains the schedulerless causal execution architecture introduced in 1.2.6.
+
+The central rule remains:
 
 ```text
 No dependency edge = no synchronization edge.
 ```
 
-## 1.2.7: General Multi-ISA Physicalization
+Independent bindings are represented by causal dependencies rather than source-order serialization. The general parallel fabric does not require a global runnable queue, global ready scan, root scheduler, work stealing, runtime cost selector, or hidden serial fallback.
 
-1.2.7 separates two compile-time dimensions that were previously entangled:
+True recurrence is a causal enclave rather than a global sequential spine.
 
-```text
-Generic graph-resource class:
-    base / wide / derived
+WH and WHEX both attach the same general parallel semantics, while mature specialized native realizers may remain only when they are semantically equivalent and preserve or improve the earlier technical peak.
 
-Physical vector shape:
-    native256 / split512x256 / native512
-```
+## WH and WHEX
 
-The compiler binds their Cartesian product during AOT compilation.
+Wheelchair has two human-facing source styles over one structural/native core:
 
-```text
-                         native256   split512x256   native512
-base                         yes           yes          yes
-wide                         yes           yes          yes
-derived                      yes           yes          yes
-```
+- **WH (`.wh`)** is the inference-heavy conventional-looking surface.
+- **WHEX (`.whex`)** is the explicit expert semantic surface.
 
-These are structural and physical classes, not benchmark identities.
-
-### No workload-specific routing
-
-The active 1.2.7 release requires all of the following to remain zero:
+For shared semantics, both converge on the same structural core and general physicalization rules.
 
 ```text
-workload-specific dispatch
-benchmark-specific dispatch
-source-path dispatch
-runtime profitability selection
-runtime backend selection
-scalar fallback
-hidden serial fallback
-special-purpose native route
+WH source                 WHEX source
+   |                          |
+   | inference                | explicit structure
+   v                          v
+        Unified Structural Core
+                 |
+                 | proof + erasure + causal lowering
+                 v
+      AOT native physicalization
+                 |
+                 v
+          Native x86-64 ELF
 ```
 
-A source file is never routed because it contains a solver name, physics name, benchmark name, or known example.
+Wheelchair does not silently rebuild unsupported structural programs as scalar fallback, a hidden global task queue, or a conventional sequential execution spine.
 
-Hardware vendor/family information may be used only to establish physical execution shape. It is not a semantic or workload routing key.
+## Preserved technical peaks
 
-## Physical vector shapes
+1.2.7 retains the mature technical layers rather than flattening them during generalization:
 
-### `native256`
+- **1.2.1** Interior Periodic Composition Erasure;
+- **1.2.2** proof-gated Rank-N Cartesian-product physicalization;
+- **1.2.3** Sparse Causal Expansion;
+- **1.2.4** Product-Subtract contraction and Vector Reduction Residency;
+- **1.2.5** Shared Dependency Episode;
+- **1.2.6** Schedulerless Sparse Causal Execution and General Parallel Fabric.
 
-A first-class AVX2/YMM physicalizer with four binary64 lanes.
+The qualified native512 gate preserves earlier emitted AVX-512 execution bytes where the host can execute that authority check.
 
-It includes vector realizations or vector syntheses for the capabilities required by the current structural tensor backend, including:
-
-- four-lane floating-point and integer arithmetic;
-- FMA where available;
-- vector tail handling;
-- vector predicate synthesis;
-- 64-bit integer multiply synthesis;
-- unsigned 64-bit minimum synthesis;
-- integer/floating conversion synthesis;
-- non-negative floating-to-unsigned truncation synthesis;
-- cross-vector state;
-- resident constants;
-- vector reduction;
-- resident reduction ABI;
-- generic base, wide, and derived resource classes.
-
-There is no scalar tensor fallback when a native256 proof fails. Unsupported structure rejects explicitly.
-
-### `split512x256`
-
-A 512-bit semantic vector episode may be scheduled over two 256-bit physical slices when that matches the audited machine shape.
-
-This keeps semantic width and physical datapath width distinct:
-
-```text
-semantic vector width: 512 bits
-physical datapath:     256 bits
-physical slices:       2
-```
-
-The distinction changes AOT resource accounting. It does not create a runtime selector.
-
-### `native512`
-
-The mature AVX-512 physicalizer remains intact for qualified hardware.
-
-1.2.7 does not flatten the mature 512-bit path into a lowest-common-denominator backend. The release gate preserves the qualified 1.2.6 emitted AVX-512 peak by byte identity.
-
-## AOT backend matrix
-
-The sovereign hardware authority is the native compiler itself:
-
-```text
-build/topologyc --silicon-audit
-```
-
-The WH/WHEX drivers read that native audit during compilation and bind one already-built compiler image.
-
-Python may coordinate this build-time binding, but Python is not the native backend authority and never emits the user program machine code.
-
-The generic compiler-image matrix is:
-
-```text
-native256:
-    topologyc-native256
-    topologyc-wide-native256
-    topologyc-derived-native256
-
-split512x256 / native512:
-    topologyc
-    topologyc-wide
-    topologyc-derived
-```
-
-`--isa-limit` is an AOT capability ceiling for audit/testing. It is not a runtime switch. For example:
-
-```bash
-./whexc program.whex -o program --isa-limit avx2
-```
-
-selects the generic native256 physicalizer while still forbidding scalar fallback.
-
-## General parallel execution
-
-1.2.7 preserves the schedulerless causal and general parallel architecture introduced before the multi-ISA layer.
-
-The native execution fabric continues to reject the conventional centralized scheduling spine:
-
-```text
-global ready queue           = 0
-global ready scan            = 0
-root scheduler               = 0
-runtime cost selector        = 0
-serial fallback              = 0
-work stealing                = 0
-global phase barrier         = 0 unless semantically necessary
-```
-
-Readiness emerges from declared causal dependencies. Completion propagates only through the relevant sparse neighborhood.
-
-A true recurrence may form a causal enclave. It does not become a global sequential spine for otherwise independent work.
-
-## Technical Peak Preservation Contract
-
-Generalization is admitted only when earlier narrow technical peaks remain recoverable.
-
-The release policy is:
-
-```text
-Generality Gain
-+ Physical Validity
-+ Existing Peak Preservation
-```
-
-The intended development direction is:
-
-```text
-narrow technical peak
--> identify the structural property
--> promote it into general algebra
--> prove matching programs
--> preserve or improve physical realization
-```
-
-Workload-name dispatch is not an accepted substitute for generality.
-
-## Preserved mature layers
-
-1.2.7 retains and gates earlier mature capabilities, including:
-
-- Interior Periodic Composition Erasure;
-- proof-gated Rank-N Cartesian-product physicalization;
-- Sparse Causal Expansion;
-- Product-Subtract contraction;
-- Vector Reduction Residency;
-- Shared Dependency Episode resource expansion;
-- schedulerless sparse causal execution;
-- general binding-level parallel physicalization;
-- AOT-only native sovereignty;
-- zero hidden scalar fallback.
-
-Historical release evidence remains in the repository, including the 1.2.5 proof and release-gate documents and the 1.2.6 general-parallel/schedulerless gates.
-
-## Release validation
-
-The merged 1.2.7 release tree passed the full authority workflow:
-
-```text
-Validate Wheelchair 1.2.7 Multi ISA Physicalization
-run: 34008687175
-validated commit: a6c0635bbd04febaaccebf020f554c985f87dc59
-result: PASS
-```
-
-The gate includes:
-
-- static build of all base/wide/derived native256 compiler images;
-- real AOT native256 compilation;
-- real AVX2/YMM ELF execution;
-- full-vector and partial-tail execution cases;
-- executable-segment audit showing YMM realization without AVX-512 register state in the native256 witness;
-- automatic physical-shape selection equal to the native silicon audit;
-- synthetic Intel AVX2 / Intel AVX-512 / AMD Zen3 / Zen4 / Zen5 shape coverage;
-- preservation of the 1.2.6 general parallel authority;
-- preservation of the 1.2.6 schedulerless causal authority;
-- qualified AVX-512 emitted-byte preservation;
-- static proof that active workload-specific and benchmark-specific native routes are zero.
-
-Formal 1.2.7 release gates:
-
-```text
-worktree/RELEASE_GATES_1_2_7.txt
-worktree/GENERAL_MULTI_ISA_PHYSICALIZATION_1_2_7.md
-```
+Historical benchmark names remain in the repository only as evidence and regression witnesses. They are not routing keys.
 
 ## Platform
 
 The current native toolchain targets Linux x86-64.
 
-Build requirements:
+Requirements:
 
-- Python 3 for human-facing AOT source processing and compile-time proof/generation;
+- Python 3 for human-facing AOT source processing and compile-time proof;
 - GNU `as`, `ld`, `readelf`, `objdump`, and related binutils;
 - POSIX shell;
-- a supported AVX2 or AVX-512 physical vector shape for the current structural tensor realizer.
+- AVX2 or a supported wider x86 vector shape for structural tensor realization.
 
-The generated user program is a static native ELF.
+The emitted native program does not execute through Python, C, C++, LLVM, or a JIT.
+
+Unsupported hardware or structural graphs reject instead of silently becoming scalar tensor code.
 
 ## Build
 
-From the repository root:
+From the extracted release directory:
 
 ```bash
 cd worktree
@@ -275,98 +166,97 @@ A successful build ends with:
 WHEELCHAIR_BUILD=PASS
 ```
 
-The build produces the generic native physicalizer matrix, including:
-
-```text
-build/topologyc
-build/topologyc-wide
-build/topologyc-derived
-build/topologyc-native256
-build/topologyc-wide-native256
-build/topologyc-derived-native256
-build/topology-parallel
-```
-
 ## Compile WH
 
 ```bash
 cd worktree
-./wheelchairc.py program.wh -o program
+./wheelchairc program.wh -o program
 ```
 
 With four executors:
 
 ```bash
-./wheelchairc.py program.wh -o program --executors 4
-```
-
-With a compile-time AVX2 ceiling:
-
-```bash
-./wheelchairc.py program.wh -o program --isa-limit avx2
+./wheelchairc program.wh -o program --executors 4
 ```
 
 ## Compile WHEX
 
 ```bash
-cd worktree
-./whexc.py program.whex -o program
+./whexc program.whex -o program
 ```
 
-With four executors:
+For an explicit AOT ISA ceiling during audit/testing:
 
 ```bash
-./whexc.py program.whex -o program --executors 4
+./whexc program.whex -o program --isa-limit avx2
 ```
 
-## Inspect semantic and physical proof
+`--isa-limit` is a compile-time capability ceiling. It is not a runtime selector and does not authorize scalar fallback.
+
+## Inspect structural proof
 
 ```bash
-./wheelchairc.py program.wh -o program --semantic-plan plan.json
+./wheelchairc program.wh -o program --semantic-plan plan.json
 ```
 
 or:
 
 ```bash
-./whexc.py program.whex -o program --semantic-plan plan.json
+./whexc program.whex -o program --semantic-plan plan.json
 ```
 
-The plan exposes questions that source syntax alone cannot answer:
+The semantic plan exposes questions that matter physically:
 
 - which dependencies are real;
 - which objects were erased before runtime;
 - which axes survived;
 - which regions are independent;
-- which generic resource class was selected;
+- which native resource class was derived;
 - which physical vector shape was selected;
-- which compiler image was bound during AOT compilation;
-- whether scalar fallback, runtime dispatch, synthetic synchronization, or central scheduling appeared.
+- whether scalar fallback, runtime dispatch, synthetic synchronization, or central control appeared.
 
 ## Structural execution rules
 
-A WH `for` does not promise a serial machine loop. If points are independent, the structural object is an axis map and may be realized through vector lanes, executor regions, sparse causal dependencies, or other proved native structure.
+A WH `for` does not promise a serial machine loop. If points are independent, the structural object is an axis map and may be realized using the physical vector width available on the target, masked/vectorized tails, executor regions, sparse causal expansion, or another proved general contraction.
 
-A scalar final reduction value does not imply a scalar execution history. Reduction is represented as dependency topology and native vector/reduction structure.
+A scalar final reduction value does not imply a scalar execution history. Reduction is represented as a dependency topology.
 
 Structural predicates may lower to select/dataflow structure rather than a central dispatcher.
 
 Arbitrary dynamic `while` is not silently converted into a conventional serial backedge. Unsupported recurrence/control topology rejects until a genuine structural realization exists.
 
+## Release philosophy
+
+A general optimization must satisfy:
+
+```text
+Generality Gain
++ Measured Physical Gain
++ Existing Peak Preservation
+```
+
+The intended direction is:
+
+```text
+narrow technical peak
+-> identify the structural property
+-> promote it into general algebra
+-> prove matching programs
+-> preserve or improve physical realization
+```
+
+Workload-name dispatch is not an accepted substitute for generality.
+
 ## Current maturity boundary
 
-Wheelchair 1.2.7 is an active research compiler/language project. It does not claim every systems-language feature or every hardware backend is complete.
+Wheelchair 1.2.7 is an active research compiler/language project. It does not claim every systems-language feature is complete.
 
 In particular:
 
-- the current native authority is x86-64 CPU execution;
-- supported structural tensor execution currently requires a proven native256, split512x256, or native512 shape;
+- supported x86 physical shapes are explicitly gated rather than assumed universal;
 - arbitrary unsupported topology may reject;
 - arbitrary dynamic `while` has no hidden serial fallback;
 - general-language memory safety is not formally claimed as complete;
-- no universal performance victory over C, C++, Rust, Zig, or every specialized solver is claimed.
+- current authority is CPU/x86-64 evidence, not a universal ranking across every device or workload.
 
 The final execution authority is the emitted machine code, not the appearance of the source syntax.
-
-## Historical archives
-
-Historical release archives, including the 1.2.5 packaged archive, remain under `dist/`. They are retained as historical artifacts and are not the 1.2.7 execution authority.
