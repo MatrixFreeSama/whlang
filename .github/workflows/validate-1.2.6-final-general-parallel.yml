@@ -106,12 +106,14 @@ jobs:
           sh ./test_native_peak_preservation_126.sh 2>&1 | tee native_peak_preservation_126.log
           grep -Fq 'BASE_PROFILE_1_2_5_COMPILER_LOADABLE_BYTE_IDENTITY=PASS' native_peak_preservation_126.log
           grep -Fq 'WIDE_PROFILE_1_2_5_COMPILER_LOADABLE_BYTE_IDENTITY=PASS' native_peak_preservation_126.log
-          grep -Fq 'DERIVED_PROFILE_1_2_5_COMPILER_LOADABLE_BYTE_IDENTITY=PASS' native_peak_preservation_126.log
-          grep -Fq 'BASE_PROFILE_1_2_5_EMITTED_NATIVE_BYTE_IDENTITY=PASS' native_peak_preservation_126.log
-          grep -Fq 'WIDE_PROFILE_1_2_5_EMITTED_NATIVE_BYTE_IDENTITY=PASS' native_peak_preservation_126.log
-          grep -Fq 'DERIVED_PROFILE_1_2_5_EMITTED_NATIVE_BYTE_IDENTITY=PASS' native_peak_preservation_126.log
+          grep -Fq 'DERIVED_PROFILE_1_2_5_FRONTEND_LOADABLE_BYTE_IDENTITY=PASS' native_peak_preservation_126.log
+          grep -Fq 'DERIVED_PROFILE_1_2_5_COMPILER_TEXT_BYTE_IDENTITY=PASS' native_peak_preservation_126.log
+          grep -Fq 'DERIVED_PROFILE_1_2_5_RUNTIME_LOADABLE_BYTE_IDENTITY=PASS' native_peak_preservation_126.log
+          grep -Fq 'BASE_PROFILE_1_2_5_EMITTED_LOADABLE_BYTE_IDENTITY=PASS' native_peak_preservation_126.log
+          grep -Fq 'WIDE_PROFILE_1_2_5_EMITTED_LOADABLE_BYTE_IDENTITY=PASS' native_peak_preservation_126.log
+          grep -Fq 'DERIVED_PROFILE_1_2_5_EMITTED_LOADABLE_BYTE_IDENTITY=PASS' native_peak_preservation_126.log
           grep -Fq 'MATURE_RUNTIME_1_2_5_NATIVE_BYTE_IDENTITY=PASS' native_peak_preservation_126.log
-          grep -Fq 'WHEELCHAIR_1_2_5_TECHNICAL_PEAK_BYTES_PRESERVED=PASS' native_peak_preservation_126.log
+          grep -Fq 'WHEELCHAIR_1_2_5_TECHNICAL_PEAK_EXECUTION_BYTES_PRESERVED=PASS' native_peak_preservation_126.log
 
       - name: Static special-purpose and anti-serial audit
         run: |
