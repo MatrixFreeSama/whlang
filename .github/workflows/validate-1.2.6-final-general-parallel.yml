@@ -51,9 +51,21 @@ jobs:
           ./whexc ../benchmarks/fluid_solid_coupling_124/fsi_coupled.whex \
             -o build/self125_whex --executors 1 --isa-limit avx512f \
             --semantic-plan /tmp/self125_whex.plan.json > ../../baseline125_wrapper_selftest.log
-          ./wheelchairc ../benchmarks/fluid_solid_coupling_124/fsi_coupled.wh \
-            -o build/self125_wh --executors 1 --isa-limit avx512f \
-            --semantic-plan /tmp/self125_wh.plan.json > ../../baseline125_wh_wrapper_selftest.log
+          PYTHONPATH=surface python3 - <<'PY'
+          from pathlib import Path
+          import wh_structural, whex_surface
+          wh_path=Path('../benchmarks/fluid_solid_coupling_124/fsi_coupled.wh')
+          wx_path=Path('../benchmarks/fluid_solid_coupling_124/fsi_coupled.whex')
+          wh_data, wh_parser = wh_structural.compile_surface(wh_path.read_text(encoding='utf-8'), wh_path)
+          wx_data, _, _ = whex_surface.load_surface(wx_path)
+          wh_core=wh_structural.canonical_core_bytes(wh_data)
+          wx_core=whex_surface.canonical_core_bytes(wx_data)
+          assert wh_core == wx_core
+          Path('/tmp/self125_shared.core.wh').write_bytes(wh_core)
+          print('BASELINE_1_2_5_WH_WHEX_CANONICAL_BYTE_EQUIVALENCE=PASS')
+          PY
+          ./build/topologyc-sdep /tmp/self125_shared.core.wh \
+            -o build/self125_wh --isa-limit avx512f > ../../baseline125_wh_wrapper_selftest.log
           cmp build/self125_whex build/self125_wh
           echo 'BASELINE_1_2_5_AOT_AUTHORITY_SELFTEST=PASS'
           if grep -qm1 -w avx512f /proc/cpuinfo; then
