@@ -3,6 +3,7 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$ROOT"
 [ -x build/topologyc ] || ./build.sh >/dev/null
+BASE125="$ROOT/../baseline125/worktree"
 
 # Protected mature handwritten sources are still byte-identical. Genericization
 # changes only AOT capability naming/routing, not the retained numeric backend.
@@ -59,8 +60,14 @@ print('NATIVE_RESOURCE_PROFILE_WORKLOAD_DISPATCH=0')
 print('NATIVE_RESOURCE_PROFILE_RUNTIME_SELECTOR=0')
 PY
 
-# WH/WHEX must reach the exact same canonical graph before any native capability
-# selection. Then the generic wide compiler must accept that graph directly.
+# Before testing routing, prove whether generic renaming changed the machine.
+[ -x "$BASE125/build/topologyc-sdep" ]
+sha256sum build/topologyc-wide "$BASE125/build/topologyc-sdep"
+cmp build/topologyc-wide "$BASE125/build/topologyc-sdep"
+echo 'WIDE_PROFILE_1_2_5_COMPILER_BYTE_IDENTITY=PASS'
+
+# WH/WHEX must reach the exact same canonical graph before native capability
+# selection. Feed that one graph to both old authority and generic 1.2.6 names.
 PYTHONPATH=surface python3 - <<'PY'
 from pathlib import Path
 import wh_structural,whex_surface
@@ -69,20 +76,19 @@ wx,_,_=whex_surface.load_surface(Path('../benchmarks/fluid_solid_coupling_124/fs
 a=wh_structural.canonical_core_bytes(wh)
 b=whex_surface.canonical_core_bytes(wx)
 assert a==b,(len(a),len(b),wh_structural.core_hash(wh),whex_surface.core_hash(wx))
-Path('/tmp/profile_wh.core').write_bytes(a)
-Path('/tmp/profile_whex.core').write_bytes(b)
+Path('/tmp/profile_shared.core').write_bytes(a)
 print('WH_WHEX_WIDE_CANONICAL_BYTE_EQUIVALENCE=PASS')
 print('WH_WHEX_WIDE_CANONICAL_SHA256='+wh_structural.core_hash(wh))
 PY
-build/topologyc-wide /tmp/profile_wh.core -o build/profile_direct_wh
-build/topologyc-wide /tmp/profile_whex.core -o build/profile_direct_whex
-cmp build/profile_direct_wh build/profile_direct_whex
-echo 'WH_WHEX_WIDE_DIRECT_NATIVE_BYTE_EQUIVALENCE=PASS'
+"$BASE125/build/topologyc-sdep" /tmp/profile_shared.core -o build/profile_baseline125_direct
+build/topologyc-wide /tmp/profile_shared.core -o build/profile_direct_wide
+cmp build/profile_baseline125_direct build/profile_direct_wide
+echo 'WIDE_PROFILE_SAME_CORE_NATIVE_BYTE_IDENTITY=PASS'
 
 ./wheelchairc ../benchmarks/fluid_solid_coupling_124/fsi_coupled.wh -o build/profile_wh --executors 1 --semantic-plan /tmp/profile_wh.plan.json >/tmp/profile_wh.json
 ./whexc ../benchmarks/fluid_solid_coupling_124/fsi_coupled.whex -o build/profile_whex --executors 1 --semantic-plan /tmp/profile_whex.plan.json >/tmp/profile_whex.json
 cmp build/profile_wh build/profile_whex
-cmp build/profile_wh build/profile_direct_wh
+cmp build/profile_wh build/profile_direct_wide
 python3 - <<'PY'
 import json
 w=json.load(open('/tmp/profile_wh.plan.json'))['native_resource_profile']

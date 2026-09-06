@@ -36,6 +36,14 @@ jobs:
           grep -Fq 'ACTIVE_SPECIAL_PURPOSE_NATIVE_ROUTE=0' build_final_126.log
           grep -Fq 'WHEELCHAIR_BUILD=PASS' build_final_126.log
 
+      - name: Build clean 1.2.5 byte authority
+        run: |
+          set -euxo pipefail
+          (cd baseline125/worktree && ./build.sh > ../../baseline125_build.log 2>&1)
+          test -x baseline125/worktree/build/topologyc
+          test -x baseline125/worktree/build/topologyc-sdep
+          test -x baseline125/worktree/build/topologyc-rankn
+
       - name: Prove general WH native Q1 Q2 Q4 materialization
         working-directory: worktree
         run: |
@@ -57,6 +65,9 @@ jobs:
           sh ./test_native_resource_profiles_126.sh 2>&1 | tee native_resource_profiles_126.log
           grep -Fq 'NATIVE_RESOURCE_PROFILE_STRUCTURAL_ADMISSION=PASS' native_resource_profiles_126.log
           grep -Fq 'NATIVE_RESOURCE_PROFILE_WORKLOAD_DISPATCH=0' native_resource_profiles_126.log
+          grep -Fq 'WIDE_PROFILE_1_2_5_COMPILER_BYTE_IDENTITY=PASS' native_resource_profiles_126.log
+          grep -Fq 'WH_WHEX_WIDE_CANONICAL_BYTE_EQUIVALENCE=PASS' native_resource_profiles_126.log
+          grep -Fq 'WIDE_PROFILE_SAME_CORE_NATIVE_BYTE_IDENTITY=PASS' native_resource_profiles_126.log
           grep -Fq 'WH_WHEX_NATIVE_RESOURCE_PROFILE_EQUIVALENCE=PASS' native_resource_profiles_126.log
           grep -Fq 'NATIVE_RESOURCE_PROFILE_WIDE_VDIVPD=0' native_resource_profiles_126.log
           grep -Fq 'NATIVE_RESOURCE_PROFILE_WIDE_REACHABLE_CALLS=0' native_resource_profiles_126.log
@@ -75,7 +86,6 @@ jobs:
       - name: Byte-protect mature 1.2.5 technical peaks
         run: |
           set -euxo pipefail
-          (cd baseline125/worktree && ./build.sh > ../../baseline125_build.log 2>&1)
           cmp worktree/build/topologyc baseline125/worktree/build/topologyc
           cmp worktree/build/topologyc-wide baseline125/worktree/build/topologyc-sdep
           cmp worktree/build/topologyc-derived baseline125/worktree/build/topologyc-rankn
