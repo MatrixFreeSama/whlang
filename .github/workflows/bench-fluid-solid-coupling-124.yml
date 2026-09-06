@@ -1,0 +1,184 @@
+name: Fluid Solid Coupling 1.2.4
+
+on:
+  push:
+    branches: [bench-fluid-solid-coupling-1.2.4]
+    paths:
+      - '.github/workflows/bench-fluid-solid-coupling-124.yml'
+
+jobs:
+  bench:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1,2,3,4,5,6,7,8]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bench-fluid-solid-coupling-1.2.4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build Wheelchair and qualify host
+        id: probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/bench
+          {
+            echo 'SLOT=${{ matrix.slot }}'
+            lscpu | grep -E 'Vendor ID|Model name|CPU family|^Model:|Socket|Thread|Core' || true
+          } | tee /tmp/bench/host.txt
+          cd worktree
+          python3 tools/apply_123.py
+          sh build.sh
+          ./build/topologyc --probe | tee /tmp/bench/probe.txt
+          if grep -q 'AVX-512F: usable' /tmp/bench/probe.txt; then
+            echo 'qualified=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'qualified=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Taichi 1.7.4
+        if: steps.probe.outputs.qualified == 'true'
+        run: python -m pip install --disable-pip-version-check --no-input 'taichi==1.7.4'
+
+      - name: Compile contestants
+        if: steps.probe.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd worktree
+          cp build/topologyc /tmp/topologyc-124
+          for q in 1 2 4; do
+            cp /tmp/topologyc-124 build/topologyc
+            ./whexc ../benchmarks/fluid_solid_coupling_124/fsi_decoupled.whex -o "build/fsi_dec_wh_q${q}" --executors "$q"
+            cp /tmp/topologyc-124 build/topologyc
+            ./whexc ../benchmarks/fluid_solid_coupling_124/fsi_coupled.whex -o "build/fsi_cpl_wh_q${q}" --executors "$q"
+          done
+          cp /tmp/topologyc-124 build/topologyc
+          COMMON='-O3 -march=native -mtune=native -flto -ffast-math -mprefer-vector-width=512 -pthread'
+          gcc $COMMON -DCOUPLED_MODE=0 ../benchmarks/fluid_solid_coupling_124/Fluid_Solid_expert_C_matched.c -o build/fsi_dec_c512
+          gcc $COMMON -DCOUPLED_MODE=1 ../benchmarks/fluid_solid_coupling_124/Fluid_Solid_expert_C_matched.c -o build/fsi_cpl_c512
+
+      - name: Benchmark Wheelchair and expert C
+        if: steps.probe.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          cd worktree
+          python - <<'PY' | tee /tmp/bench/native.txt
+          import os, random, statistics, subprocess, time, struct, re
+          from pathlib import Path
+          B=Path('build'); RUNS=11; WARM=3
+          def cpus(q): return ','.join(map(str, sorted(os.sched_getaffinity(0))[:q]))
+          def run(cmd): return subprocess.check_output(cmd, text=True).strip()
+          def bits_to_double(s):
+              m=re.search(r'0x([0-9a-fA-F]+)',s)
+              b=int(m.group(1),16)
+              return struct.unpack('>d',b.to_bytes(8,'big'))[0]
+          rng=random.Random(0xF51C124)
+          for mode,wt,ct in [('decoupled','fsi_dec_wh_q{}','fsi_dec_c512'),('coupled','fsi_cpl_wh_q{}','fsi_cpl_c512')]:
+            for n in (10_000_000,100_000_000):
+              for q in (1,2,4):
+                cmds={
+                  'WH':['taskset','-c',cpus(q),str(B/wt.format(q)),str(n)],
+                  'C512':['taskset','-c',cpus(q),str(B/ct),str(n),str(q)],
+                }
+                first={k:run(v) for k,v in cmds.items()}
+                wv,cv=bits_to_double(first['WH']),bits_to_double(first['C512'])
+                rel=abs(wv-cv)/max(abs(cv),1.0)
+                if rel>1e-8: raise SystemExit(f'native numeric mismatch {mode} {n} {q} rel={rel}')
+                for cmd in cmds.values():
+                  for _ in range(WARM): run(cmd)
+                s={k:[] for k in cmds}
+                for _ in range(RUNS):
+                  order=list(cmds); rng.shuffle(order)
+                  for k in order:
+                    t=time.perf_counter_ns(); out=run(cmds[k]); dt=(time.perf_counter_ns()-t)/1e6
+                    if abs(bits_to_double(out)-(wv if k=='WH' else cv))/max(abs(wv if k=='WH' else cv),1.0)>1e-12:
+                      raise SystemExit('native checksum drift')
+                    s[k].append(dt)
+                m={k:statistics.median(v) for k,v in s.items()}
+                print(f'NATIVE MODE={mode} N={n} Q={q} WH_MS={m["WH"]:.6f} C512_MS={m["C512"]:.6f} WH_C={m["WH"]/m["C512"]:.4f} REL={rel:.3e} WH_BITS={first["WH"]} C_BITS={first["C512"]}')
+          PY
+
+      - name: Benchmark Taichi steady-state
+        if: steps.probe.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cpus_for () { python - "$1" <<'PY'
+          import os,sys
+          q=int(sys.argv[1]); print(','.join(map(str,sorted(os.sched_getaffinity(0))[:q])))
+          PY
+          }
+          for mode in decoupled coupled; do
+            for q in 1 2 4; do
+              taskset -c "$(cpus_for "$q")" python benchmarks/fluid_solid_coupling_124/taichi_fsi.py --mode "$mode" --threads "$q" --runs 11 --warm 8 | tee "/tmp/bench/taichi_${mode}_q${q}.txt"
+            done
+          done
+
+      - name: Compare coupling degradation
+        if: steps.probe.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          python - <<'PY' | tee /tmp/bench/summary.txt
+          import re, struct, statistics
+          from pathlib import Path
+          native={}
+          rx=re.compile(r'NATIVE MODE=(\w+) N=(\d+) Q=(\d+) WH_MS=([0-9.]+) C512_MS=([0-9.]+).*C_BITS=checksum_bits=0x([0-9a-fA-F]+)')
+          for line in Path('/tmp/bench/native.txt').read_text().splitlines():
+            m=rx.search(line)
+            if m:
+              bits=int(m[6],16); ref=struct.unpack('>d',bits.to_bytes(8,'big'))[0]
+              native[(m[1],int(m[2]),int(m[3]))]=(float(m[4]),float(m[5]),ref)
+          taichi={}
+          rt=re.compile(r'TAICHI MODE=(\w+) N=(\d+) Q=(\d+) MEDIAN_MS=([0-9.]+).*CHECKSUM=([^ ]+)')
+          for mode in ('decoupled','coupled'):
+            for q in (1,2,4):
+              for line in Path(f'/tmp/bench/taichi_{mode}_q{q}.txt').read_text().splitlines():
+                m=rt.search(line)
+                if m: taichi[(m[1],int(m[2]),int(m[3]))]=(float(m[4]),float(m[5]))
+          if set(native)!=set(taichi): raise SystemExit(f'missing cases native={len(native)} taichi={len(taichi)}')
+          whc={'decoupled':[],'coupled':[]}; tc={'decoupled':[],'coupled':[]}
+          by={}
+          for key in sorted(native):
+            wh,c,ref=native[key]; t,tv=taichi[key]
+            trel=abs(tv-ref)/max(abs(ref),1.0)
+            if trel>2e-8: raise SystemExit(f'Taichi numeric mismatch {key} rel={trel}')
+            mode,n,q=key
+            whc[mode].append(wh/c); tc[mode].append(t/c); by[(mode,n,q)]=(wh/c,t/c)
+            print(f'FINAL MODE={mode} N={n} Q={q} WH={wh:.6f}ms C512={c:.6f}ms TAICHI={t:.6f}ms WH/C={wh/c:.3f}x TAICHI/C={t/c:.3f}x TAICHI/WH={t/wh:.3f}x TREL={trel:.3e}')
+          wh_deg=[]; t_deg=[]
+          for n in (10_000_000,100_000_000):
+            for q in (1,2,4):
+              wd,td=by[('decoupled',n,q)]; wc,tcv=by[('coupled',n,q)]
+              wh_deg.append(wc/wd); t_deg.append(tcv/td)
+              print(f'COUPLING_DEGRADATION N={n} Q={q} WH_RELATIVE={wc/wd:.3f}x TAICHI_RELATIVE={tcv/td:.3f}x')
+          print(f'WH_DECOUPLED_MEDIAN_VS_C={statistics.median(whc["decoupled"]):.3f}x')
+          print(f'WH_COUPLED_MEDIAN_VS_C={statistics.median(whc["coupled"]):.3f}x')
+          print(f'TAICHI_DECOUPLED_MEDIAN_VS_C={statistics.median(tc["decoupled"]):.3f}x')
+          print(f'TAICHI_COUPLED_MEDIAN_VS_C={statistics.median(tc["coupled"]):.3f}x')
+          print(f'WH_MEDIAN_COUPLING_DEGRADATION={statistics.median(wh_deg):.3f}x')
+          print(f'TAICHI_MEDIAN_COUPLING_DEGRADATION={statistics.median(t_deg):.3f}x')
+          print('FLUID_SOLID_COUPLING_NUMERIC=PASS')
+          PY
+
+      - name: Seal result
+        if: steps.probe.outputs.qualified == 'true'
+        shell: bash
+        run: |
+          cat /tmp/bench/host.txt /tmp/bench/probe.txt /tmp/bench/native.txt /tmp/bench/taichi_*.txt /tmp/bench/summary.txt > /tmp/bench/result.txt
+          grep -q '^FLUID_SOLID_COUPLING_NUMERIC=PASS$' /tmp/bench/summary.txt
+          echo 'FLUID_SOLID_COUPLING_BENCH=PASS' >> /tmp/bench/result.txt
+
+      - uses: actions/upload-artifact@v4
+        if: steps.probe.outputs.qualified == 'true'
+        with:
+          name: fluid-solid-coupling-${{ matrix.slot }}
+          path: /tmp/bench/result.txt
+          if-no-files-found: error
+          retention-days: 30
