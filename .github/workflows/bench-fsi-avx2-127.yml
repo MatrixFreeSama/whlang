@@ -3,7 +3,6 @@ name: FSI AVX2 Duel 1.2.7
 on:
   push:
     branches: [main]
-    paths: ['.github/workflows/bench-fsi-avx2-127.yml']
 
 jobs:
   bench:
