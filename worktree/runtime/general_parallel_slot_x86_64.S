@@ -184,22 +184,24 @@ gp_slot_base:
 # Sources are causally published before any child starts.
 gp_init_state:
     xor ecx, ecx
+    lea rdx, [rip+gp_indegree]
 .gis_nodes:
     cmp ecx, dword ptr [rip+gp_node_count]
     jae .gis_slots
-    mov eax, dword ptr [rip+gp_indegree+rcx*4]
+    mov eax, dword ptr [rdx+rcx*4]
     mov dword ptr [r15+ST_REMAIN+rcx*4], eax
     mov dword ptr [r15+ST_NEXT+rcx*4], GP_EMPTY
     inc ecx
     jmp .gis_nodes
 .gis_slots:
     xor ecx, ecx
+    lea rdx, [rip+gp_home_initial]
 .gis_slot_loop:
     cmp ecx, dword ptr [rip+gp_slot_count]
     jae .gis_sources
     mov dword ptr [r15+ST_HEAD+rcx*4], GP_EMPTY
     mov dword ptr [r15+ST_CACHE+rcx*4], GP_EMPTY
-    mov eax, dword ptr [rip+gp_home_initial+rcx*4]
+    mov eax, dword ptr [rdx+rcx*4]
     mov dword ptr [r15+ST_HOME_REMAIN+rcx*4], eax
     inc ecx
     jmp .gis_slot_loop
@@ -208,7 +210,8 @@ gp_init_state:
 .gis_source_loop:
     cmp ecx, dword ptr [rip+gp_node_count]
     jae .gis_ok
-    cmp dword ptr [rip+gp_indegree+rcx*4], 0
+    lea rdx, [rip+gp_indegree]
+    cmp dword ptr [rdx+rcx*4], 0
     jne .gis_source_next
     mov esi, ecx
     call gp_enqueue
@@ -245,7 +248,8 @@ gp_take_ready:
 # esi=node.  Home is AOT data.  Exactly one predecessor can observe the
 # remaining-dependency zero transition, therefore every node is published once.
 gp_enqueue:
-    mov edx, dword ptr [rip+gp_home_slots+rsi*4]
+    lea r8, [rip+gp_home_slots]
+    mov edx, dword ptr [r8+rsi*4]
     cmp edx, dword ptr [rip+gp_slot_count]
     jae .ge_bad
     lea r8, [r15+ST_HEAD]
@@ -280,7 +284,8 @@ gp_worker:
 
 .gw_have:
     mov r12d, eax
-    mov eax, dword ptr [rip+gp_entry_offsets+r12*4]
+    lea rdx, [rip+gp_entry_offsets]
+    mov eax, dword ptr [rdx+r12*4]
     test eax, eax
     jz .gw_fail
     lea r13, [rip+gp_slot_base]
@@ -301,13 +306,15 @@ gp_worker:
     sub dword ptr [r15+ST_HOME_REMAIN+rbx*4], 1
     jc .gw_fail
 
-    mov r14d, dword ptr [rip+gp_first_out+r12*4]
+    lea rdx, [rip+gp_first_out]
+    mov r14d, dword ptr [rdx+r12*4]
 .gw_edges:
     cmp r14d, GP_EMPTY
     je .gw_loop
     cmp r14d, dword ptr [rip+gp_edge_count]
     jae .gw_fail
-    mov esi, dword ptr [rip+gp_edge_v+r14*4]
+    lea rdx, [rip+gp_edge_v]
+    mov esi, dword ptr [rdx+r14*4]
     cmp esi, dword ptr [rip+gp_node_count]
     jae .gw_fail
     lock sub dword ptr [r15+ST_REMAIN+rsi*4], 1
@@ -317,7 +324,8 @@ gp_worker:
     test eax, eax
     jnz .gw_fail
 .gw_next:
-    mov r14d, dword ptr [rip+gp_next_edge+r14*4]
+    lea rdx, [rip+gp_next_edge]
+    mov r14d, dword ptr [rdx+r14*4]
     jmp .gw_edges
 
 .gw_ok:
