@@ -23,9 +23,30 @@ jobs:
           ./build.sh 2>&1 | tee /tmp/build127.log
           grep -Fq 'MULTI_ISA_TOPOLOGYC=BUILT' /tmp/build127.log
           grep -Fq 'PHYSICAL_VECTOR_SHAPES=native256,split512x256,native512' /tmp/build127.log
+          grep -Fq 'NATIVE256_BASE=BUILT' /tmp/build127.log
+          grep -Fq 'NATIVE256_WIDE=BUILT' /tmp/build127.log
+          grep -Fq 'NATIVE256_DERIVED=BUILT' /tmp/build127.log
           grep -Fq 'PHYSICAL_VECTOR_PROFILE_WORKLOAD_DISPATCH=0' /tmp/build127.log
           grep -Fq 'PHYSICAL_VECTOR_RUNTIME_PROFITABILITY_SELECTOR=0' /tmp/build127.log
+          grep -Fq 'ACTIVE_SPECIAL_PURPOSE_NATIVE_ROUTE=0' /tmp/build127.log
           grep -Fq 'WHEELCHAIR_BUILD=PASS' /tmp/build127.log
+          python3 -m py_compile whexc.py wheelchairc.py surface/native_backend_matrix.py \
+            tools/run_native256_frontend_generator.py tools/finalize_native256_frontends.py
+      - name: Real native256 AOT compile and execution
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd worktree
+          sh test_native256_physicalizer_127.sh | tee /tmp/native256-real127.log
+          grep -Fq 'NATIVE256_AOT_MATRIX_SELECTION=PASS' /tmp/native256-real127.log
+          grep -Fq 'NATIVE_AUTO_PHYSICAL_SHAPE_EQ_NATIVE_AUDIT=PASS' /tmp/native256-real127.log
+          grep -Fq 'NATIVE256_REAL_ELF_EXECUTION=PASS' /tmp/native256-real127.log
+          grep -Fq 'NATIVE256_AVX2_YMM_ONLY=PASS' /tmp/native256-real127.log
+          grep -Fq 'NATIVE256_TAIL_VECTOR=PASS' /tmp/native256-real127.log
+          grep -Fq 'NATIVE256_WORKLOAD_SPECIALIZATION=0' /tmp/native256-real127.log
+          grep -Fq 'NATIVE256_RUNTIME_SELECTOR=0' /tmp/native256-real127.log
+          grep -Fq 'NATIVE256_SCALAR_FALLBACK=0' /tmp/native256-real127.log
+          grep -Fq 'WHEELCHAIR_NATIVE256_1_2_7=PASS' /tmp/native256-real127.log
       - name: Synthetic Intel AMD matrix
         shell: bash
         run: |
@@ -96,24 +117,40 @@ jobs:
           else
             echo 'NATIVE512_1_2_6_EMITTED_BYTE_IDENTITY=SKIP_HOST_NOT_AVX512F'
           fi
-      - name: Static workload-blind audit
+      - name: Static no-special-purpose audit
         shell: bash
         run: |
           set -euxo pipefail
           ! grep -n -Ei '\b(newton|fsi|heat|stiffness|fem|cfd|poisson|fluid|solid)\b' \
             worktree/surface/physical_isa_profile.py \
+            worktree/surface/native_backend_matrix.py \
             worktree/tools/generate_multi_isa_topologyc.py \
-            worktree/compiler/physical_vector_shapes.inc
+            worktree/compiler/physical_vector_shapes.inc \
+            worktree/whexc.py \
+            worktree/wheelchairc.py
           ! grep -n -Ei 'runtime.*(profit|cost).*selector|workload.*dispatch' \
             worktree/tools/generate_multi_isa_topologyc.py
+          grep -Fq '"workload_dispatch": 0' worktree/surface/native_backend_matrix.py
+          grep -Fq '"runtime_selector": 0' worktree/surface/native_backend_matrix.py
+          grep -Fq '"runtime_profitability_selector": 0' worktree/surface/native_backend_matrix.py
+          grep -Fq '"scalar_fallback": 0' worktree/surface/native_backend_matrix.py
           echo 'MULTI_ISA_ACTIVE_SPECIAL_PURPOSE_ROUTE=0'
+          echo 'MULTI_ISA_ACTIVE_WORKLOAD_SPECIFIC_ROUTE=0'
+          echo 'MULTI_ISA_ACTIVE_BENCHMARK_SPECIFIC_ROUTE=0'
           echo 'MULTI_ISA_RUNTIME_PROFITABILITY_SELECTOR=0'
+          echo 'MULTI_ISA_SCALAR_FALLBACK=0'
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: wheelchair-127-multi-isa-evidence
           path: |
             /tmp/build127.log
+            /tmp/native256-real127.log
+            /tmp/wheelchair127-native256-driver.json
+            /tmp/wheelchair127-native256-plan.json
+            /tmp/wheelchair127-auto-driver.json
+            /tmp/wheelchair127-auto-plan.json
+            /tmp/wheelchair127-native256.dis
             /tmp/synthetic127.log
             /tmp/probe127.txt
             /tmp/audit127.json
