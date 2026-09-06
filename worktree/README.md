@@ -1,13 +1,17 @@
-# Wheelchair 1.2.5
+# Wheelchair 1.2.6
 
 Wheelchair is an ahead-of-time, native, structure-first programming language project for general programming with HPC and simulation as primary design targets.
+
+Version 1.2.6 makes the **General Parallel Fabric** the universal causal execution model while preserving mature narrow native peaks through generic, structurally selected resource profiles.
+
+## Core contract
 
 Wheelchair has two human-facing source styles over one structural/native core:
 
 - **WH (`.wh`)** is the inference-heavy human surface.
 - **WHEX (`.whex`)** is the explicit expert surface.
 
-For shared mature semantics, both surfaces converge on the same structural core and, where the native realizer accepts the graph, the same native image.
+For semantics implemented by both surfaces, the contract is:
 
 ```text
 WH source                 WHEX source
@@ -16,12 +20,14 @@ WH source                 WHEX source
    v                          v
         Unified Structural Core
                  |
-                 | proof + erasure + topology lowering
+                 | proof + erasure + causal topology
+                 v
+        General Parallel Semantics
+                 |
+                 | AOT physicalization
                  v
           Native x86-64 ELF
 ```
-
-Wheelchair does not silently rebuild unsupported structural programs as scalar fallback, a hidden global task queue, or a conventional sequential execution spine.
 
 The central rule is:
 
@@ -29,131 +35,129 @@ The central rule is:
 No dependency edge = no synchronization edge.
 ```
 
-## 1.2.5: Shared Dependency Episode Physicalization
+Source order is not permission to synthesize an execution dependency. Unsupported structure is rejected rather than silently rebuilt as a scalar fallback, a hidden global queue, a runtime profitability selector, or a conventional sequential spine.
 
-1.2.5 extends the mature native optimizer from strong single-field episodes toward high-pressure multi-field and multi-channel graphs.
+## What 1.2.6 changes
 
-The optimizer does not inspect workload or physics names. It classifies the canonical graph from structural load pressure and dependency topology.
+### General Parallel Fabric
 
-Release witnesses:
+Executable bindings form a causal DAG from actual references. Independent bindings remain independent. True recurrences remain local causal enclaves rather than becoming a global serial backbone.
 
-```text
-Newton/Jv             5 distinct structural loads -> frozen 1.2.4 recipe
-global stiffness      6 distinct structural loads -> frozen 1.2.4 recipe
-two-field decoupled  11 distinct structural loads -> Shared Dependency Episode wide recipe
-two-field coupled    12 distinct structural loads -> Shared Dependency Episode wide recipe
-```
-
-Low-pressure mature programs therefore keep the exact 1.2.4 physical recipe. The release gates require native byte identity for Newton/Jv and global stiffness at 1, 2, and 4 executors.
-
-High-pressure graphs may select the wide recipe during AOT compilation. There is no runtime recipe selector.
-
-### Safe AVX-512 ownership
-
-The released wide recipe uses:
+The physical authority is:
 
 ```text
-ZMM16..ZMM29  shared persistent dependency / CSE ownership
-ZMM30..ZMM31  immutable resident constants
-ZMM12..ZMM15  runtime-reserved and protected
+build/topology-parallel
 ```
 
-An experimental design that borrowed runtime-reserved registers was rejected after the numerical gate detected corruption. The released design never crosses that ABI boundary.
-
-### Tolerant literal reciprocal erasure
-
-For tolerant FP only, a finite non-zero binary64 literal divisor whose rounded reciprocal is normal may use:
+The release gates require:
 
 ```text
-x / c -> x * round_f64(1 / c)
+global ready scan       = 0
+global queue operations = 0
+root scheduler          = 0
+parent-chain updates    = 0
+runtime cost selector   = 0
+serial fallback         = 0
+source-order edges      = 0
 ```
 
-The reciprocal is constructed during AOT compilation with canonical `MXCSR=0x1f80`; the host MXCSR is restored afterward.
+General WH native materialization is gated at 1, 2, and 4 execution slots, including independent-binding relocation, fragmented causal graphs, and recurrence enclaves.
 
-Strict mode, zero/non-finite divisors, and subnormal-reciprocal cases retain the existing proved vector-division recipe. No scalar fallback is introduced.
+### Generic native resource profiles
 
-### Machine-shape result
-
-For the coupled two-field witness:
+Mature structural tensor programs are admitted to one of three generic AOT physical classes:
 
 ```text
-1.2.4 hot instructions: 491
-1.2.5 hot instructions: 297
-1.2.4 VDIVPD: 26
-1.2.5 VDIVPD: 0
-1.2.5 reachable generated hot CALL edges: 0
+base
+wide
+derived
 ```
 
-## Formal multi-host authority
+The selector examines canonical structure and resource pressure. It does **not** inspect workload names, solver names, benchmark identities, source paths, runtime timings, or profitability measurements.
 
-Authority workflow:
+Current release witnesses include:
 
 ```text
-Validate Shared Dependency Episode 1.2.5
-run 33902157205
+Newton/Jv             5 distinct structural loads -> base
+global stiffness      6 distinct structural loads -> base
+two-field decoupled  11 distinct structural loads -> wide
+two-field coupled    12 distinct structural loads -> wide
+proved Rank-N product                           -> derived
 ```
 
-Two AMD EPYC 9V74 AVX-512-qualified hosts completed the authority suite; no qualified host failed.
+These witnesses demonstrate structural admission. They are not named fast paths.
 
-Each host compared exact Wheelchair 1.2.4, Wheelchair 1.2.5, and matched Expert C AVX-512 across:
+### Technical Peak Preservation Contract
+
+Generality is additive, not flattening. A generalization may not erase information and rebuild a slower common denominator when a mature physical peak can be recovered from structural proof.
+
+1.2.6 therefore protects the 1.2.5 execution implementation at the byte level:
+
+- `base` compiler loadable bytes match the mature 1.2.5 base compiler;
+- `wide` compiler loadable bytes match the mature 1.2.5 wide implementation;
+- the `derived` frontend loadable image matches the mature Rank-N-derived frontend;
+- the `derived` compiler `.text` matches the mature implementation;
+- the `derived` runtime loadable image matches the mature implementation;
+- the mature tensor and general runtime images remain byte-identical.
+
+Renamed ELF `STT_FILE` / string-table metadata is not execution code. The release gate compares executed/loadable sections rather than requiring retired historical filenames to survive inside non-executing metadata.
+
+### No active special-purpose native routes
+
+The old active implementation names used while developing narrower peaks are not part of the 1.2.6 compiler route. Current build/wrappers use generic structural capabilities only.
+
+Release audit requires:
 
 ```text
-decoupled and coupled two-field witnesses
-N = 10,000,000 and 100,000,000
-executors = 1, 2, 4
-3 warmups
-11 shuffled/interleaved measured runs
+ACTIVE_SPECIAL_PURPOSE_NATIVE_ROUTE=0
+ACTIVE_LEGACY_DERIVED_FILE_ROUTE=0
+ACTIVE_HIDDEN_SERIAL_SPINE=0
 ```
 
-The predeclared release threshold required both median and geometric-mean 1.2.4 -> 1.2.5 speedup to be at least 1.50x.
+The semantic field `rank_n_product` remains valid. It describes Rank-N Cartesian-product meaning and its AOT patch, not a workload-specific dispatch route.
 
-| Host | Median 1.2.4 -> 1.2.5 | Geomean 1.2.4 -> 1.2.5 | Geomean 1.2.5 / Expert C |
-|---|---:|---:|---:|
-| EPYC 9V74 slot 2 | **2.4486x** | **2.4478x** | 1.3443x |
-| EPYC 9V74 slot 3 | **2.4508x** | **2.4480x** | 1.3445x |
+## Schedulerless performance evidence
 
-Every tested 1.2.4/1.2.5 two-field checksum was bit-identical.
+The General Parallel Fabric schedulerless authority was measured on 27 points per runner across chain, binary-tree, and layered-DAG topologies; work levels 0, 1,000, and 20,000; and 1, 2, and 4 execution slots.
 
-Expert C remained faster in aggregate on these AMD hosts by about 1.34x geometrically. The 1.2.5 claim is a large general multi-field recovery, not a general C-performance victory.
+Three independent hosted runners produced whole-matrix New / 1.2.5 ratios:
 
-Full release evidence:
+| CPU | New / 1.2.5 | Whole-matrix change |
+| --- | ---: | ---: |
+| Intel Xeon 6973P-C | 0.919860192 | +8.01% |
+| Intel Xeon Platinum 8573C | 0.914272723 | +8.57% |
+| AMD EPYC 7763 | 0.996728605 | +0.33% |
 
-```text
-RELEASE_PROOF_1_2_5.md
-RELEASE_GATES_1_2_5.txt
-MATURE_1_2_5_PROOF.md
-SHARED_DEPENDENCY_EPISODE_CHARTER_1_2_5.md
-```
+Cross-runner geometric mean: **0.942883791**, approximately **5.71% faster overall**.
 
-## Preserved technical peaks
+The AMD Q2/Q4 width-specific regression remains an explicit AOT optimization target. It does not authorize a hidden runtime selector.
 
-1.2.5 retains and gates earlier mature layers:
+## AVX-512 authority boundary
 
-- **1.2.1** Interior Periodic Composition Erasure;
-- **1.2.2** proof-gated Rank-N Cartesian-product physicalization;
-- **1.2.3** Sparse Causal Expansion;
-- **1.2.4** Product-Subtract contraction and Vector Reduction Residency.
+The current 512-bit structural tensor realizer requires AVX-512F-class host capability. `--isa-limit` is an audit ceiling, not a fake host-feature override: the native compiler still self-scans the real host ISA.
 
-The release also preserves the AOT-only native sovereignty contract, zero scalar fallback, zero workload-name dispatch, and the no-hidden-serial rules.
+Therefore release validation separates:
+
+1. host-independent structural/static execution-byte authority, which must pass on every x86-64 CI host; and
+2. AVX-512 compile/execution witnesses, which run only on genuinely AVX-512-qualified hosts and otherwise report an explicit `SKIP_HOST_NOT_AVX512F`.
+
+A skip is never recorded as a dynamic PASS.
 
 ## Platform
 
-The current native toolchain targets Linux x86-64.
+Current native target: Linux x86-64.
 
-Requirements:
+Build-time requirements:
 
-- Python 3 for human-facing AOT source processing and compile-time proof;
-- GNU `as`, `ld`, `readelf`, and related binutils;
-- POSIX shell;
-- AVX-512F-class capability for the current 512-bit structural tensor realizer.
+- Python 3 for human-facing AOT parsing/proof and source generation;
+- GNU `as`, `ld`, `readelf`, `objcopy`, and related binutils;
+- POSIX shell.
 
-The emitted native program does not execute through Python, C, C++, LLVM, or a JIT.
+The emitted program does not execute through Python, C, C++, LLVM, or a JIT.
 
-AVX2 exists in the capability model, but 1.2.5 does not claim a complete 256-bit structural tensor backend. Unsupported hardware/graphs reject instead of silently becoming scalar tensor code.
+AVX2 is represented in the capability model, but 1.2.6 does not claim a complete 256-bit structural tensor backend. Unsupported hardware or graphs reject rather than silently scalarizing.
 
 ## Build
-
-From the extracted release directory:
 
 ```bash
 ./build.sh
@@ -171,7 +175,7 @@ WHEELCHAIR_BUILD=PASS
 ./wheelchairc program.wh -o program
 ```
 
-With four executors:
+With four execution slots:
 
 ```bash
 ./wheelchairc program.wh -o program --executors 4
@@ -189,50 +193,40 @@ With four executors:
 ./wheelchairc program.wh -o program --semantic-plan plan.json
 ```
 
-The useful questions are not only what syntax was written, but:
+Useful questions include:
 
 - which dependencies are real;
 - which objects were erased before runtime;
-- which axes survived;
-- which regions are independent;
-- which physical recipe was selected;
-- whether scalar fallback, runtime dispatch, synthetic synchronization, or central control appeared.
+- which regions or bindings are independent;
+- which native resource profile was selected;
+- whether any synthetic ordering, runtime selector, scalar fallback, or central control appeared.
 
 ## Structural execution rules
 
-A WH `for` does not promise a serial machine loop. If the points are independent, the structural object is an axis map and may be realized using AVX-512 lanes, masked vector tails, executor regions, boundary/interior specialization, or a Shared Dependency Episode.
+A WH `for` does not promise a serial machine loop. If points are independent, the semantic object is an axis map and may be realized with vector lanes, masked tails, executor regions, compile-time partitioning, or another proven parallel mapping.
 
-A scalar final reduction value does not imply a scalar execution history. Reduction is represented as a dependency topology.
+A scalar final reduction value does not imply a scalar execution history. Reduction is represented as dependency topology.
 
 Structural predicates may lower to select/dataflow structure rather than a central dispatcher.
 
 Arbitrary dynamic `while` is not silently converted into a conventional serial backedge. Unsupported recurrence/control topology rejects until a genuine structural realization exists.
 
-## Release philosophy
+## Release evidence
 
-A generic optimization must satisfy:
-
-```text
-Generality Gain
-+ Measured Physical Gain
-+ Existing Peak Preservation
-```
-
-The intended direction is:
+The 1.2.6 release evidence is documented in:
 
 ```text
-narrow technical peak
--> identify the structural property
--> promote it into general algebra
--> prove matching programs
--> preserve or improve physical realization
+GENERAL_PARALLEL_FABRIC_1_2_6.md
+RELEASE_NOTES_1_2_6.md
+RELEASE_GATES_1_2_6.txt
+RELEASE_PROOF_1_2_6.md
 ```
 
-Workload-name dispatch is not an accepted substitute for generality.
+Historical release evidence remains in the repository for audit and comparison.
 
 ## Current maturity boundary
 
-Wheelchair 1.2.5 is an active research compiler/language project. It does not claim every systems-language feature is complete.
+Wheelchair 1.2.6 is an active research compiler/language project. It does not claim every systems-language feature is complete.
 
 In particular:
 
@@ -240,6 +234,6 @@ In particular:
 - arbitrary unsupported topology may reject;
 - arbitrary dynamic `while` has no hidden serial fallback;
 - general-language memory safety is not formally claimed as complete;
-- the 1.2.5 authority is CPU/AVX-512 evidence, not a universal ranking across every device, backend, or workload.
+- performance evidence is bounded to the tested hosts, workloads, and authority matrices.
 
-The final execution authority is the emitted machine code, not the appearance of the source syntax.
+The final execution authority is the emitted machine code and proven causal topology, not the appearance of the source syntax.

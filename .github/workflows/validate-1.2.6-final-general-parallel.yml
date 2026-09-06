@@ -56,7 +56,7 @@ jobs:
           import wh_structural, whex_surface
           wh_path=Path('../benchmarks/fluid_solid_coupling_124/fsi_coupled.wh')
           wx_path=Path('../benchmarks/fluid_solid_coupling_124/fsi_coupled.whex')
-          wh_data, wh_parser = wh_structural.compile_surface(wh_path.read_text(encoding='utf-8'), wh_path)
+          wh_data, _ = wh_structural.compile_surface(wh_path.read_text(encoding='utf-8'), wh_path)
           wx_data, _, _ = whex_surface.load_surface(wx_path)
           wh_core=wh_structural.canonical_core_bytes(wh_data)
           wx_core=whex_surface.canonical_core_bytes(wx_data)
@@ -139,9 +139,25 @@ jobs:
           grep -Fq 'MATURE_RUNTIME_1_2_5_NATIVE_BYTE_IDENTITY=PASS' native_peak_preservation_126.log
           grep -Fq 'WHEELCHAIR_1_2_5_TECHNICAL_PEAK_EXECUTION_BYTES_PRESERVED=PASS' native_peak_preservation_126.log
 
-      - name: Static special-purpose and anti-serial audit
+      - name: Static special-purpose anti-serial and release-seal audit
         run: |
           set -euxo pipefail
+          test "$(cat worktree/VERSION)" = '1.2.6'
+          grep -Fq '# Wheelchair 1.2.6' worktree/README.md
+          test -f worktree/RELEASE_NOTES_1_2_6.md
+          test -f worktree/RELEASE_PROOF_1_2_6.md
+          test -f worktree/RELEASE_GATES_1_2_6.txt
+          test -f worktree/GENERAL_PARALLEL_FABRIC_1_2_6.md
+          grep -Fq 'NATIVE_RESOURCE_PROFILE_CLASSES=base,wide,derived' worktree/RELEASE_GATES_1_2_6.txt
+          grep -Fq 'ACTIVE_SPECIAL_PURPOSE_NATIVE_ROUTE=0' worktree/RELEASE_GATES_1_2_6.txt
+          grep -Fq 'ACTIVE_LEGACY_DERIVED_FILE_ROUTE=0' worktree/RELEASE_GATES_1_2_6.txt
+          grep -Fq 'ACTIVE_HIDDEN_SERIAL_SPINE=0' worktree/RELEASE_GATES_1_2_6.txt
+          grep -Fq 'WHEELCHAIR_1_2_5_TECHNICAL_PEAK_EXECUTION_BYTES_PRESERVED=PASS' worktree/RELEASE_GATES_1_2_6.txt
+          grep -Fq 'WHEELCHAIR_1_2_6_FINAL=PASS' worktree/RELEASE_GATES_1_2_6.txt
+          grep -Fq 'base' worktree/GENERAL_PARALLEL_FABRIC_1_2_6.md
+          grep -Fq 'wide' worktree/GENERAL_PARALLEL_FABRIC_1_2_6.md
+          grep -Fq 'derived' worktree/GENERAL_PARALLEL_FABRIC_1_2_6.md
+          ! grep -Fq 'may continue to use their dedicated native physicalizations' worktree/GENERAL_PARALLEL_FABRIC_1_2_6.md
           test ! -e worktree/surface/shared_dependency_episode.py
           test ! -e worktree/tools/generate_shared_dependency_episode_125.py
           test ! -e worktree/test_shared_dependency_episode_125.sh
@@ -166,6 +182,8 @@ jobs:
           echo 'ACTIVE_SPECIAL_PURPOSE_NATIVE_ROUTE=0'
           echo 'ACTIVE_LEGACY_DERIVED_FILE_ROUTE=0'
           echo 'ACTIVE_HIDDEN_SERIAL_SPINE=0'
+          echo 'WHEELCHAIR_1_2_6_RELEASE_DOCUMENTS=PASS'
+          echo 'WHEELCHAIR_1_2_6_FINAL=PASS'
 
       - name: Archive final evidence
         if: always()
@@ -181,6 +199,10 @@ jobs:
             worktree/general_parallel_semantic_126.log
             worktree/schedulerless_126.log
             worktree/native_peak_preservation_126.log
+            worktree/RELEASE_NOTES_1_2_6.md
+            worktree/RELEASE_PROOF_1_2_6.md
+            worktree/RELEASE_GATES_1_2_6.txt
+            worktree/GENERAL_PARALLEL_FABRIC_1_2_6.md
             baseline125_build.log
             baseline125_wrapper_selftest.log
             baseline125_wh_wrapper_selftest.log
