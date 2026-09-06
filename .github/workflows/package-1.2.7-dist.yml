@@ -76,7 +76,7 @@ jobs:
           print(f'size={out.stat().st_size}')
           PY
           unzip -t dist/Wheelchair-1.2.7.zip
-          sha256sum -c dist/Wheelchair-1.2.7.zip.sha256
+          (cd dist && sha256sum -c Wheelchair-1.2.7.zip.sha256)
       - name: Commit dist archive
         if: steps.trigger.outputs.active == '1'
         shell: bash
