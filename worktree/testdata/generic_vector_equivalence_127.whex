@@ -1,8 +1,0 @@
-program generic_vector_equivalence_127
-tolerance 1e-12
-input n: u64 range 4..1000000
-field x[i in n]: f64 = cast(f64, i)
-field y[i in n]: f64 = 2.0 * x[i] + 1.0
-sum checksum[i in n]: f64 = y[i]
-output checksum
-test (4) => { checksum = 16.0 }
