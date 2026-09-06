@@ -65,7 +65,7 @@ jobs:
           sh ./test_native_resource_profiles_126.sh 2>&1 | tee native_resource_profiles_126.log
           grep -Fq 'NATIVE_RESOURCE_PROFILE_STRUCTURAL_ADMISSION=PASS' native_resource_profiles_126.log
           grep -Fq 'NATIVE_RESOURCE_PROFILE_WORKLOAD_DISPATCH=0' native_resource_profiles_126.log
-          grep -Fq 'WIDE_PROFILE_1_2_5_COMPILER_BYTE_IDENTITY=PASS' native_resource_profiles_126.log
+          grep -Fq 'WIDE_PROFILE_1_2_5_LOADABLE_BYTE_IDENTITY=PASS' native_resource_profiles_126.log
           grep -Fq 'WH_WHEX_WIDE_CANONICAL_BYTE_EQUIVALENCE=PASS' native_resource_profiles_126.log
           grep -Fq 'WIDE_PROFILE_SAME_CORE_NATIVE_BYTE_IDENTITY=PASS' native_resource_profiles_126.log
           grep -Fq 'WH_WHEX_NATIVE_RESOURCE_PROFILE_EQUIVALENCE=PASS' native_resource_profiles_126.log
@@ -84,17 +84,18 @@ jobs:
           grep -Fq 'WHEELCHAIR_SCHEDULERLESS_CAUSAL_1_2_6=PASS' schedulerless_126.log
 
       - name: Byte-protect mature 1.2.5 technical peaks
+        working-directory: worktree
         run: |
           set -euxo pipefail
-          cmp worktree/build/topologyc baseline125/worktree/build/topologyc
-          cmp worktree/build/topologyc-wide baseline125/worktree/build/topologyc-sdep
-          cmp worktree/build/topologyc-derived baseline125/worktree/build/topologyc-rankn
-          cmp worktree/build/tensor_runtime_template baseline125/worktree/build/tensor_runtime_template
-          cmp worktree/build/general_runtime_template baseline125/worktree/build/general_runtime_template
-          echo 'BASE_PROFILE_1_2_5_NATIVE_BYTE_IDENTITY=PASS'
-          echo 'WIDE_PROFILE_1_2_5_NATIVE_BYTE_IDENTITY=PASS'
-          echo 'DERIVED_PROFILE_1_2_5_NATIVE_BYTE_IDENTITY=PASS'
-          echo 'MATURE_RUNTIME_1_2_5_NATIVE_BYTE_IDENTITY=PASS'
+          sh ./test_native_peak_preservation_126.sh 2>&1 | tee native_peak_preservation_126.log
+          grep -Fq 'BASE_PROFILE_1_2_5_COMPILER_LOADABLE_BYTE_IDENTITY=PASS' native_peak_preservation_126.log
+          grep -Fq 'WIDE_PROFILE_1_2_5_COMPILER_LOADABLE_BYTE_IDENTITY=PASS' native_peak_preservation_126.log
+          grep -Fq 'DERIVED_PROFILE_1_2_5_COMPILER_LOADABLE_BYTE_IDENTITY=PASS' native_peak_preservation_126.log
+          grep -Fq 'BASE_PROFILE_1_2_5_EMITTED_NATIVE_BYTE_IDENTITY=PASS' native_peak_preservation_126.log
+          grep -Fq 'WIDE_PROFILE_1_2_5_EMITTED_NATIVE_BYTE_IDENTITY=PASS' native_peak_preservation_126.log
+          grep -Fq 'DERIVED_PROFILE_1_2_5_EMITTED_NATIVE_BYTE_IDENTITY=PASS' native_peak_preservation_126.log
+          grep -Fq 'MATURE_RUNTIME_1_2_5_NATIVE_BYTE_IDENTITY=PASS' native_peak_preservation_126.log
+          grep -Fq 'WHEELCHAIR_1_2_5_TECHNICAL_PEAK_BYTES_PRESERVED=PASS' native_peak_preservation_126.log
 
       - name: Static special-purpose and anti-serial audit
         run: |
@@ -137,6 +138,7 @@ jobs:
             worktree/native_resource_profiles_126.log
             worktree/general_parallel_semantic_126.log
             worktree/schedulerless_126.log
+            worktree/native_peak_preservation_126.log
             baseline125_build.log
             worktree/build/general_parallel_126/*.json
             worktree/build/general_parallel_126/*.out
