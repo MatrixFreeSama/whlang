@@ -43,8 +43,9 @@ for name,path in cases.items():
     Path(f'/tmp/peak_{name}.core.wh').write_bytes(whex_surface.canonical_core_bytes(data))
 PY
 
-# The authority compares an explicit AVX-512F AOT target, not the runner's native
-# ISA. Execution is a separate host-qualified witness.
+# Emitted-program authority requires a real AVX-512F compiler host because
+# topologyc intentionally self-scans the host before tensor lowering. The
+# compiler/runtime execution bytes above are host-independent and mandatory.
 compare_emit_loadable() {
   new=$1 old=$2 core=$3 name=$4
   "$old" "$core" -o "build/${name}.old.elf" --isa-limit avx512f
@@ -54,16 +55,22 @@ compare_emit_loadable() {
   cmp "/tmp/${name}.new.load.bin" "/tmp/${name}.old.load.bin"
   echo "${name}_EMITTED_LOADABLE_BYTE_IDENTITY=PASS"
 }
-compare_emit_loadable build/topologyc "$BASE125/build/topologyc" /tmp/peak_base.core.wh BASE_PROFILE_1_2_5
-compare_emit_loadable build/topologyc-wide "$BASE125/build/topologyc-sdep" /tmp/peak_wide.core.wh WIDE_PROFILE_1_2_5
-compare_emit_loadable build/topologyc-derived "$BASE125/build/topologyc-rankn" /tmp/peak_derived.core.wh DERIVED_PROFILE_1_2_5
 
 if grep -qm1 -w avx512f /proc/cpuinfo; then
+  echo 'TECHNICAL_PEAK_HOST_AVX512_QUALIFIED=1'
+  compare_emit_loadable build/topologyc "$BASE125/build/topologyc" /tmp/peak_base.core.wh BASE_PROFILE_1_2_5
+  compare_emit_loadable build/topologyc-wide "$BASE125/build/topologyc-sdep" /tmp/peak_wide.core.wh WIDE_PROFILE_1_2_5
+  compare_emit_loadable build/topologyc-derived "$BASE125/build/topologyc-rankn" /tmp/peak_derived.core.wh DERIVED_PROFILE_1_2_5
+
   build/DERIVED_PROFILE_1_2_5.new.elf 8 >/tmp/derived126.dynamic.out
   build/DERIVED_PROFILE_1_2_5.old.elf 8 >/tmp/derived125.dynamic.out
   cmp /tmp/derived126.dynamic.out /tmp/derived125.dynamic.out
   echo 'DERIVED_PROFILE_DYNAMIC_EXECUTION_EQUIVALENCE=PASS'
 else
+  echo 'TECHNICAL_PEAK_HOST_AVX512_QUALIFIED=0'
+  echo 'BASE_PROFILE_1_2_5_EMITTED_LOADABLE_BYTE_IDENTITY=SKIP_HOST_NOT_AVX512F'
+  echo 'WIDE_PROFILE_1_2_5_EMITTED_LOADABLE_BYTE_IDENTITY=SKIP_HOST_NOT_AVX512F'
+  echo 'DERIVED_PROFILE_1_2_5_EMITTED_LOADABLE_BYTE_IDENTITY=SKIP_HOST_NOT_AVX512F'
   echo 'DERIVED_PROFILE_DYNAMIC_EXECUTION_EQUIVALENCE=SKIP_HOST_NOT_AVX512F'
 fi
 

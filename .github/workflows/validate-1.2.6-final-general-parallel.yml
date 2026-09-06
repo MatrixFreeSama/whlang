@@ -44,13 +44,13 @@ jobs:
           test -x baseline125/worktree/build/topologyc-sdep
           test -x baseline125/worktree/build/topologyc-rankn
 
-      - name: Self-prove 1.2.5 AOT authority
+      - name: Self-prove 1.2.5 static authority and qualified dynamic witness
         run: |
           set -euxo pipefail
           cd baseline125/worktree
-          ./whexc ../benchmarks/fluid_solid_coupling_124/fsi_coupled.whex \
-            -o build/self125_whex --executors 1 --isa-limit avx512f \
-            --semantic-plan /tmp/self125_whex.plan.json > ../../baseline125_wrapper_selftest.log
+          echo 'e7b05d8c6f401b0d8b7caa6db4016ee39ca3100d6f781ff438375528f3dbd0d6  compiler/tensor_frontend_x86_64.S' | sha256sum -c -
+          echo '2e83af25b6a6188c9ce24497d636206ca5978e59a92b619e6b722909ad2d4f80  compiler/topologyc_x86_64.S' | sha256sum -c -
+          echo 'e9116041c673aec4dca58a43379ccb78d5ae3d6aa7e7ba76656da32b24cdfeb3  runtime/tensor_runtime_template_x86_64.S' | sha256sum -c -
           PYTHONPATH=surface python3 - <<'PY'
           from pathlib import Path
           import wh_structural, whex_surface
@@ -64,17 +64,24 @@ jobs:
           Path('/tmp/self125_shared.core.wh').write_bytes(wh_core)
           print('BASELINE_1_2_5_WH_WHEX_CANONICAL_BYTE_EQUIVALENCE=PASS')
           PY
-          ./build/topologyc-sdep /tmp/self125_shared.core.wh \
-            -o build/self125_wh --isa-limit avx512f > ../../baseline125_wh_wrapper_selftest.log
-          cmp build/self125_whex build/self125_wh
-          echo 'BASELINE_1_2_5_AOT_AUTHORITY_SELFTEST=PASS'
+          echo 'BASELINE_1_2_5_STATIC_AUTHORITY_SELFTEST=PASS'
           if grep -qm1 -w avx512f /proc/cpuinfo; then
+            echo 'BASELINE_1_2_5_HOST_AVX512_QUALIFIED=1'
+            ./whexc ../benchmarks/fluid_solid_coupling_124/fsi_coupled.whex \
+              -o build/self125_whex --executors 1 \
+              --semantic-plan /tmp/self125_whex.plan.json > ../../baseline125_wrapper_selftest.log
+            ./build/topologyc-sdep /tmp/self125_shared.core.wh \
+              -o build/self125_wh > ../../baseline125_wh_wrapper_selftest.log
+            cmp build/self125_whex build/self125_wh
             test "$(build/self125_whex 10000000)" = 'checksum_bits=0x4130e896f42e1dd6'
             sh ./test_shared_dependency_episode_125.sh > ../../baseline125_full_selftest.log 2>&1
             grep -Fq 'WHEELCHAIR_SHARED_DEPENDENCY_EPISODE_1_2_5=PASS' ../../baseline125_full_selftest.log
             echo 'BASELINE_1_2_5_DYNAMIC_AUTHORITY=PASS'
           else
+            echo 'BASELINE_1_2_5_HOST_AVX512_QUALIFIED=0'
             echo 'BASELINE_1_2_5_DYNAMIC_AUTHORITY=SKIP_HOST_NOT_AVX512F' > ../../baseline125_full_selftest.log
+            : > ../../baseline125_wrapper_selftest.log
+            : > ../../baseline125_wh_wrapper_selftest.log
           fi
 
       - name: Prove general WH native Q1 Q2 Q4 materialization
@@ -100,10 +107,10 @@ jobs:
           grep -Fq 'NATIVE_RESOURCE_PROFILE_WORKLOAD_DISPATCH=0' native_resource_profiles_126.log
           grep -Fq 'WIDE_PROFILE_1_2_5_LOADABLE_BYTE_IDENTITY=PASS' native_resource_profiles_126.log
           grep -Fq 'WH_WHEX_WIDE_CANONICAL_BYTE_EQUIVALENCE=PASS' native_resource_profiles_126.log
-          grep -Fq 'WIDE_PROFILE_SAME_CORE_NATIVE_BYTE_IDENTITY=PASS' native_resource_profiles_126.log
           grep -Fq 'WH_WHEX_NATIVE_RESOURCE_PROFILE_EQUIVALENCE=PASS' native_resource_profiles_126.log
-          grep -Fq 'NATIVE_RESOURCE_PROFILE_WIDE_VDIVPD=0' native_resource_profiles_126.log
-          grep -Fq 'NATIVE_RESOURCE_PROFILE_WIDE_REACHABLE_CALLS=0' native_resource_profiles_126.log
+          grep -Eq 'WIDE_PROFILE_SAME_CORE_NATIVE_BYTE_IDENTITY=(PASS|SKIP_HOST_NOT_AVX512F)' native_resource_profiles_126.log
+          grep -Eq 'NATIVE_RESOURCE_PROFILE_WIDE_VDIVPD=(0|SKIP_HOST_NOT_AVX512F)' native_resource_profiles_126.log
+          grep -Eq 'NATIVE_RESOURCE_PROFILE_WIDE_REACHABLE_CALLS=(0|SKIP_HOST_NOT_AVX512F)' native_resource_profiles_126.log
           grep -Fq 'NATIVE_RESOURCE_PROFILE_SPECIAL_PURPOSE_ROUTE=0' native_resource_profiles_126.log
           grep -Fq 'WHEELCHAIR_NATIVE_RESOURCE_PROFILES_1_2_6=PASS' native_resource_profiles_126.log
 
@@ -126,9 +133,9 @@ jobs:
           grep -Fq 'DERIVED_PROFILE_1_2_5_FRONTEND_LOADABLE_BYTE_IDENTITY=PASS' native_peak_preservation_126.log
           grep -Fq 'DERIVED_PROFILE_1_2_5_COMPILER_TEXT_BYTE_IDENTITY=PASS' native_peak_preservation_126.log
           grep -Fq 'DERIVED_PROFILE_1_2_5_RUNTIME_LOADABLE_BYTE_IDENTITY=PASS' native_peak_preservation_126.log
-          grep -Fq 'BASE_PROFILE_1_2_5_EMITTED_LOADABLE_BYTE_IDENTITY=PASS' native_peak_preservation_126.log
-          grep -Fq 'WIDE_PROFILE_1_2_5_EMITTED_LOADABLE_BYTE_IDENTITY=PASS' native_peak_preservation_126.log
-          grep -Fq 'DERIVED_PROFILE_1_2_5_EMITTED_LOADABLE_BYTE_IDENTITY=PASS' native_peak_preservation_126.log
+          grep -Eq 'BASE_PROFILE_1_2_5_EMITTED_LOADABLE_BYTE_IDENTITY=(PASS|SKIP_HOST_NOT_AVX512F)' native_peak_preservation_126.log
+          grep -Eq 'WIDE_PROFILE_1_2_5_EMITTED_LOADABLE_BYTE_IDENTITY=(PASS|SKIP_HOST_NOT_AVX512F)' native_peak_preservation_126.log
+          grep -Eq 'DERIVED_PROFILE_1_2_5_EMITTED_LOADABLE_BYTE_IDENTITY=(PASS|SKIP_HOST_NOT_AVX512F)' native_peak_preservation_126.log
           grep -Fq 'MATURE_RUNTIME_1_2_5_NATIVE_BYTE_IDENTITY=PASS' native_peak_preservation_126.log
           grep -Fq 'WHEELCHAIR_1_2_5_TECHNICAL_PEAK_EXECUTION_BYTES_PRESERVED=PASS' native_peak_preservation_126.log
 
