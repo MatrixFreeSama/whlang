@@ -19,6 +19,7 @@ python3 tools/generate_derived_native_backend.py
 python3 tools/generate_product_subtract_frontend.py
 python3 tools/generate_vector_reduction_residency.py
 python3 tools/generate_native_resource_profiles.py
+python3 tools/generate_multi_isa_topologyc.py
 
 as --64 "$BUILD/generated_derived/tensor_derived_runtime_template_x86_64.S" -o "$BUILD/tensor_derived_runtime_template.o"
 ld -nostdlib -static -z noexecstack -T runtime/tensor_runtime.ld \
@@ -44,9 +45,10 @@ python3 tools/generate_general_parallel_slot_offsets.py \
   "$BUILD/general_parallel_slot.elf" "$BUILD/general_parallel_slot_template.bin" \
   "$BUILD/general_parallel_slot_offsets.json"
 
-# Handwritten assembly compiler. Public physical capability classes are only
-# base / wide / derived. Their selection is compile-time structural proof.
-as --64 compiler/topologyc_x86_64.S -o "$BUILD/topologyc_core.o"
+# Handwritten assembly compiler. Public graph resource classes remain
+# base / wide / derived. 1.2.7 adds a second, orthogonal AOT dimension for the
+# physical vector datapath: native256 / split512x256 / native512.
+as --64 "$BUILD/topologyc_multi_isa_x86_64.S" -o "$BUILD/topologyc_core.o"
 as --64 "$BUILD/tensor_frontend_profile_base.S" -o "$BUILD/tensor_frontend_base.o"
 as --64 "$BUILD/tensor_frontend_profile_wide.S" -o "$BUILD/tensor_frontend_wide.o"
 as --64 compiler/general_frontend_x86_64.S -o "$BUILD/general_frontend.o"
@@ -66,7 +68,7 @@ ld -nostdlib -static -z noexecstack \
   "$BUILD/runtime_derived_blob.o" "$BUILD/general_runtime_blob.o" -o "$BUILD/topologyc-derived"
 
 # Historical 1.2.5 fabrics remain byte-preserved witnesses, never current
-# dispatch targets. The 1.2.6 topology-parallel image is the runtime authority.
+# dispatch targets. The topology-parallel image remains the runtime authority.
 as --64 runtime/causal_return_fabric_x86_64.S -o "$BUILD/causal_return_fabric.o"
 ld -nostdlib -static -z noexecstack "$BUILD/causal_return_fabric.o" -o "$BUILD/topology-fabric-125-witness"
 as --64 runtime/causal_return_parallel_x86_64.S -o "$BUILD/causal_return_parallel.o"
@@ -91,9 +93,13 @@ echo 'NATIVE_RESOURCE_PROFILE_WIDE=BUILT'
 echo 'NATIVE_RESOURCE_PROFILE_DERIVED=BUILT'
 echo 'NATIVE_RESOURCE_PROFILE_WORKLOAD_DISPATCH=0'
 echo 'NATIVE_RESOURCE_PROFILE_RUNTIME_SELECTOR=0'
+echo 'MULTI_ISA_TOPOLOGYC=BUILT'
+echo 'PHYSICAL_VECTOR_SHAPES=native256,split512x256,native512'
+echo 'PHYSICAL_VECTOR_PROFILE_WORKLOAD_DISPATCH=0'
+echo 'PHYSICAL_VECTOR_RUNTIME_PROFITABILITY_SELECTOR=0'
 echo 'GENERAL_PARALLEL_SLOT_ENGINE=BUILT'
 echo 'GENERAL_PARALLEL_SLOT_FOREIGN_RUNTIME_BACKEND=0'
-echo 'GENERAL_PARALLEL_FABRIC_1_2_6=BUILT'
+echo 'GENERAL_PARALLEL_FABRIC_1_2_7=BUILT'
 echo 'GENERAL_PARALLEL_FABRIC_AUTHORITY=topology-parallel'
 echo 'GENERAL_PARALLEL_GLOBAL_READY_QUEUE=0'
 echo 'GENERAL_PARALLEL_ROOT_SCHEDULER=0'
