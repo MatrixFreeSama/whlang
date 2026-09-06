@@ -5,13 +5,10 @@ cd "$ROOT"
 [ -x build/topologyc ] || ./build.sh >/dev/null
 BASE125="$ROOT/../baseline125/worktree"
 
-# Protected mature handwritten sources are still byte-identical.
 echo 'e7b05d8c6f401b0d8b7caa6db4016ee39ca3100d6f781ff438375528f3dbd0d6  compiler/tensor_frontend_x86_64.S' | sha256sum -c -
 echo '2e83af25b6a6188c9ce24497d636206ca5978e59a92b619e6b722909ad2d4f80  compiler/topologyc_x86_64.S' | sha256sum -c -
 echo 'e9116041c673aec4dca58a43379ccb78d5ae3d6aa7e7ba76656da32b24cdfeb3  runtime/tensor_runtime_template_x86_64.S' | sha256sum -c -
 
-# Current routing must be structural only. Test fixture names may be specific;
-# compiler/analyzer/generator/wrappers may not know any workload family.
 if grep -Eini '\b(newton|stiffness|fem|cfd|poisson|kkt|fluid|solid|fsi|navier|elastic|electromagnetic|heat)\b' \
   surface/native_resource_profile.py tools/generate_native_resource_profiles.py \
   tools/generate_derived_native_backend.py wheelchairc.py whexc.py; then
@@ -59,7 +56,8 @@ print('NATIVE_RESOURCE_PROFILE_WORKLOAD_DISPATCH=0')
 print('NATIVE_RESOURCE_PROFILE_RUNTIME_SELECTOR=0')
 PY
 
-# WH/WHEX must reach the exact same canonical graph before native selection.
+# The sovereign compiler route is selected by the canonical .wh source contract.
+# Preserve that contract even for temporary canonical-core authority files.
 PYTHONPATH=surface python3 - <<'PY'
 from pathlib import Path
 import wh_structural,whex_surface
@@ -68,13 +66,11 @@ wx,_,_=whex_surface.load_surface(Path('../benchmarks/fluid_solid_coupling_124/fs
 a=wh_structural.canonical_core_bytes(wh)
 b=whex_surface.canonical_core_bytes(wx)
 assert a==b,(len(a),len(b),wh_structural.core_hash(wh),whex_surface.core_hash(wx))
-Path('/tmp/profile_shared.core').write_bytes(a)
+Path('/tmp/profile_shared.core.wh').write_bytes(a)
 print('WH_WHEX_WIDE_CANONICAL_BYTE_EQUIVALENCE=PASS')
 print('WH_WHEX_WIDE_CANONICAL_SHA256='+wh_structural.core_hash(wh))
 PY
 
-# Generic source filenames may alter ELF STT_FILE/.strtab metadata. Compare the
-# loadable compiler image, then compare actual generated programs from one core.
 [ -x "$BASE125/build/topologyc-sdep" ]
 objcopy -O binary build/topologyc-wide /tmp/topologyc_wide.loadable.bin
 objcopy -O binary "$BASE125/build/topologyc-sdep" /tmp/topologyc_sdep125.loadable.bin
@@ -82,8 +78,8 @@ sha256sum /tmp/topologyc_wide.loadable.bin /tmp/topologyc_sdep125.loadable.bin
 cmp /tmp/topologyc_wide.loadable.bin /tmp/topologyc_sdep125.loadable.bin
 echo 'WIDE_PROFILE_1_2_5_LOADABLE_BYTE_IDENTITY=PASS'
 
-"$BASE125/build/topologyc-sdep" /tmp/profile_shared.core -o build/profile_baseline125_direct
-build/topologyc-wide /tmp/profile_shared.core -o build/profile_direct_wide
+"$BASE125/build/topologyc-sdep" /tmp/profile_shared.core.wh -o build/profile_baseline125_direct
+build/topologyc-wide /tmp/profile_shared.core.wh -o build/profile_direct_wide
 cmp build/profile_baseline125_direct build/profile_direct_wide
 echo 'WIDE_PROFILE_SAME_CORE_NATIVE_BYTE_IDENTITY=PASS'
 

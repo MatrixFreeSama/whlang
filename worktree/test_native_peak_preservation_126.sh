@@ -9,9 +9,6 @@ for p in \
   [ -x "$p" ]
 done
 
-# Generic source/object filenames intentionally differ from historical names.
-# Compare only the loadable compiler image here; non-loaded STT_FILE/.strtab
-# metadata is allowed to record the new generic filenames.
 compare_loadable() {
   new=$1 old=$2 name=$3
   objcopy -O binary "$new" "/tmp/${name}.new.bin"
@@ -26,8 +23,8 @@ cmp build/tensor_runtime_template "$BASE125/build/tensor_runtime_template"
 cmp build/general_runtime_template "$BASE125/build/general_runtime_template"
 echo 'MATURE_RUNTIME_1_2_5_NATIVE_BYTE_IDENTITY=PASS'
 
-# Generate one canonical core per structural capability and require old/new
-# compiler names to emit exactly the same user ELF bytes.
+# Canonical-core authority files retain the .wh suffix required by the sovereign
+# compiler entry contract. Their contents remain canonical JSON bytes.
 PYTHONPATH=surface python3 - <<'PY'
 from pathlib import Path
 import whex_surface
@@ -38,7 +35,7 @@ cases={
 }
 for name,path in cases.items():
     data,_,_=whex_surface.load_surface(path)
-    Path(f'/tmp/peak_{name}.core').write_bytes(whex_surface.canonical_core_bytes(data))
+    Path(f'/tmp/peak_{name}.core.wh').write_bytes(whex_surface.canonical_core_bytes(data))
 PY
 
 compare_emit() {
@@ -48,8 +45,8 @@ compare_emit() {
   cmp "build/${name}.new.elf" "build/${name}.old.elf"
   echo "${name}_EMITTED_NATIVE_BYTE_IDENTITY=PASS"
 }
-compare_emit build/topologyc "$BASE125/build/topologyc" /tmp/peak_base.core BASE_PROFILE_1_2_5
-compare_emit build/topologyc-wide "$BASE125/build/topologyc-sdep" /tmp/peak_wide.core WIDE_PROFILE_1_2_5
-compare_emit build/topologyc-derived "$BASE125/build/topologyc-rankn" /tmp/peak_derived.core DERIVED_PROFILE_1_2_5
+compare_emit build/topologyc "$BASE125/build/topologyc" /tmp/peak_base.core.wh BASE_PROFILE_1_2_5
+compare_emit build/topologyc-wide "$BASE125/build/topologyc-sdep" /tmp/peak_wide.core.wh WIDE_PROFILE_1_2_5
+compare_emit build/topologyc-derived "$BASE125/build/topologyc-rankn" /tmp/peak_derived.core.wh DERIVED_PROFILE_1_2_5
 
 echo 'WHEELCHAIR_1_2_5_TECHNICAL_PEAK_BYTES_PRESERVED=PASS'
