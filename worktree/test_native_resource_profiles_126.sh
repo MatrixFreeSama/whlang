@@ -59,9 +59,30 @@ print('NATIVE_RESOURCE_PROFILE_WORKLOAD_DISPATCH=0')
 print('NATIVE_RESOURCE_PROFILE_RUNTIME_SELECTOR=0')
 PY
 
+# WH/WHEX must reach the exact same canonical graph before any native capability
+# selection. Then the generic wide compiler must accept that graph directly.
+PYTHONPATH=surface python3 - <<'PY'
+from pathlib import Path
+import wh_structural,whex_surface
+wh,_,_=wh_structural.load_surface(Path('../benchmarks/fluid_solid_coupling_124/fsi_coupled.wh'))
+wx,_,_=whex_surface.load_surface(Path('../benchmarks/fluid_solid_coupling_124/fsi_coupled.whex'))
+a=wh_structural.canonical_core_bytes(wh)
+b=whex_surface.canonical_core_bytes(wx)
+assert a==b,(len(a),len(b),wh_structural.core_hash(wh),whex_surface.core_hash(wx))
+Path('/tmp/profile_wh.core').write_bytes(a)
+Path('/tmp/profile_whex.core').write_bytes(b)
+print('WH_WHEX_WIDE_CANONICAL_BYTE_EQUIVALENCE=PASS')
+print('WH_WHEX_WIDE_CANONICAL_SHA256='+wh_structural.core_hash(wh))
+PY
+build/topologyc-wide /tmp/profile_wh.core -o build/profile_direct_wh
+build/topologyc-wide /tmp/profile_whex.core -o build/profile_direct_whex
+cmp build/profile_direct_wh build/profile_direct_whex
+echo 'WH_WHEX_WIDE_DIRECT_NATIVE_BYTE_EQUIVALENCE=PASS'
+
 ./wheelchairc ../benchmarks/fluid_solid_coupling_124/fsi_coupled.wh -o build/profile_wh --executors 1 --semantic-plan /tmp/profile_wh.plan.json >/tmp/profile_wh.json
 ./whexc ../benchmarks/fluid_solid_coupling_124/fsi_coupled.whex -o build/profile_whex --executors 1 --semantic-plan /tmp/profile_whex.plan.json >/tmp/profile_whex.json
 cmp build/profile_wh build/profile_whex
+cmp build/profile_wh build/profile_direct_wh
 python3 - <<'PY'
 import json
 w=json.load(open('/tmp/profile_wh.plan.json'))['native_resource_profile']
