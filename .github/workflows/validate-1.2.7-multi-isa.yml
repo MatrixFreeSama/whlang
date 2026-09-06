@@ -1,7 +1,7 @@
 name: Validate Wheelchair 1.2.7 Multi ISA Physicalization
 on:
   push:
-    branches: [build-1.2.7-multi-isa-physicalization]
+    branches: [build-1.2.7-multi-isa-physicalization, release-1.2.7-integration]
   workflow_dispatch:
 permissions:
   contents: read
