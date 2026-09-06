@@ -45,7 +45,7 @@ derived256_product_va=$(nm -n "$BUILD/tensor_derived_runtime_native256_template"
 [ -n "$derived256_product_va" ]
 printf '.equ RUNTIME_RANK_N_PRODUCT_OFF, 0x%x\n' $((derived256_product_va-0x400000)) >> "$BUILD/runtime_derived_native256_offsets.inc"
 
-python3 tools/generate_native256_frontends.py
+python3 tools/run_native256_frontend_generator.py
 
 as --64 runtime/general_runtime_template_x86_64.S -o "$BUILD/general_runtime_template.o"
 ld -nostdlib -static -z noexecstack -T runtime/general_runtime.ld \
