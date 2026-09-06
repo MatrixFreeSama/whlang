@@ -30,6 +30,17 @@ ld -nostdlib -static -z noexecstack -T runtime/general_runtime.ld \
   "$BUILD/general_runtime_template.o" -o "$BUILD/general_runtime_template"
 ./tools/generate_general_runtime_offsets.sh "$BUILD/general_runtime_template" compiler/general_runtime_offsets.inc
 
+# Generic binding-level causal program_slot engine. It is built once with the
+# compiler; user program compilation never invokes as/ld/objcopy for this path.
+as --64 runtime/general_parallel_slot_x86_64.S -o "$BUILD/general_parallel_slot.o"
+ld -nostdlib -static -z noexecstack -T runtime/general_parallel_slot.ld \
+  "$BUILD/general_parallel_slot.o" -o "$BUILD/general_parallel_slot.elf"
+objcopy -O binary --only-section=.text \
+  "$BUILD/general_parallel_slot.elf" "$BUILD/general_parallel_slot_template.bin"
+python3 tools/generate_general_parallel_slot_offsets.py \
+  "$BUILD/general_parallel_slot.elf" "$BUILD/general_parallel_slot_template.bin" \
+  "$BUILD/general_parallel_slot_offsets.json"
+
 # Handwritten assembly compiler: general sovereign lane + topology HPC lane.
 as --64 compiler/topologyc_x86_64.S -o "$BUILD/topologyc_core.o"
 as --64 "$BUILD/tensor_frontend_shared_base_125.S" -o "$BUILD/tensor_frontend.o"
@@ -64,7 +75,7 @@ as --64 runtime/schedulerless_causal_x86_64.S -o "$BUILD/schedulerless_causal.o"
 ld -nostdlib -static -z noexecstack "$BUILD/schedulerless_causal.o" -o "$BUILD/topology-fabric-schedulerless"
 cp "$BUILD/topology-fabric-schedulerless" "$BUILD/topology-parallel"
 
-for f in "$BUILD/topologyc" "$BUILD/topologyc-sdep" "$BUILD/topologyc-rankn" "$BUILD/tensor_runtime_template" "$BUILD/tensor_rankn_runtime_template" "$BUILD/general_runtime_template" "$BUILD/topology-fabric" "$BUILD/topology-fabric-run" "$BUILD/topology-fabric-schedulerless" "$BUILD/topology-parallel"; do
+for f in "$BUILD/topologyc" "$BUILD/topologyc-sdep" "$BUILD/topologyc-rankn" "$BUILD/tensor_runtime_template" "$BUILD/tensor_rankn_runtime_template" "$BUILD/general_runtime_template" "$BUILD/general_parallel_slot.elf" "$BUILD/topology-fabric" "$BUILD/topology-fabric-run" "$BUILD/topology-fabric-schedulerless" "$BUILD/topology-parallel"; do
   readelf -d "$f" 2>&1 | grep -q 'There is no dynamic section'
 done
 cmp "$BUILD/topology-fabric-schedulerless" "$BUILD/topology-parallel"
@@ -72,6 +83,8 @@ cmp "$BUILD/topology-fabric-schedulerless" "$BUILD/topology-parallel"
 echo 'GENERIC_PRODUCT_SUBTRACT_CONTRACTION=BUILT'
 echo 'GENERIC_VECTOR_REDUCTION_RESIDENCY=BUILT'
 echo 'SHARED_DEPENDENCY_EPISODE_1_2_5=BUILT'
+echo 'GENERAL_PARALLEL_SLOT_ENGINE=BUILT'
+echo 'GENERAL_PARALLEL_SLOT_FOREIGN_RUNTIME_BACKEND=0'
 echo 'SCHEDULERLESS_CAUSAL_RUNTIME_1_2_6=BUILT'
 echo 'SCHEDULERLESS_CAUSAL_GLOBAL_READY_QUEUE=0'
 echo 'SCHEDULERLESS_CAUSAL_ROOT_SCHEDULER=0'

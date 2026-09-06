@@ -7,6 +7,7 @@ import wh_surface
 import wh_structural
 import shared_dependency_episode as sde
 import general_parallel_plan as gpp
+import general_parallel_native as gpn
 
 
 def _compile_native(core_bytes: bytes, output: Path, executors: int, *, rank_n: bool=False, episode: dict | None=None) -> tuple[int,str,str]:
@@ -22,6 +23,20 @@ def _compile_native(core_bytes: bytes, output: Path, executors: int, *, rank_n: 
         if executors!=1: cmd += ['--executors',str(executors)]
         p=subprocess.run(cmd,cwd=ROOT,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
         return p.returncode,p.stdout,p.stderr
+
+
+def _compile_general_parallel(core_bytes: bytes, data: dict, output: Path, executors: int):
+    """Keep topologyc as native lowerer; replace only its single-slot layout."""
+    with tempfile.TemporaryDirectory(prefix='wheelchair_general_parallel_') as td:
+        scalar=Path(td)/'serial-general.elf'
+        rc,out,err=_compile_native(core_bytes,scalar,1)
+        if rc:
+            return rc,out,err,None
+        try:
+            native=gpn.link(scalar,output,data,executors,root=ROOT)
+        except gpn.GeneralParallelNativeError as exc:
+            return 65,'',f'Wheelchair general-parallel native rejection: {exc}\n',None
+        return 0,out,err,native
 
 
 def main():
@@ -72,11 +87,8 @@ def main():
     data, parser = wh_surface.compile_surface(text,a.source)
     static_data, static_lowering = wh_surface.lower_static_general_constructs(data)
     lowered_data, gtr = wh_surface.recover_topology_program(static_data)
-    # General parallel semantics are derived before native lane selection. No
-    # source-order edge is allowed to appear merely because the direct-general
-    # code emitter remains a separate physical specialization.
     parallel=gpp.plan(lowered_data,a.executors,physical_lane=(
-        'recovered_topology_native' if gtr.get('active') else 'direct_general_native'
+        'recovered_topology_native' if gtr.get('active') else 'general_causal_native'
     ))
     native_data = lowered_data
     if not gtr.get('active'):
@@ -84,9 +96,23 @@ def main():
         native_data['_compiler_lane'] = 'wheelchair.general/1'
     episode=sde.analyze(native_data) if gtr.get('active') else None
     blob=wh_surface.canonical_core_bytes(native_data)
-    rc,out,err=_compile_native(blob,a.output,a.executors,episode=episode)
+
+    native_parallel=None
+    if gtr.get('active'):
+        rc,out,err=_compile_native(blob,a.output,a.executors,episode=episode)
+        effective=a.executors
+    elif a.executors==1:
+        # Preserve the mature direct single-slot peak exactly when width one is
+        # explicitly requested. This is a generic AOT width specialization, not
+        # a runtime selector or workload-specific fallback.
+        rc,out,err=_compile_native(blob,a.output,1)
+        effective=1
+    else:
+        rc,out,err,native_parallel=_compile_general_parallel(blob,native_data,a.output,a.executors)
+        effective=a.executors if rc==0 else 0
     if rc:
         sys.stderr.write(err or out); return rc
+
     semantic={
         'semantic_format':'wheelchair.wh.general/1',
         'structural_recovery':gtr,
@@ -97,15 +123,16 @@ def main():
             'root_scheduler':0,
             'runtime_cost_selector':0,
             'hidden_serial_fallback':0,
+            'intermediate_global_barriers':0,
+            'terminal_join_only':bool(native_parallel),
         },
-        # Direct-general native code is retained as a technical peak while the
-        # universal causal plan is authoritative for inter-binding independence.
-        # We never claim the native program_slot is parallel when it is not.
         'native_physicalization':{
-            'lane':'recovered_topology_native' if gtr.get('active') else 'direct_general_native',
-            'executor_materialization':a.executors if gtr.get('active') else 1,
+            'lane':'recovered_topology_native' if gtr.get('active') else ('direct_general_native_q1' if a.executors==1 else 'general_causal_native'),
+            'executor_materialization':effective,
             'parallel_fabric_authority':'topology-parallel',
-            'peak_preservation':'specialized_native_path_may_be_narrower_only_by_proved_semantic_equivalence',
+            'native_fragments':native_parallel,
+            'machine_code_lowerer':'handwritten_topologyc_general_frontend',
+            'foreign_runtime_backend':False,
         },
     }
     if episode is not None:
@@ -122,9 +149,10 @@ def main():
         'static_general_lowering':static_lowering,
         'general_topology_recovery':gtr,
         'general_parallel_fabric':parallel,
+        'general_parallel_native':native_parallel,
         'shared_dependency_episode':episode,
         'requested_executors':a.executors,
-        'effective_executors':a.executors if gtr.get('active') else 1,
+        'effective_executors':effective,
         'parallel_fabric_executors':parallel.get('materialized_slots',0),
         'repair_count':len(parser.repairs),
         'repairs':[r.as_dict() for r in parser.repairs]

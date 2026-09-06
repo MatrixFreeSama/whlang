@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any
 
 FORMAT="wheelchair.schedulerless_causal/1"
-MAX_NODES=64
-MAX_EDGES=256
+MAX_NODES=96
+MAX_EDGES=1024
 MAX_SLOTS=16
 
 class SchedulerlessCausalError(ValueError): pass
