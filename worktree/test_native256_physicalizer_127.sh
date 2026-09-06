@@ -45,8 +45,38 @@ print('NATIVE256_AOT_MATRIX_SELECTION=PASS')
 PY
 
 readelf -d "$OUT" 2>&1 | grep -Fq 'There is no dynamic section'
-objdump -d "$OUT" > /tmp/wheelchair127-native256.dis
-# Generated executable must contain real AVX/YMM work and no AVX-512 state.
+
+# The generated minimal ELF intentionally has no section table. Extract every
+# executable PT_LOAD directly from the ELF program headers, then disassemble the
+# raw RX bytes. This audits the bytes the CPU can execute rather than relying on
+# debug/section metadata that Wheelchair deliberately omits.
+python3 - "$OUT" <<'PY'
+import struct,sys
+from pathlib import Path
+b=Path(sys.argv[1]).read_bytes()
+assert b[:4]==b'\x7fELF' and b[4]==2 and b[5]==1
+phoff=struct.unpack_from('<Q',b,32)[0]
+entsz=struct.unpack_from('<H',b,54)[0]
+num=struct.unpack_from('<H',b,56)[0]
+out=bytearray()
+seen=0
+for i in range(num):
+    p=phoff+i*entsz
+    p_type,p_flags=struct.unpack_from('<II',b,p)
+    p_offset=struct.unpack_from('<Q',b,p+8)[0]
+    p_filesz=struct.unpack_from('<Q',b,p+32)[0]
+    if p_type==1 and (p_flags & 1) and p_filesz:
+        if out:
+            out.extend(b'\x90'*16)
+        out.extend(b[p_offset:p_offset+p_filesz])
+        seen+=1
+assert seen>=2, seen
+Path('/tmp/wheelchair127-native256-rx.bin').write_bytes(out)
+print(f'NATIVE256_EXECUTABLE_PT_LOADS={seen}')
+PY
+objdump -D -b binary -m i386:x86-64 /tmp/wheelchair127-native256-rx.bin \
+  > /tmp/wheelchair127-native256.dis
+# Executable bytes must contain real AVX/YMM work and no AVX-512 state.
 grep -Eq '%ymm[0-9]+' /tmp/wheelchair127-native256.dis
 if grep -Eq '%zmm[0-9]+|%k[1-7]([^0-9]|$)' /tmp/wheelchair127-native256.dis; then
   echo 'native256 generated ELF leaked AVX-512 register state' >&2
@@ -91,8 +121,8 @@ assert b['runtime_selector']==0 and b['runtime_profitability_selector']==0, b
 print('NATIVE_AUTO_PHYSICAL_SHAPE_EQ_NATIVE_AUDIT=PASS')
 PY
 
-# Current hosted Zen3 witnesses the fully automatic path as well. On another
-# qualified host the generic equality check above remains authoritative.
+# On a native256 host this additionally proves the fully automatic path. Other
+# qualified hosts are covered by the generic audit-equality assertion above.
 shape=$(python3 - <<'PY'
 import json
 print(json.load(open('/tmp/wheelchair127-auto-plan.json'))['native_physical_backend']['physical_shape'])
