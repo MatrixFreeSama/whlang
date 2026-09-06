@@ -27,7 +27,9 @@ jobs:
         working-directory: worktree
         run: |
           set -euxo pipefail
-          ./test_general_parallel_native_126.sh 2>&1 | tee general_parallel_native_126.log
+          sh ./test_general_parallel_native_126.sh 2>&1 | tee general_parallel_native_126.log
+          grep -Fq 'GENERAL_PARALLEL_NATIVE_Q1_Q2_Q4_EQUIVALENCE=PASS' general_parallel_native_126.log
+          grep -Fq 'GENERAL_PARALLEL_NATIVE_ITERATE_RELOCATION=PASS' general_parallel_native_126.log
           grep -Fq 'GENERAL_PARALLEL_NATIVE_FRAGMENTATION=PASS' general_parallel_native_126.log
           grep -Fq 'GENERAL_PARALLEL_NATIVE_SOURCE_ORDER_SERIALIZATION=0' general_parallel_native_126.log
           grep -Fq 'GENERAL_PARALLEL_NATIVE_GLOBAL_READY_QUEUE=0' general_parallel_native_126.log
@@ -39,8 +41,8 @@ jobs:
         working-directory: worktree
         run: |
           set -euxo pipefail
-          ./test_general_parallel_126.sh 2>&1 | tee general_parallel_semantic_126.log
-          ./test_schedulerless_causal_126.sh 2>&1 | tee schedulerless_126.log
+          sh ./test_general_parallel_126.sh 2>&1 | tee general_parallel_semantic_126.log
+          sh ./test_schedulerless_causal_126.sh 2>&1 | tee schedulerless_126.log
           grep -Fq 'WHEELCHAIR_GENERAL_PARALLEL_1_2_6=PASS' general_parallel_semantic_126.log
           grep -Fq 'WHEELCHAIR_SCHEDULERLESS_CAUSAL_1_2_6=PASS' schedulerless_126.log
 
@@ -48,11 +50,11 @@ jobs:
         working-directory: worktree
         run: |
           set -euxo pipefail
-          ./test_shared_dependency_episode_125.sh 2>&1 | tee peak_shared_125.log
-          ./test_generic_native_125.sh 2>&1 | tee peak_generic_125.log
-          ./test_rank_n_122.sh 2>&1 | tee peak_rankn_122.log
-          ./test_true_parallel_123.sh 2>&1 | tee peak_tp_123.log
-          ./test_sparse_causal_expansion_123.sh 2>&1 | tee peak_sce_123.log
+          sh ./test_shared_dependency_episode_125.sh 2>&1 | tee peak_shared_125.log
+          sh ./test_generic_native_125.sh 2>&1 | tee peak_generic_125.log
+          sh ./test_rank_n_122.sh 2>&1 | tee peak_rankn_122.log
+          sh ./test_true_parallel_123.sh 2>&1 | tee peak_tp_123.log
+          sh ./test_sparse_causal_expansion_123.sh 2>&1 | tee peak_sce_123.log
           grep -Fq 'WHEELCHAIR_SHARED_DEPENDENCY_EPISODE_1_2_5=PASS' peak_shared_125.log
           grep -Fq 'WHEELCHAIR_1_2_4_GENERIC_NATIVE_PEAKS_ON_1_2_5=PASS' peak_generic_125.log
           grep -Fq 'WHEELCHAIR_RANK_N_1_2_2=PASS' peak_rankn_122.log
