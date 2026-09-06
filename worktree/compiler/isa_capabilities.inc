@@ -23,12 +23,17 @@
 .equ ISA_CAP_LZCNT,                (1 << 19)
 .equ ISA_CAP_CROSS_VECTOR_STATE,   (1 << 20)
 .equ ISA_CAP_REDUCTION_TREE,       (1 << 21)
-.equ ISA_CAP_MASK_TO_I64_NATIVE,     (1 << 22)
-.equ ISA_CAP_MASK_TO_I64_SYNTH,      (1 << 23)
-.equ ISA_CAP_I64_FP_CONVERT_SYNTH,      (1 << 24)
-.equ ISA_CAP_NONNEG_F64_U64_TRUNC_SYNTH,   (1 << 25)
+.equ ISA_CAP_MASK_TO_I64_NATIVE,   (1 << 22)
+.equ ISA_CAP_MASK_TO_I64_SYNTH,    (1 << 23)
+.equ ISA_CAP_I64_FP_CONVERT_SYNTH, (1 << 24)
+.equ ISA_CAP_NONNEG_F64_U64_TRUNC_SYNTH, (1 << 25)
 
-# Minimum physical abilities required by the current 8-lane tensor realizer.
+# Complete four-lane AVX2 physical realization. Predicate/tail/conversion/minimum
+# are semantic capabilities synthesized by native vector relations when the ISA
+# has no dedicated mask-register spelling. None of these bits means scalar fallback.
+.equ ISA_CAP_TENSOR256_BASE, (ISA_CAP_VEC256_FP | ISA_CAP_VEC256_INT | ISA_CAP_PREDICATE | ISA_CAP_MASKED_TAIL | ISA_CAP_SCALAR_BROADCAST | ISA_CAP_FMA | ISA_CAP_I64_MIN | ISA_CAP_I64_MUL_SYNTH | ISA_CAP_I64_FP_CONVERT_SYNTH | ISA_CAP_NONNEG_F64_U64_TRUNC_SYNTH | ISA_CAP_CROSS_VECTOR_STATE | ISA_CAP_REDUCTION_TREE)
+
+# Minimum physical abilities required by the mature eight-lane tensor realizer.
 # DQ and VL are intentionally absent: DQ-only operations are demanded lazily,
 # and VL is not semantically required by a 512-bit episode.
 .equ ISA_CAP_TENSOR512_BASE, (ISA_CAP_VEC512 | ISA_CAP_PREDICATE | ISA_CAP_MASKED_TAIL | ISA_CAP_SCALAR_BROADCAST | ISA_CAP_WIDE_REGFILE | ISA_CAP_CROSS_VECTOR_STATE | ISA_CAP_REDUCTION_TREE)
