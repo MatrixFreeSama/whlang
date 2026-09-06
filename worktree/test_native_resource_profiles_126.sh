@@ -56,8 +56,6 @@ print('NATIVE_RESOURCE_PROFILE_WORKLOAD_DISPATCH=0')
 print('NATIVE_RESOURCE_PROFILE_RUNTIME_SELECTOR=0')
 PY
 
-# The sovereign compiler route is selected by the canonical .wh source contract.
-# Preserve that contract even for temporary canonical-core authority files.
 PYTHONPATH=surface python3 - <<'PY'
 from pathlib import Path
 import wh_structural,whex_surface
@@ -74,17 +72,18 @@ PY
 [ -x "$BASE125/build/topologyc-sdep" ]
 objcopy -O binary build/topologyc-wide /tmp/topologyc_wide.loadable.bin
 objcopy -O binary "$BASE125/build/topologyc-sdep" /tmp/topologyc_sdep125.loadable.bin
-sha256sum /tmp/topologyc_wide.loadable.bin /tmp/topologyc_sdep125.loadable.bin
 cmp /tmp/topologyc_wide.loadable.bin /tmp/topologyc_sdep125.loadable.bin
 echo 'WIDE_PROFILE_1_2_5_LOADABLE_BYTE_IDENTITY=PASS'
 
-"$BASE125/build/topologyc-sdep" /tmp/profile_shared.core.wh -o build/profile_baseline125_direct
-build/topologyc-wide /tmp/profile_shared.core.wh -o build/profile_direct_wide
+# AOT cross-target authority: host ISA must not decide whether we can compare the
+# AVX-512F target image.
+"$BASE125/build/topologyc-sdep" /tmp/profile_shared.core.wh -o build/profile_baseline125_direct --isa-limit avx512f
+build/topologyc-wide /tmp/profile_shared.core.wh -o build/profile_direct_wide --isa-limit avx512f
 cmp build/profile_baseline125_direct build/profile_direct_wide
 echo 'WIDE_PROFILE_SAME_CORE_NATIVE_BYTE_IDENTITY=PASS'
 
-./wheelchairc ../benchmarks/fluid_solid_coupling_124/fsi_coupled.wh -o build/profile_wh --executors 1 --semantic-plan /tmp/profile_wh.plan.json >/tmp/profile_wh.json
-./whexc ../benchmarks/fluid_solid_coupling_124/fsi_coupled.whex -o build/profile_whex --executors 1 --semantic-plan /tmp/profile_whex.plan.json >/tmp/profile_whex.json
+./wheelchairc ../benchmarks/fluid_solid_coupling_124/fsi_coupled.wh -o build/profile_wh --executors 1 --isa-limit avx512f --semantic-plan /tmp/profile_wh.plan.json >/tmp/profile_wh.json
+./whexc ../benchmarks/fluid_solid_coupling_124/fsi_coupled.whex -o build/profile_whex --executors 1 --isa-limit avx512f --semantic-plan /tmp/profile_whex.plan.json >/tmp/profile_whex.json
 cmp build/profile_wh build/profile_whex
 cmp build/profile_wh build/profile_direct_wide
 python3 - <<'PY'
@@ -95,10 +94,17 @@ assert w==x,(w,x)
 assert w['backend_class']=='wide',w
 print('WH_WHEX_NATIVE_RESOURCE_PROFILE_EQUIVALENCE=PASS')
 PY
-[ "$(build/profile_wh 10000000)" = 'checksum_bits=0x4130e896f42e1dd6' ]
 
 echo 'WH_WHEX_WIDE_NATIVE_BYTE_EQUIVALENCE=PASS'
-echo 'NATIVE_RESOURCE_PROFILE_NUMERIC_REFERENCE=PASS'
+
+if grep -qm1 -w avx512f /proc/cpuinfo; then
+  [ "$(build/profile_wh 10000000)" = 'checksum_bits=0x4130e896f42e1dd6' ]
+  echo 'HOST_AVX512_QUALIFIED=1'
+  echo 'NATIVE_RESOURCE_PROFILE_NUMERIC_REFERENCE=PASS'
+else
+  echo 'HOST_AVX512_QUALIFIED=0'
+  echo 'NATIVE_RESOURCE_PROFILE_NUMERIC_REFERENCE=SKIP_HOST_NOT_AVX512F'
+fi
 
 sh tools/disassemble_generated.sh build/profile_whex > /tmp/profile_wide.dis 2>&1
 python3 - <<'PY'

@@ -44,21 +44,26 @@ jobs:
           test -x baseline125/worktree/build/topologyc-sdep
           test -x baseline125/worktree/build/topologyc-rankn
 
-      - name: Self-prove 1.2.5 development authority
+      - name: Self-prove 1.2.5 AOT authority
         run: |
           set -euxo pipefail
           cd baseline125/worktree
           ./whexc ../benchmarks/fluid_solid_coupling_124/fsi_coupled.whex \
-            -o build/self125_whex --executors 1 --semantic-plan /tmp/self125_whex.plan.json \
-            > ../../baseline125_wrapper_selftest.log
+            -o build/self125_whex --executors 1 --isa-limit avx512f \
+            --semantic-plan /tmp/self125_whex.plan.json > ../../baseline125_wrapper_selftest.log
           ./wheelchairc ../benchmarks/fluid_solid_coupling_124/fsi_coupled.wh \
-            -o build/self125_wh --executors 1 --semantic-plan /tmp/self125_wh.plan.json \
-            > ../../baseline125_wh_wrapper_selftest.log
+            -o build/self125_wh --executors 1 --isa-limit avx512f \
+            --semantic-plan /tmp/self125_wh.plan.json > ../../baseline125_wh_wrapper_selftest.log
           cmp build/self125_whex build/self125_wh
-          test "$(build/self125_whex 10000000)" = 'checksum_bits=0x4130e896f42e1dd6'
-          sh ./test_shared_dependency_episode_125.sh > ../../baseline125_full_selftest.log 2>&1
-          grep -Fq 'WHEELCHAIR_SHARED_DEPENDENCY_EPISODE_1_2_5=PASS' ../../baseline125_full_selftest.log
-          echo 'BASELINE_1_2_5_DEVELOPMENT_AUTHORITY_SELFTEST=PASS'
+          echo 'BASELINE_1_2_5_AOT_AUTHORITY_SELFTEST=PASS'
+          if grep -qm1 -w avx512f /proc/cpuinfo; then
+            test "$(build/self125_whex 10000000)" = 'checksum_bits=0x4130e896f42e1dd6'
+            sh ./test_shared_dependency_episode_125.sh > ../../baseline125_full_selftest.log 2>&1
+            grep -Fq 'WHEELCHAIR_SHARED_DEPENDENCY_EPISODE_1_2_5=PASS' ../../baseline125_full_selftest.log
+            echo 'BASELINE_1_2_5_DYNAMIC_AUTHORITY=PASS'
+          else
+            echo 'BASELINE_1_2_5_DYNAMIC_AUTHORITY=SKIP_HOST_NOT_AVX512F' > ../../baseline125_full_selftest.log
+          fi
 
       - name: Prove general WH native Q1 Q2 Q4 materialization
         working-directory: worktree
