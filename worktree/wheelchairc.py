@@ -5,20 +5,27 @@ ROOT=Path(__file__).resolve().parent
 sys.path.insert(0,str(ROOT/'surface'))
 import wh_surface
 import wh_structural
-import shared_dependency_episode as sde
+import native_resource_profile as nrp
 import general_parallel_plan as gpp
 import general_parallel_native as gpn
 
 
-def _compile_native(core_bytes: bytes, output: Path, executors: int, *, rank_n: bool=False, episode: dict | None=None) -> tuple[int,str,str]:
+def _compiler_for_profile(profile: dict) -> Path:
+    cls=profile.get('backend_class','base')
+    table={
+        'base':ROOT/'build/topologyc',
+        'wide':ROOT/'build/topologyc-wide',
+        'derived':ROOT/'build/topologyc-derived',
+    }
+    if cls not in table:
+        raise wh_surface.SurfaceError(f"unknown native resource profile class {cls!r}")
+    return table[cls]
+
+
+def _compile_native(core_bytes: bytes, output: Path, executors: int, *, profile: dict) -> tuple[int,str,str]:
     with tempfile.TemporaryDirectory(prefix='wheelchair_surface_') as td:
         core=Path(td)/'program.core.wh'; core.write_bytes(core_bytes)
-        if rank_n:
-            compiler=ROOT/'build/topologyc-rankn'
-        elif episode and episode.get('recipe') == 'shared_dependency_episode_wide_125':
-            compiler=ROOT/'build/topologyc-sdep'
-        else:
-            compiler=ROOT/'build/topologyc'
+        compiler=_compiler_for_profile(profile)
         cmd=[str(compiler),str(core),'-o',str(output)]
         if executors!=1: cmd += ['--executors',str(executors)]
         p=subprocess.run(cmd,cwd=ROOT,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
@@ -26,10 +33,15 @@ def _compile_native(core_bytes: bytes, output: Path, executors: int, *, rank_n: 
 
 
 def _compile_general_parallel(core_bytes: bytes, data: dict, output: Path, executors: int):
-    """Keep topologyc as native lowerer; replace only its single-slot layout."""
+    """Keep handwritten topologyc as native lowerer; replace only slot layout."""
     with tempfile.TemporaryDirectory(prefix='wheelchair_general_parallel_') as td:
         scalar=Path(td)/'serial-general.elf'
-        rc,out,err=_compile_native(core_bytes,scalar,1)
+        profile=nrp.analyze(data)
+        if profile.get('backend_class')!='base':
+            # General scalar/control fragments have no tensor resource pressure.
+            # Any other class here means the structural/general boundary changed.
+            return 65,'','Wheelchair general-parallel native rejection: non-base general profile\n',None
+        rc,out,err=_compile_native(core_bytes,scalar,1,profile=profile)
         if rc:
             return rc,out,err,None
         try:
@@ -44,7 +56,7 @@ def main():
     ap.add_argument('source',type=Path); ap.add_argument('-o','--output',type=Path,required=True)
     ap.add_argument('--executors',type=int,choices=[1,2,4],default=1)
     ap.add_argument('--semantic-plan',type=Path,default=None,
-                    help='write structural/general semantics plus the universal schedulerless causal plan')
+                    help='write structural/general semantics plus universal causal physicalization')
     a=ap.parse_args()
 
     if a.source.suffix.lower() != '.wh':
@@ -53,16 +65,14 @@ def main():
     structural=wh_structural.looks_structural(text)
 
     if structural:
-        # Lane identity is decided from source grammar before compilation.
-        # Failure is terminal: never retry a scalar/general implementation.
         data, parser = wh_structural.compile_surface(text,a.source)
         plan=wh_structural.semantic_plan(parser)
-        parallel=gpp.plan(data,a.executors,semantic=plan,physical_lane='specialized_topology_native')
+        parallel=gpp.plan(data,a.executors,semantic=plan,physical_lane='structural_topology_native')
+        profile=nrp.analyze(data)
         plan['general_parallel_fabric']=parallel
+        plan['native_resource_profile']=profile
         blob=wh_structural.canonical_core_bytes(data)
-        episode=sde.analyze(data)
-        plan['shared_dependency_episode']=episode
-        rc,out,err=_compile_native(blob,a.output,a.executors,rank_n=("rank_n_product" in data),episode=episode)
+        rc,out,err=_compile_native(blob,a.output,a.executors,profile=profile)
         if rc:
             sys.stderr.write(err or out); return rc
         if a.semantic_plan is not None:
@@ -75,10 +85,11 @@ def main():
             'native_core_sha256':wh_structural.core_hash(data),
             'general_topology_recovery':{'active':False,'reason':'structural_lane_selected_before_native_compilation'},
             'general_parallel_fabric':parallel,
+            'native_resource_profile':profile,
             'semantic_sha256':plan.get('semantic_sha256'),
-            'shared_dependency_episode':episode,
             'requested_executors':a.executors,
             'effective_executors':a.executors,
+            'parallel_fabric_authority':'topology-parallel',
             'repair_count':len(parser.repairs),
             'repairs':[r.as_dict() for r in parser.repairs]
         },ensure_ascii=False,indent=2))
@@ -87,25 +98,24 @@ def main():
     data, parser = wh_surface.compile_surface(text,a.source)
     static_data, static_lowering = wh_surface.lower_static_general_constructs(data)
     lowered_data, gtr = wh_surface.recover_topology_program(static_data)
-    parallel=gpp.plan(lowered_data,a.executors,physical_lane=(
-        'recovered_topology_native' if gtr.get('active') else 'general_causal_native'
-    ))
     native_data = lowered_data
     if not gtr.get('active'):
         native_data = dict(lowered_data)
         native_data['_compiler_lane'] = 'wheelchair.general/1'
-    episode=sde.analyze(native_data) if gtr.get('active') else None
+    profile=nrp.analyze(native_data)
+    parallel=gpp.plan(native_data,a.executors,physical_lane=(
+        'recovered_topology_native' if gtr.get('active') else 'general_causal_native'
+    ))
     blob=wh_surface.canonical_core_bytes(native_data)
 
     native_parallel=None
     if gtr.get('active'):
-        rc,out,err=_compile_native(blob,a.output,a.executors,episode=episode)
+        rc,out,err=_compile_native(blob,a.output,a.executors,profile=profile)
         effective=a.executors
     elif a.executors==1:
-        # Preserve the mature direct single-slot peak exactly when width one is
-        # explicitly requested. This is a generic AOT width specialization, not
-        # a runtime selector or workload-specific fallback.
-        rc,out,err=_compile_native(blob,a.output,1)
+        # Explicit width-one AOT specialization preserves the mature direct
+        # native peak. It is not a failure path and is never selected at runtime.
+        rc,out,err=_compile_native(blob,a.output,1,profile=profile)
         effective=1
     else:
         rc,out,err,native_parallel=_compile_general_parallel(blob,native_data,a.output,a.executors)
@@ -117,6 +127,7 @@ def main():
         'semantic_format':'wheelchair.wh.general/1',
         'structural_recovery':gtr,
         'general_parallel_fabric':parallel,
+        'native_resource_profile':profile,
         'serial_introduction_audit':{
             'synthetic_order_edges':0,
             'global_ready_queue':0,
@@ -135,8 +146,6 @@ def main():
             'foreign_runtime_backend':False,
         },
     }
-    if episode is not None:
-        semantic['shared_dependency_episode']=episode
     if a.semantic_plan is not None:
         a.semantic_plan.parent.mkdir(parents=True,exist_ok=True)
         a.semantic_plan.write_text(json.dumps(semantic,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
@@ -150,10 +159,11 @@ def main():
         'general_topology_recovery':gtr,
         'general_parallel_fabric':parallel,
         'general_parallel_native':native_parallel,
-        'shared_dependency_episode':episode,
+        'native_resource_profile':profile,
         'requested_executors':a.executors,
         'effective_executors':effective,
         'parallel_fabric_executors':parallel.get('materialized_slots',0),
+        'parallel_fabric_authority':'topology-parallel',
         'repair_count':len(parser.repairs),
         'repairs':[r.as_dict() for r in parser.repairs]
     },ensure_ascii=False,indent=2))

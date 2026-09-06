@@ -1,21 +1,17 @@
 #!/usr/bin/env python3
-"""Compile-time shared-dependency episode pressure analysis.
+"""Generic compile-time native resource-profile analysis.
 
-This module is intentionally workload-name blind.  It inspects only the canonical
-wheelchair.tensor/1 graph.  A terminal reduction is recursively expanded through
-pure map bindings and its distinct (binding, structural-coordinate) loads are
-counted.  The count is a conservative persistent-CSE pressure estimate for the
-mature Rank-1 AVX-512 realizer.
-
-No runtime metadata is emitted from this plan.  It only chooses between proved AOT
-physical recipes before native compilation.
+The analyzer is intentionally blind to workload names, source paths and benchmark
+families. It inspects only the canonical tensor graph and returns physical resource
+requirements. The result may select a build-time native capability class, never a
+runtime implementation, workload recipe, or profitability fallback.
 """
 from __future__ import annotations
 import copy, hashlib, json
 from typing import Any
 
-LEGACY_PERSISTENT_SLOTS = 10
-WIDE_PERSISTENT_SLOTS = 14
+BASE_PERSISTENT_SLOTS = 10
+EXPANDED_PERSISTENT_SLOTS = 14
 
 
 def _canon(x: Any) -> str:
@@ -68,8 +64,7 @@ def analyze(data: dict[str, Any]) -> dict[str, Any]:
                     if len(names) == len(indices) and all(isinstance(n, str) for n in names):
                         recursion_guard.add(key)
                         expanded.add(key)
-                        mapping = dict(zip(names, indices))
-                        walk(_subst_axes(binding.get("expr"), mapping), depth + 1)
+                        walk(_subst_axes(binding.get("expr"), dict(zip(names, indices))), depth + 1)
                         recursion_guard.remove(key)
             for idx in indices:
                 walk(idx, depth + 1)
@@ -81,47 +76,54 @@ def analyze(data: dict[str, Any]) -> dict[str, Any]:
         walk(terminal.get("expr"), 0)
 
     pressure = len(distinct_loads)
-    rank_n = "rank_n_product" in data
-    eligible = bool(terminals) and not rank_n and pressure > LEGACY_PERSISTENT_SLOTS
-    fits_wide = pressure <= WIDE_PERSISTENT_SLOTS
-    recipe = "legacy_1_2_4"
-    reason = "pressure_within_legacy_capacity"
-    if eligible and fits_wide:
-        recipe = "shared_dependency_episode_wide_125"
-        reason = "structural_persistent_pressure_exceeds_legacy_capacity"
-    elif eligible:
-        recipe = "legacy_vector_recompute_125"
-        reason = "pressure_exceeds_wide_capacity_use_proved_vector_recompute_recipe"
-    elif rank_n and pressure > LEGACY_PERSISTENT_SLOTS:
-        recipe = "rank_n_proved_vector_recipe"
-        reason = "rank_n_keeps_existing_proved_vector_physicalization"
+    derived_cartesian = "rank_n_product" in data
+    expanded_registers = bool(terminals) and not derived_cartesian and (
+        BASE_PERSISTENT_SLOTS < pressure <= EXPANDED_PERSISTENT_SLOTS
+    )
+    recompute = bool(terminals) and not derived_cartesian and pressure > EXPANDED_PERSISTENT_SLOTS
+
+    if derived_cartesian:
+        backend_class = "derived"
+        lowering_policy = "proved_cartesian_native"
+    elif expanded_registers:
+        backend_class = "wide"
+        lowering_policy = "expanded_persistent_registers"
+    elif recompute:
+        backend_class = "base"
+        lowering_policy = "proved_vector_recompute"
+    else:
+        backend_class = "base"
+        lowering_policy = "base_persistent_registers"
 
     signature_payload = {
         "pressure": pressure,
         "terminal_reductions": len(terminals),
-        "rank_n": rank_n,
-        "recipe": recipe,
+        "derived_cartesian": derived_cartesian,
+        "backend_class": backend_class,
+        "lowering_policy": lowering_policy,
         "loads": sorted((name, list(coords)) for name, coords in distinct_loads),
     }
-    signature = hashlib.sha256(_canon(signature_payload).encode("utf-8")).hexdigest()
     return {
-        "format": "wheelchair.shared_dependency_episode/1",
+        "format": "wheelchair.native_resource_profile/1",
         "workload_dispatch": False,
+        "source_path_dispatch": False,
+        "benchmark_dispatch": False,
         "runtime_dispatch": False,
+        "runtime_cost_selector": False,
         "scalar_fallback": 0,
         "hidden_serial_fallback": 0,
         "resource_shortage_scalarization": 0,
-        "legacy_persistent_slots": LEGACY_PERSISTENT_SLOTS,
-        "wide_persistent_slots": WIDE_PERSISTENT_SLOTS,
+        "persistent_slots_base": BASE_PERSISTENT_SLOTS,
+        "persistent_slots_expanded": EXPANDED_PERSISTENT_SLOTS,
         "distinct_structural_loads": pressure,
         "expanded_map_coordinates": len(expanded),
         "terminal_reductions": len(terminals),
         "node_visits": node_visits,
         "max_expansion_depth": max_depth,
-        "rank_n": rank_n,
-        "eligible": eligible,
-        "fits_wide_recipe": fits_wide,
-        "recipe": recipe,
-        "reason": reason,
-        "structural_signature_sha256": signature,
+        "derived_cartesian": derived_cartesian,
+        "expanded_registers": expanded_registers,
+        "vector_recompute": recompute,
+        "backend_class": backend_class,
+        "lowering_policy": lowering_policy,
+        "structural_signature_sha256": hashlib.sha256(_canon(signature_payload).encode("utf-8")).hexdigest(),
     }

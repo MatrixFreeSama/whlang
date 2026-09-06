@@ -11,16 +11,27 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - name: Checkout
+      - name: Checkout final 1.2.6
         uses: actions/checkout@v4
+
+      - name: Checkout clean 1.2.5 byte authority
+        uses: actions/checkout@v4
+        with:
+          ref: build-1.2.5-multifield
+          path: baseline125
 
       - name: Build final 1.2.6 compiler/runtime
         working-directory: worktree
         run: |
           set -euxo pipefail
           ./build.sh 2>&1 | tee build_final_126.log
+          grep -Fq 'NATIVE_RESOURCE_PROFILE_BASE=BUILT' build_final_126.log
+          grep -Fq 'NATIVE_RESOURCE_PROFILE_WIDE=BUILT' build_final_126.log
+          grep -Fq 'NATIVE_RESOURCE_PROFILE_DERIVED=BUILT' build_final_126.log
+          grep -Fq 'NATIVE_RESOURCE_PROFILE_WORKLOAD_DISPATCH=0' build_final_126.log
           grep -Fq 'GENERAL_PARALLEL_SLOT_ENGINE=BUILT' build_final_126.log
           grep -Fq 'GENERAL_PARALLEL_SLOT_FOREIGN_RUNTIME_BACKEND=0' build_final_126.log
+          grep -Fq 'GENERAL_PARALLEL_FABRIC_AUTHORITY=topology-parallel' build_final_126.log
           grep -Fq 'WHEELCHAIR_BUILD=PASS' build_final_126.log
 
       - name: Prove general WH native Q1 Q2 Q4 materialization
@@ -37,6 +48,19 @@ jobs:
           grep -Fq 'GENERAL_PARALLEL_NATIVE_SERIAL_FALLBACK=0' general_parallel_native_126.log
           grep -Fq 'WHEELCHAIR_GENERAL_PARALLEL_NATIVE_1_2_6=PASS' general_parallel_native_126.log
 
+      - name: Prove generic native resource profiles
+        working-directory: worktree
+        run: |
+          set -euxo pipefail
+          sh ./test_native_resource_profiles_126.sh 2>&1 | tee native_resource_profiles_126.log
+          grep -Fq 'NATIVE_RESOURCE_PROFILE_STRUCTURAL_ADMISSION=PASS' native_resource_profiles_126.log
+          grep -Fq 'NATIVE_RESOURCE_PROFILE_WORKLOAD_DISPATCH=0' native_resource_profiles_126.log
+          grep -Fq 'WH_WHEX_NATIVE_RESOURCE_PROFILE_EQUIVALENCE=PASS' native_resource_profiles_126.log
+          grep -Fq 'NATIVE_RESOURCE_PROFILE_WIDE_VDIVPD=0' native_resource_profiles_126.log
+          grep -Fq 'NATIVE_RESOURCE_PROFILE_WIDE_REACHABLE_CALLS=0' native_resource_profiles_126.log
+          grep -Fq 'NATIVE_RESOURCE_PROFILE_SPECIAL_PURPOSE_ROUTE=0' native_resource_profiles_126.log
+          grep -Fq 'WHEELCHAIR_NATIVE_RESOURCE_PROFILES_1_2_6=PASS' native_resource_profiles_126.log
+
       - name: Preserve schedulerless and semantic gates
         working-directory: worktree
         run: |
@@ -46,29 +70,42 @@ jobs:
           grep -Fq 'WHEELCHAIR_GENERAL_PARALLEL_1_2_6=PASS' general_parallel_semantic_126.log
           grep -Fq 'WHEELCHAIR_SCHEDULERLESS_CAUSAL_1_2_6=PASS' schedulerless_126.log
 
-      - name: Preserve mature numerical technical peaks
-        working-directory: worktree
+      - name: Byte-protect mature 1.2.5 technical peaks
         run: |
           set -euxo pipefail
-          sh ./test_shared_dependency_episode_125.sh 2>&1 | tee peak_shared_125.log
-          sh ./test_generic_native_125.sh 2>&1 | tee peak_generic_125.log
-          sh ./test_rank_n_122.sh 2>&1 | tee peak_rankn_122.log
-          sh ./test_true_parallel_123.sh 2>&1 | tee peak_tp_123.log
-          sh ./test_sparse_causal_expansion_123.sh 2>&1 | tee peak_sce_123.log
-          grep -Fq 'WHEELCHAIR_SHARED_DEPENDENCY_EPISODE_1_2_5=PASS' peak_shared_125.log
-          grep -Fq 'WHEELCHAIR_1_2_4_GENERIC_NATIVE_PEAKS_ON_1_2_5=PASS' peak_generic_125.log
-          grep -Fq 'WHEELCHAIR_RANK_N_1_2_2=PASS' peak_rankn_122.log
-          grep -Fq 'WHEELCHAIR_SPARSE_CAUSAL_EXPANSION_1_2_3=PASS' peak_sce_123.log
+          (cd baseline125/worktree && ./build.sh > ../../baseline125_build.log 2>&1)
+          cmp worktree/build/topologyc baseline125/worktree/build/topologyc
+          cmp worktree/build/topologyc-wide baseline125/worktree/build/topologyc-sdep
+          cmp worktree/build/topologyc-derived baseline125/worktree/build/topologyc-rankn
+          cmp worktree/build/tensor_runtime_template baseline125/worktree/build/tensor_runtime_template
+          cmp worktree/build/general_runtime_template baseline125/worktree/build/general_runtime_template
+          echo 'BASE_PROFILE_1_2_5_NATIVE_BYTE_IDENTITY=PASS'
+          echo 'WIDE_PROFILE_1_2_5_NATIVE_BYTE_IDENTITY=PASS'
+          echo 'DERIVED_PROFILE_1_2_5_NATIVE_BYTE_IDENTITY=PASS'
+          echo 'MATURE_RUNTIME_1_2_5_NATIVE_BYTE_IDENTITY=PASS'
 
-      - name: Static anti-serial audit
-        working-directory: worktree
+      - name: Static special-purpose and anti-serial audit
         run: |
           set -euxo pipefail
-          ! grep -n -E 'work_steal|global_ready_queue|runtime_cost_selector|serial_fallback' runtime/general_parallel_slot_x86_64.S
-          ! grep -n -E 'benchmark|heat|newton|fsi|workload_name' surface/general_parallel_native.py
-          readelf -d build/general_parallel_slot.elf 2>&1 | grep -Fq 'There is no dynamic section'
+          test ! -e worktree/surface/shared_dependency_episode.py
+          test ! -e worktree/tools/generate_shared_dependency_episode_125.py
+          test ! -e worktree/test_shared_dependency_episode_125.sh
+          test ! -e .github/workflows/benchmark-schedulerless-causal-126.yml
+          test ! -e .github/workflows/diagnose-1.2.6-baseline.yml
+          test ! -e .github/workflows/validate-1.2.6-schedulerless-causal.yml
+          ! grep -R -n -E 'shared_dependency_episode|topologyc-sdep|shared_dependency_episode_wide_125' \
+            worktree/build.sh worktree/wheelchairc.py worktree/whexc.py \
+            worktree/surface/native_resource_profile.py worktree/tools/generate_native_resource_profiles.py
+          ! grep -n -E 'work_steal|global_ready_queue|runtime_cost_selector|serial_fallback' \
+            worktree/runtime/general_parallel_slot_x86_64.S
+          ! grep -n -E 'benchmark|heat|newton|fsi|stiffness|workload_name' \
+            worktree/surface/native_resource_profile.py worktree/tools/generate_native_resource_profiles.py
+          readelf -d worktree/build/general_parallel_slot.elf 2>&1 | grep -Fq 'There is no dynamic section'
+          readelf -d worktree/build/topology-parallel 2>&1 | grep -Fq 'There is no dynamic section'
+          echo 'ACTIVE_SPECIAL_PURPOSE_NATIVE_ROUTE=0'
+          echo 'ACTIVE_HIDDEN_SERIAL_SPINE=0'
 
-      - name: Archive evidence
+      - name: Archive final evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -78,8 +115,9 @@ jobs:
           path: |
             worktree/build_final_126.log
             worktree/general_parallel_native_126.log
+            worktree/native_resource_profiles_126.log
             worktree/general_parallel_semantic_126.log
             worktree/schedulerless_126.log
-            worktree/peak_*.log
+            baseline125_build.log
             worktree/build/general_parallel_126/*.json
             worktree/build/general_parallel_126/*.out

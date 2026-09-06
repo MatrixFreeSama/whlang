@@ -4,42 +4,49 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parent
 sys.path.insert(0,str(ROOT/'surface'))
 import whex_surface
-import shared_dependency_episode as sde
+import native_resource_profile as nrp
 import general_parallel_plan as gpp
 
 
+def _compiler_for_profile(profile: dict) -> Path:
+    cls=profile.get('backend_class','base')
+    table={
+        'base':ROOT/'build/topologyc',
+        'wide':ROOT/'build/topologyc-wide',
+        'derived':ROOT/'build/topologyc-derived',
+    }
+    if cls not in table:
+        raise whex_surface.wh.SurfaceError(f"unknown native resource profile class {cls!r}")
+    return table[cls]
+
+
 def compile_native(data, output: Path, executors: int, isa_limit: str | None):
-    episode=sde.analyze(data)
+    profile=nrp.analyze(data)
     with tempfile.TemporaryDirectory(prefix='whex_core_') as td:
         core=Path(td)/'program.core.wh'; core.write_bytes(whex_surface.canonical_core_bytes(data))
-        if 'rank_n_product' in data:
-            compiler=ROOT/'build/topologyc-rankn'
-        elif episode.get('recipe')=='shared_dependency_episode_wide_125':
-            compiler=ROOT/'build/topologyc-sdep'
-        else:
-            compiler=ROOT/'build/topologyc'
+        compiler=_compiler_for_profile(profile)
         cmd=[str(compiler),str(core),'-o',str(output.resolve())]
         if executors!=1: cmd += ['--executors',str(executors)]
         if isa_limit is not None: cmd += ['--isa-limit',isa_limit]
         p=subprocess.run(cmd,cwd=ROOT,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
         if p.returncode:
-            raise whex_surface.wh.SurfaceError('current dedicated topologyc rejected WHEX graph:\n'+(p.stderr or p.stdout).strip())
-    return episode
+            raise whex_surface.wh.SurfaceError('current topology compiler rejected WHEX graph:\n'+(p.stderr or p.stdout).strip())
+    return profile
 
 
 def main():
-    ap=argparse.ArgumentParser(description='Wheelchair Expert .whex -> native static ELF through dedicated topologyc')
+    ap=argparse.ArgumentParser(description='Wheelchair Expert .whex -> native static ELF')
     ap.add_argument('source',type=Path); ap.add_argument('-o','--output',type=Path,required=True)
     ap.add_argument('--executors',type=int,choices=[1,2,4],default=1)
     ap.add_argument('--isa-limit',choices=['native','avx512f','avx512dq','avx2'],default=None,help='backend capability ceiling for ISA audit/testing; never selects a scalar fallback')
-    ap.add_argument('--semantic-plan',type=Path,default=None,help='write Region/Effect/Dependency semantics plus universal schedulerless causal plan')
+    ap.add_argument('--semantic-plan',type=Path,default=None,help='write Region/Effect/Dependency semantics plus universal causal plan')
     a=ap.parse_args()
     data,parser,_=whex_surface.load_surface(a.source)
-    episode=compile_native(data,a.output,a.executors,a.isa_limit)
+    profile=compile_native(data,a.output,a.executors,a.isa_limit)
     plan=whex_surface.semantic_plan(parser)
-    parallel=gpp.plan(data,a.executors,semantic=plan,physical_lane='specialized_whex_topology_native')
+    parallel=gpp.plan(data,a.executors,semantic=plan,physical_lane='whex_topology_native')
     plan['general_parallel_fabric']=parallel
-    plan['shared_dependency_episode']=episode
+    plan['native_resource_profile']=profile
     if a.semantic_plan is not None:
         a.semantic_plan.write_text(json.dumps(plan,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
     print(json.dumps({
@@ -50,7 +57,7 @@ def main():
         'semantic_sha256':plan['semantic_sha256'],
         'general_parallel_fabric':parallel,
         'parallel_fabric_authority':'topology-parallel',
-        'shared_dependency_episode':episode
+        'native_resource_profile':profile
     },ensure_ascii=False,indent=2))
     return 0
 if __name__=='__main__':
