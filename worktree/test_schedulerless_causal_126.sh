@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-BIN="$ROOT/build/topology-fabric-schedulerless"
+BIN="$ROOT/build/topology-parallel"
 PLAN="$ROOT/surface/schedulerless_causal_plan.py"
 [ -x "$BIN" ]
 python3 -m py_compile "$PLAN"
@@ -16,7 +16,7 @@ import json,random,subprocess,sys
 from pathlib import Path
 root=Path(sys.argv[1]); sys.path.insert(0,str(root/'surface'))
 import schedulerless_causal_plan as sc
-bin=str(root/'build/topology-fabric-schedulerless')
+bin=str(root/'build/topology-parallel')
 def run(spec,slots=None):
     p=sc.plan(spec,slots)
     cp=subprocess.run([bin,*p['native_argv']],capture_output=True,text=True,timeout=10)

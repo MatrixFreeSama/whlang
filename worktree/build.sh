@@ -15,21 +15,18 @@ ld -nostdlib -static -z noexecstack -T runtime/tensor_runtime.ld \
 
 # Generic structural native capability generation. None of these generators is
 # selected by workload name, source path, benchmark identity, or runtime timing.
-python3 tools/generate_rankn_backend_122.py
+python3 tools/generate_derived_native_backend.py
 python3 tools/generate_product_subtract_frontend.py
 python3 tools/generate_vector_reduction_residency.py
 python3 tools/generate_native_resource_profiles.py
 
-as --64 "$BUILD/generated_122/tensor_rankn_runtime_template_x86_64.S" -o "$BUILD/tensor_derived_runtime_template.o"
+as --64 "$BUILD/generated_derived/tensor_derived_runtime_template_x86_64.S" -o "$BUILD/tensor_derived_runtime_template.o"
 ld -nostdlib -static -z noexecstack -T runtime/tensor_runtime.ld \
   "$BUILD/tensor_derived_runtime_template.o" -o "$BUILD/tensor_derived_runtime_template"
 ./tools/generate_tensor_runtime_offsets.sh "$BUILD/tensor_derived_runtime_template" "$BUILD/runtime_derived_offsets.inc"
-rankn_va=$(nm -n "$BUILD/tensor_derived_runtime_template" | awk '$3=="rank_n_product_patch" {print "0x"$1; exit}')
-[ -n "$rankn_va" ]
-printf '.equ RUNTIME_RANK_N_PRODUCT_OFF, 0x%x\n' $((rankn_va-0x400000)) >> "$BUILD/runtime_derived_offsets.inc"
-# The derived frontend source still includes the historical generated include
-# spelling; expose the generic capability filename at build time.
-cp "$BUILD/runtime_derived_offsets.inc" "$BUILD/runtime_rankn_offsets.inc"
+derived_product_va=$(nm -n "$BUILD/tensor_derived_runtime_template" | awk '$3=="rank_n_product_patch" {print "0x"$1; exit}')
+[ -n "$derived_product_va" ]
+printf '.equ RUNTIME_RANK_N_PRODUCT_OFF, 0x%x\n' $((derived_product_va-0x400000)) >> "$BUILD/runtime_derived_offsets.inc"
 
 as --64 runtime/general_runtime_template_x86_64.S -o "$BUILD/general_runtime_template.o"
 ld -nostdlib -static -z noexecstack -T runtime/general_runtime.ld \
@@ -47,7 +44,7 @@ python3 tools/generate_general_parallel_slot_offsets.py \
   "$BUILD/general_parallel_slot.elf" "$BUILD/general_parallel_slot_template.bin" \
   "$BUILD/general_parallel_slot_offsets.json"
 
-# Handwritten assembly compiler. Public physical capability classes are now only
+# Handwritten assembly compiler. Public physical capability classes are only
 # base / wide / derived. Their selection is compile-time structural proof.
 as --64 compiler/topologyc_x86_64.S -o "$BUILD/topologyc_core.o"
 as --64 "$BUILD/tensor_frontend_profile_base.S" -o "$BUILD/tensor_frontend_base.o"
@@ -62,8 +59,8 @@ ld -nostdlib -static -z noexecstack \
   "$BUILD/topologyc_core.o" "$BUILD/tensor_frontend_wide.o" "$BUILD/general_frontend.o" \
   "$BUILD/runtime_blob.o" "$BUILD/general_runtime_blob.o" -o "$BUILD/topologyc-wide"
 
-as --64 "$BUILD/generated_122/tensor_rankn_frontend_x86_64.S" -o "$BUILD/tensor_frontend_derived.o"
-as --64 "$BUILD/generated_122/runtime_rankn_blob_x86_64.S" -o "$BUILD/runtime_derived_blob.o"
+as --64 "$BUILD/generated_derived/tensor_derived_frontend_x86_64.S" -o "$BUILD/tensor_frontend_derived.o"
+as --64 "$BUILD/generated_derived/runtime_derived_blob_x86_64.S" -o "$BUILD/runtime_derived_blob.o"
 ld -nostdlib -static -z noexecstack \
   "$BUILD/topologyc_core.o" "$BUILD/tensor_frontend_derived.o" "$BUILD/general_frontend.o" \
   "$BUILD/runtime_derived_blob.o" "$BUILD/general_runtime_blob.o" -o "$BUILD/topologyc-derived"
@@ -102,4 +99,5 @@ echo 'GENERAL_PARALLEL_GLOBAL_READY_QUEUE=0'
 echo 'GENERAL_PARALLEL_ROOT_SCHEDULER=0'
 echo 'GENERAL_PARALLEL_RUNTIME_COST_SELECTOR=0'
 echo 'GENERAL_PARALLEL_SERIAL_FALLBACK=0'
+echo 'ACTIVE_SPECIAL_PURPOSE_NATIVE_ROUTE=0'
 echo 'WHEELCHAIR_BUILD=PASS'

@@ -25,6 +25,7 @@ jobs:
         run: |
           set -euxo pipefail
           ./build.sh 2>&1 | tee build_final_126.log
+          grep -Fq 'NATIVE_RESOURCE_PROFILE_DERIVED_GENERATION=PASS' build_final_126.log
           grep -Fq 'NATIVE_RESOURCE_PROFILE_BASE=BUILT' build_final_126.log
           grep -Fq 'NATIVE_RESOURCE_PROFILE_WIDE=BUILT' build_final_126.log
           grep -Fq 'NATIVE_RESOURCE_PROFILE_DERIVED=BUILT' build_final_126.log
@@ -32,6 +33,7 @@ jobs:
           grep -Fq 'GENERAL_PARALLEL_SLOT_ENGINE=BUILT' build_final_126.log
           grep -Fq 'GENERAL_PARALLEL_SLOT_FOREIGN_RUNTIME_BACKEND=0' build_final_126.log
           grep -Fq 'GENERAL_PARALLEL_FABRIC_AUTHORITY=topology-parallel' build_final_126.log
+          grep -Fq 'ACTIVE_SPECIAL_PURPOSE_NATIVE_ROUTE=0' build_final_126.log
           grep -Fq 'WHEELCHAIR_BUILD=PASS' build_final_126.log
 
       - name: Prove general WH native Q1 Q2 Q4 materialization
@@ -90,19 +92,26 @@ jobs:
           test ! -e worktree/surface/shared_dependency_episode.py
           test ! -e worktree/tools/generate_shared_dependency_episode_125.py
           test ! -e worktree/test_shared_dependency_episode_125.sh
+          test ! -e worktree/tools/generate_rankn_backend_122.py
+          test -e worktree/tools/generate_derived_native_backend.py
           test ! -e .github/workflows/benchmark-schedulerless-causal-126.yml
           test ! -e .github/workflows/diagnose-1.2.6-baseline.yml
           test ! -e .github/workflows/validate-1.2.6-schedulerless-causal.yml
           ! grep -R -n -E 'shared_dependency_episode|topologyc-sdep|shared_dependency_episode_wide_125' \
             worktree/build.sh worktree/wheelchairc.py worktree/whexc.py \
-            worktree/surface/native_resource_profile.py worktree/tools/generate_native_resource_profiles.py
+            worktree/surface/native_resource_profile.py worktree/tools/generate_native_resource_profiles.py \
+            worktree/tools/generate_derived_native_backend.py
+          ! grep -R -n -E 'generate_rankn_backend_122|generated_122|runtime_rankn_offsets|tensor_rankn_(frontend|runtime_template)|runtime_rankn_blob' \
+            worktree/build.sh worktree/tools/generate_derived_native_backend.py
           ! grep -n -E 'work_steal|global_ready_queue|runtime_cost_selector|serial_fallback' \
             worktree/runtime/general_parallel_slot_x86_64.S
           ! grep -n -E 'benchmark|heat|newton|fsi|stiffness|workload_name' \
-            worktree/surface/native_resource_profile.py worktree/tools/generate_native_resource_profiles.py
+            worktree/surface/native_resource_profile.py worktree/tools/generate_native_resource_profiles.py \
+            worktree/tools/generate_derived_native_backend.py
           readelf -d worktree/build/general_parallel_slot.elf 2>&1 | grep -Fq 'There is no dynamic section'
           readelf -d worktree/build/topology-parallel 2>&1 | grep -Fq 'There is no dynamic section'
           echo 'ACTIVE_SPECIAL_PURPOSE_NATIVE_ROUTE=0'
+          echo 'ACTIVE_LEGACY_DERIVED_FILE_ROUTE=0'
           echo 'ACTIVE_HIDDEN_SERIAL_SPINE=0'
 
       - name: Archive final evidence

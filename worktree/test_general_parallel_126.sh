@@ -2,9 +2,7 @@
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$ROOT"
-[ -x build/topology-fabric-schedulerless ]
 [ -x build/topology-parallel ]
-cmp build/topology-fabric-schedulerless build/topology-parallel
 python3 - <<'PY'
 import json,subprocess,sys
 from pathlib import Path
@@ -47,8 +45,8 @@ print('GENERAL_PARALLEL_SOURCE_ORDER_EDGES=0')
 print('GENERAL_PARALLEL_RECURRENCE_ENCLAVE=PASS')
 print('GENERAL_PARALLEL_SCHEDULERLESS_PHYSICALIZATION=PASS')
 PY
-# Static audit: the new universal plan cannot name a workload or resurrect the
-# abandoned runtime 1/2/4 profitability selector.
+# Static audit: the universal plan cannot name a workload or resurrect a runtime
+# profitability selector or work-stealing scheduler.
 ! grep -Eqi 'heat|fsi|newton|stiffness|tp126|cost[_ -]?selector|work[_ -]?steal' surface/general_parallel_plan.py
 
 echo 'GENERAL_PARALLEL_WORKLOAD_NAME_BLIND=PASS'
