@@ -2,10 +2,12 @@
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$ROOT"
-mkdir -p build/general_parallel_126
 
-./build.sh > build/general_parallel_126/build.log 2>&1
-grep -Fq 'GENERAL_PARALLEL_SLOT_ENGINE=BUILT' build/general_parallel_126/build.log
+LOG=.general_parallel_native_126_build.log
+rm -f "$LOG"
+./build.sh > "$LOG" 2>&1
+grep -Fq 'GENERAL_PARALLEL_SLOT_ENGINE=BUILT' "$LOG"
+mkdir -p build/general_parallel_126
 
 SRC=tests/general_parallel_126/branch_probe.wh
 for q in 1 2 4; do
