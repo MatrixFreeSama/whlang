@@ -1,0 +1,41 @@
+name: cleanup obsolete branches once
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/cleanup-branches-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete every non-main branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/${REPO}/git/refs/heads"
+          page=1
+          while :; do
+            json="$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "${api}?per_page=100&page=${page}")"
+            count="$(jq 'length' <<<"${json}")"
+            [ "${count}" -eq 0 ] && break
+            mapfile -t branches < <(jq -r '.[].ref | sub("^refs/heads/"; "")' <<<"${json}")
+            for branch in "${branches[@]}"; do
+              [ "${branch}" = "main" ] && continue
+              encoded="$(jq -rn --arg v "${branch}" '$v|@uri')"
+              echo "Deleting ${branch}"
+              curl -fsSL -X DELETE \
+                -H "Authorization: Bearer ${GH_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${REPO}/git/refs/heads/${encoded}"
+            done
+            page=$((page + 1))
+          done
