@@ -1,8 +1,29 @@
-# Wheelchair 1.2.8
+# Wheelchair 1.2.9
 
 Wheelchair is an ahead-of-time, native, structure-first programming language project for general programming with HPC and simulation as primary design targets.
 
-Wheelchair 1.2.8 matures the generic **Native256** physical shape into a clean AVX2/YMM execution authority while preserving the earlier native-512 peaks and the schedulerless General Parallel Fabric.
+Wheelchair 1.2.9 is the **parallel resource semantic correction** release. It preserves the mature Rank-N, Native256, split512x256, Native512, tensor, and matrix-free technical peaks while completely replacing the incorrect general resource-routing interpretation introduced by the former schedulerless/home-slot fabric.
+
+## The 1.2.9 rule
+
+```text
+Compute locally.
+Finish locally.
+Release blindly.
+```
+
+The finisher has no recipient.
+
+The two planes are deliberately separate:
+
+```text
+causal/data plane                  resource plane
+A ---- true dependency ----> B       OWNED -> FREE
+```
+
+A dependency may name `B` because `B` mathematically depends on `A`. A resource release may not name another worker, slot, subtree, peer, or future consumer.
+
+The authoritative doctrine is [WHEELCHAIR_CHARTER_1_2_9.md](WHEELCHAIR_CHARTER_1_2_9.md).
 
 ## Core contract
 
@@ -18,42 +39,165 @@ WH source                 WHEX source
    v                          v
         Unified Structural Core
                  |
-                 | proof + erasure + causal topology
+                 | proof + erasure + true causality
                  v
-        General Parallel Semantics
+        AOT Native Physicalization
                  |
-                 | AOT physicalization
                  v
           Native x86-64 ELF
 ```
 
-The central execution rule remains:
+The central causality rule remains:
 
 ```text
 No dependency edge = no synchronization edge.
 ```
 
-Unsupported structure rejects rather than silently becoming a scalar fallback, a hidden global queue, a runtime profitability selector, or a conventional sequential spine.
+1.2.9 adds the equally important resource rule:
 
-## Release lineage
+```text
+No resource need = no continued software ownership.
+```
 
-### 1.2.6: General Parallel Fabric
+Unsupported structure rejects rather than silently becoming a scalar fallback, global work queue, work-stealing loop, runtime profitability selector, or conventional sequential spine.
 
-1.2.6 established the schedulerless sparse causal execution authority. Independent bindings remain independent, recurrence remains local, and source order is not permission to synthesize a runtime dependency.
+## What 1.2.9 removed
 
-Required architecture boundaries include:
+The old general fabric had successfully removed a central scheduler, but it still retained distributed scheduling responsibility through fixed home ownership, per-worker inboxes, resource-token routing, and persistent workers.
+
+Those implementations are deleted from the 1.2.9 source tree, not hidden behind a feature flag.
+
+Removed mechanisms include:
+
+```text
+fixed runtime home slots
+per-worker MPSC work inboxes
+post-completion work search
+resource-token routing through parent/child/sibling topology
+work stealing / victim selection
+peer-load/resource-demand queries
+persistent idle PAUSE spin
+consumer-aware release
+```
+
+The old causal-return and schedulerless runtime sources are not part of the 1.2.9 tree.
+
+## New general parallel physicalization
+
+For ordinary general WH programs at width 2 or 4, the path is:
+
+```text
+general_parallel_plan.py
+        |
+        | true dependency graph only
+        v
+general_parallel_native.py
+        |
+        | patch indegree/edge graph + native fragment offsets
+        v
+general_parallel_release_x86_64.S
+```
+
+The new native engine stores no worker ownership map.
+
+Each causal node has a finite execution context. If its dependencies are not ready, it waits on its own dependency count with Linux `futex`, releasing the CPU instead of spinning. When the exact dependency count reaches zero, the context becomes runnable. Linux chooses which allowed CPU executes it.
+
+After its fragment finishes, the context only publishes true outgoing dependency transitions and returns/exits.
+
+## Meaning of `--executors`
+
+The command-line spelling remains compatible:
+
+```bash
+./wheelchairc program.wh -o program --executors 4
+```
+
+For the 1.2.9 general blind-release path, the number means **maximum CPU width**, not four permanent workers.
+
+The runtime narrows the inherited affinity mask to four already-allowed CPUs. All finite causal contexts inherit that envelope. No causal node is permanently assigned to CPU 0, 1, 2, or 3.
+
+```text
+Wheelchair decides: true causality + allowed width
+Linux decides:      which allowed CPU runs a runnable context
+Intel/AMD decides:  in-core execution-resource arbitration
+```
+
+## Neighbor sparse communication remains
+
+Local sparse communication is still a core Wheelchair idea. It is now explicitly separated from resource flow.
+
+Legal:
+
+```text
+A finishes
+remaining_deps[B]--
+if B reaches zero: wake B's causal wait
+```
+
+Illegal:
+
+```text
+A finishes
+find idle/busy worker
+choose B's worker
+route A's resource to that worker
+```
+
+The compact rule is:
+
+```text
+dependency communication may have a destination;
+resource release may not.
+```
+
+## Release invariants
+
+The 1.2.9 general path requires:
 
 ```text
 GENERAL_PARALLEL_GLOBAL_READY_QUEUE=0
+GENERAL_PARALLEL_GLOBAL_READY_SCAN=0
 GENERAL_PARALLEL_ROOT_SCHEDULER=0
 GENERAL_PARALLEL_RUNTIME_COST_SELECTOR=0
 GENERAL_PARALLEL_SERIAL_FALLBACK=0
-ACTIVE_SPECIAL_PURPOSE_NATIVE_ROUTE=0
+GENERAL_PARALLEL_WORK_STEALING=0
+GENERAL_PARALLEL_RUNTIME_FIXED_HOME_OWNERSHIP=0
+GENERAL_PARALLEL_PERSISTENT_IDLE_WORKER_SPIN=0
+GENERAL_PARALLEL_POST_COMPLETION_WORK_SEARCH=0
+GENERAL_PARALLEL_POST_COMPLETION_PEER_QUERY=0
+GENERAL_PARALLEL_RESOURCE_RELEASE_DESTINATION=0
+GENERAL_PARALLEL_RESOURCE_HANDOFF=0
+GENERAL_PARALLEL_BLIND_RESOURCE_RELEASE=PASS
 ```
 
-### 1.2.7: Multi-ISA physicalization
+`test_129.sh` additionally rejects the physical presence of the retired runtime/planner files.
 
-1.2.7 introduced generic physical vector shapes selected from structural requirements and ISA capability:
+## Technical Peak Preservation
+
+1.2.9 is not permission to flatten mature HPC paths into the general node runtime.
+
+Protected mature areas include:
+
+- proof-gated Rank-N structural physicalization;
+- Native256 four-lane AVX2/YMM execution;
+- split512x256 physical mapping;
+- Native512 AVX-512 execution;
+- fused tensor evaluators;
+- vector reduction residency;
+- matrix-free reductions and structural elimination;
+- existing qualified AOT technical peaks.
+
+The mature tensor runtime already assigns each executor a finite static domain and returns when that domain is complete. It does not search for a neighbor's work after completion, so 1.2.9 leaves that technical peak structurally separate.
+
+## Release lineage
+
+### 1.2.6
+
+Introduced general causal parallelization and correctly removed central ready queues/root schedulers, but its schedulerless/home-slot physicalization still carried distributed scheduling responsibility. That resource interpretation is superseded by 1.2.9.
+
+### 1.2.7
+
+Introduced generic multi-ISA physicalization:
 
 ```text
 native256
@@ -61,170 +205,19 @@ split512x256
 native512
 ```
 
-The physical-shape choice is AOT structural capability logic. It does not inspect workload names or runtime timing/profitability measurements.
+Physical choice remains AOT and workload-name blind.
 
-### 1.2.8: Native256 maturity
+### 1.2.8
 
-1.2.8 turns `native256` into a mature four-lane AVX2/YMM physical realization for the admitted structural tensor slice.
+Matured the Native256 AVX2/YMM path, finite-register live-range fracture, full-YMM spill handling, and compiler-local fixup ledger. Those physical peaks are retained.
 
-It is not:
+### 1.2.9
 
-- a scalar fallback;
-- an AVX-512 wrapper;
-- a test-only backend;
-- a runtime profitability route;
-- a named-workload fast path.
+Separates causality from resource ownership and makes completion recipient-blind.
 
-Release gates require:
+## WH and WHEX
 
-```text
-NATIVE256_VECTOR_WIDTH=4
-NATIVE256_AVX2_YMM_ONLY=PASS
-NATIVE256_RUNTIME_SELECTOR=0
-NATIVE256_SCALAR_FALLBACK=0
-NATIVE256_WORKLOAD_SPECIALIZATION=0
-NATIVE256_GENERATED_WORKLOAD_BLIND=PASS
-```
-
-## Finite-register native256 design
-
-AVX2 exposes a much smaller physical vector register file than AVX-512. 1.2.8 treats that as a real physical constraint rather than pretending the wider register topology still exists.
-
-The mature native256 compiler includes:
-
-- one-temporary exact synthesized i64 multiply;
-- one-temporary signed i64-to-f64 conversion support;
-- whole-YMM live-range fracture for complex binary siblings;
-- whole-YMM live-range fracture for boundary selects;
-- whole-YMM live-range fracture for tolerant accumulators;
-- whole-YMM live-range fracture for scaled/FMA leaves;
-- no scalar-lane spill path.
-
-A spill is one complete 32-byte YMM value. It shortens a physical live range without changing the semantic vector width or serializing individual lanes.
-
-Required gates include:
-
-```text
-NATIVE256_COMPLEX_SIBLING_LIVERANGE_FRACTURE=PASS
-NATIVE256_BOUNDARY_SELECT_LIVERANGE_FRACTURE=PASS
-NATIVE256_TOLERANT_ACCUMULATOR_LIVERANGE_FRACTURE=PASS
-NATIVE256_TOLERANT_SCALED_LIVERANGE_FRACTURE=PASS
-NATIVE256_VECTOR_SPILL_BYTES=32
-NATIVE256_VECTOR_SPILL_SCALAR_LANES=0
-```
-
-## Constant multiplication lifetime repair
-
-The generic `2^k ± 1` strength-reduction path now preserves the shift count in callee-saved compiler state across encoder helper calls.
-
-This fixes a low-level lifetime bug in which the intended relation
-
-```text
-31*x = (x << 5) - x
-```
-
-could become
-
-```text
-63*x = (x << 6) - x
-```
-
-when a helper reused caller-saved `ECX` and the physical source happened to be YMM6.
-
-The correction is based only on the mathematical constant and machine-register lifetime. No workload identity is involved.
-
-## Compiler-local constant reference ledger
-
-The immutable constant pool and constant-reference fixups are deliberately separate resources.
-
-The unique constant pool remains:
-
-```text
-NATIVE256_UNIQUE_CONSTANT_POOL_CAP=512
-```
-
-The fixup ledger tracks emitted references, so one constant may legitimately require many fixups. 1.2.8 sizes this compiler-only ledger from structural graph capacity:
-
-```text
-MAX_NODES = 65536
-NATIVE256_FIXUP_CAP = MAX_NODES * 8 = 524288
-```
-
-Required gates:
-
-```text
-NATIVE256_FIXUP_LEDGER=STRUCTURAL
-NATIVE256_FIXUP_LEDGER_SIZING=PASS
-NATIVE256_FIXUP_RUNTIME_SELECTOR=0
-NATIVE256_FIXUP_SCALAR_FALLBACK=0
-NATIVE256_FIXUP_WORKLOAD_ROUTE=0
-```
-
-This bookkeeping never enters the user ELF as runtime control logic.
-
-## Clean normal-build authority
-
-All mature native256 transformations execute in the ordinary build path:
-
-```bash
-./build.sh
-```
-
-The release compiler does not rely on a CI-only second-stage code generation or diagnostic relink.
-
-```text
-NATIVE256_NORMAL_BUILD_PRESSURE_MATURITY=PASS
-NATIVE256_NORMAL_BUILD_LIVERANGE_MATURITY=PASS
-NATIVE256_POST_FINALIZE_BUILD_AUTHORITY=PASS
-NATIVE256_NORMAL_BUILD_MATURITY_AUTHORITY=PASS
-NATIVE256_SECOND_STAGE_DIAGNOSTIC_INJECTION=0
-NATIVE256_SECOND_STAGE_RELINK=0
-```
-
-Compiler telemetry remains available for development, but it is outside the release-authority execution chain.
-
-## Coupled high-pressure proof
-
-The canonical coupled fluid-solid structural witness is compiled for AVX2 at executor counts 1, 2, and 4 and compared with the matched expert-C AVX2 reference.
-
-Validated sizes:
-
-```text
-N = 4
-N = 17
-N = 100000
-N = 10000000
-```
-
-Every Q1/Q2/Q4 combination passes the numeric gate. The canonical N=4 coupled checksum is:
-
-```text
-checksum_bits=0x3fb2acf007b0d71c
-```
-
-The release also disassembles executable PT_LOAD segments and requires real YMM execution with no ZMM or AVX-512 mask-register state:
-
-```text
-NATIVE256_HIGH_PRESSURE_COUPLED_COMPILE=PASS
-NATIVE256_HIGH_PRESSURE_AVX2_YMM_ONLY=PASS
-NATIVE256_HIGH_PRESSURE_COUPLED_EXECUTION=PASS
-```
-
-No new 1.2.8 performance-speed claim is inferred from this correctness gate. Performance claims remain bounded to separately measured benchmark evidence.
-
-## Generic native resource profiles
-
-The structural compiler continues to use generic AOT resource classes:
-
-```text
-base
-wide
-derived
-```
-
-The selector examines canonical structure and resource pressure. It does not inspect workload names, solver names, source paths, benchmark identity, runtime timing, or profitability.
-
-The mature native-512 peaks remain protected. Native256 is an additional physical realization rather than a lowest-common-denominator replacement.
+Both surfaces converge on the same structural meaning. General plans expose the 1.2.9 resource invariants, while mature structural/native paths remain independent physical realizations when they are semantically equivalent and protect technical peaks.
 
 ## Platform
 
@@ -233,7 +226,7 @@ Current native target: Linux x86-64.
 Build-time requirements:
 
 - Python 3 for AOT parsing, proof, and source generation;
-- GNU `as`, `ld`, `readelf`, `objcopy`, and related binutils;
+- GNU `as`, `ld`, `readelf`, `objcopy`, `nm`, and related binutils;
 - POSIX shell.
 
 Generated programs do not execute through Python, C, C++, LLVM, or a JIT.
@@ -256,7 +249,7 @@ WHEELCHAIR_BUILD=PASS
 ./wheelchairc program.wh -o program
 ```
 
-With four execution slots:
+With a four-CPU execution envelope:
 
 ```bash
 ./wheelchairc program.wh -o program --executors 4
@@ -268,58 +261,68 @@ With four execution slots:
 ./whexc program.whex -o program
 ```
 
-To audit a physical ISA ceiling explicitly:
+For an explicit AOT ISA ceiling:
 
 ```bash
 ./whexc program.whex -o program --isa-limit avx2
 ```
 
-## Inspect structural proof
+`--isa-limit` remains an AOT capability ceiling, not a runtime selector or scalar-fallback permission.
+
+## Inspect the semantic plan
 
 ```bash
 ./wheelchairc program.wh -o program --semantic-plan plan.json
 ```
 
-Useful questions include:
-
-- which dependencies are real;
-- which objects were erased before runtime;
-- which regions or bindings are independent;
-- which native resource and physical vector shape was selected;
-- whether any synthetic ordering, runtime selector, scalar fallback, or central control appeared.
-
-## Structural execution rules
-
-A WH `for` does not promise a serial machine loop. If points are independent, the semantic object is an axis map and may be realized with vector lanes, masked tails, executor regions, compile-time partitioning, or another proven parallel mapping.
-
-A scalar final reduction value does not imply a scalar execution history. Reduction is represented as dependency topology.
-
-Structural predicates may lower to select/dataflow structure rather than a central dispatcher.
-
-Arbitrary dynamic `while` is not silently converted into a conventional serial backedge. Unsupported recurrence/control topology rejects until a genuine structural realization exists.
-
-## Release evidence
-
-1.2.8 release evidence is documented in:
+The 1.2.9 plan makes the corrected boundary visible. Useful fields include:
 
 ```text
-RELEASE_NOTES_1_2_8.md
-RELEASE_PROOF_1_2_8.md
-RELEASE_GATES_1_2_8.txt
+readiness_rule
+communication_rule
+release_rule
+resource_consumer_visibility
+runtime_fixed_home_ownership
+persistent_idle_worker_spin
+post_completion_work_search
+post_completion_peer_query
+resource_release_destination
+resource_handoff
+cpu_dispatch_authority
+silicon_dispatch_authority
 ```
 
-Historical release evidence remains in the repository for audit and comparison.
+## Validation
+
+The dedicated gate is:
+
+```bash
+./test_129.sh
+```
+
+It checks source deletion, native-engine structure, plan invariants, static ELF output, and Q1/Q2/Q4 output equivalence on the existing general branch/iterate probes.
+
+The broader historical regression harness remains:
+
+```bash
+./test_complete.sh
+```
+
+and now invokes `test_129.sh` as the final resource-semantic gate.
+
+Release evidence:
+
+```text
+WHEELCHAIR_CHARTER_1_2_9.md
+RELEASE_NOTES_1_2_9.md
+RELEASE_PROOF_1_2_9.md
+RELEASE_GATES_1_2_9.txt
+```
 
 ## Current maturity boundary
 
-Wheelchair 1.2.8 remains an active research language/compiler. It does not claim that every systems-language feature or every possible dynamic topology has a native256 realization.
+Wheelchair 1.2.9 remains an active research compiler/language. Unsupported dynamic topology may reject. General-language memory safety is not claimed formally complete. Performance evidence is bounded to explicitly measured hosts and workloads.
 
-In particular:
+The release makes one stronger architectural claim than 1.2.8: **a finishing general execution context no longer participates in deciding who gets its former compute resource.**
 
-- unsupported structural semantics may reject;
-- arbitrary dynamic `while` has no hidden serial fallback;
-- general-language memory safety is not formally claimed complete;
-- performance evidence is bounded to the explicitly tested hosts and workloads;
-- correctness of the 1.2.8 native256 maturity release is bounded by the published structural, ISA, numeric, and regression gates.
-
-The final execution authority is the emitted machine code and proven causal topology, not the appearance of the source syntax.
+The final execution authority remains emitted machine code and proven causality, not the appearance of the source syntax.
