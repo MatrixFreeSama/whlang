@@ -1,0 +1,87 @@
+name: Validate Wheelchair 1.2.10
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'Wheelchair-1.2.10/**'
+      - '.github/workflows/validate-wheelchair-1.2.10.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  physicalization-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain witness
+        run: |
+          as --version | head -1
+          ld --version | head -1
+          python3 --version
+          uname -a
+      - name: Wheelchair 1.2.10 physicalization gate
+        working-directory: Wheelchair-1.2.10
+        run: ./test_1210.sh
+
+  complete-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Wheelchair complete regression
+        working-directory: Wheelchair-1.2.10
+        run: ./test_complete.sh
+
+  source-snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: wheelchair-1.2.10
+      - name: Pack clean 1.2.10 source
+        run: tar -czf wheelchair-1.2.10-source.tar.gz Wheelchair-1.2.10
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheelchair-1.2.10-source-snapshot
+          path: wheelchair-1.2.10-source.tar.gz
+          retention-days: 1
+
+  freeze-native-assembly:
+    if: github.event_name == 'pull_request' && github.head_ref == 'wheelchair-1.2.10'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: wheelchair-1.2.10
+          fetch-depth: 0
+      - name: Freeze deterministic assembly physicalizations
+        working-directory: Wheelchair-1.2.10
+        run: |
+          set -eu
+          if [ -f frozen_native/FROZEN_ASM_MANIFEST.sha256 ]; then
+            echo FROZEN_NATIVE_ASSEMBLY_ALREADY_PRESENT=1
+            exit 0
+          fi
+          ./build.sh >/dev/null
+          mkdir -p frozen_native/generated_derived frozen_native/generated_native256
+          cp -a build/generated_derived/. frozen_native/generated_derived/
+          cp -a build/generated_native256/. frozen_native/generated_native256/
+          cp build/topologyc_multi_isa_x86_64.S frozen_native/
+          cp build/tensor_frontend_profile_base.S frozen_native/
+          cp build/tensor_frontend_profile_wide.S frozen_native/
+          cp build/runtime_derived_offsets.inc frozen_native/
+          cp build/runtime_native256_offsets.inc frozen_native/
+          cp build/runtime_derived_native256_offsets.inc frozen_native/
+          cp build/general_parallel_release_offsets.json frozen_native/
+          (cd frozen_native && find . -type f ! -name FROZEN_ASM_MANIFEST.sha256 -print0 | sort -z | xargs -0 sha256sum > FROZEN_ASM_MANIFEST.sha256)
+          git config user.name 'Wheelchair Native Freeze'
+          git config user.email 'actions@users.noreply.github.com'
+          git add frozen_native
+          git commit -m 'Freeze 1.2.10 native assembly physicalizations'
+          git push origin HEAD:wheelchair-1.2.10

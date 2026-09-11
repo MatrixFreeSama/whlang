@@ -1,0 +1,11 @@
+program whex_elimination_cancel
+
+tolerance 1e-10
+
+input n: u64 range 8..1024
+
+field p[i in n]: f64 = cast(f64, i) + 1.0
+field q[i in n]: f64 = (((1.0 * p[periodic(i,n)]) + ((-1.0) * p[periodic(i,n)])) + ((2.0 * p[periodic(i,n)]) + ((-2.0) * p[periodic(i,n)])))
+sum checksum[i in n]: f64 = q[i]
+output checksum
+test (8) => { checksum = 0.0 }

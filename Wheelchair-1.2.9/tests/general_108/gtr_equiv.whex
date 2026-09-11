@@ -1,0 +1,7 @@
+program gtr_equiv
+tolerance 1e-10
+input n: u64 range 8..1048576
+field x[i in n]: f64 = cast(f64, i) * 0.5 + 1.0
+sum total[i in n]: f64 = x[i]
+output total
+test (8) => { total = 22.0 }

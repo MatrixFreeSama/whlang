@@ -1,0 +1,161 @@
+{
+  "format": "wheelchair.tensor/1",
+  "program": "tolerant_fma_contract",
+  "contracts": {
+    "deterministic": true,
+    "integer_overflow": "trap",
+    "floating_point": "tolerant",
+    "mixed_precision": "lower_precision_dominates"
+  },
+  "inputs": [
+    {
+      "name": "n",
+      "type": "u64",
+      "min": 4,
+      "max": 1000000
+    }
+  ],
+  "bindings": [
+    {
+      "name": "p",
+      "op": "map",
+      "type": "f64",
+      "axes": [
+        {
+          "name": "i",
+          "extent": {
+            "var": "n"
+          }
+        }
+      ],
+      "expr": {
+        "op": "add",
+        "args": [
+          {
+            "literal": -0.375,
+            "type": "f64"
+          },
+          {
+            "op": "div",
+            "args": [
+              {
+                "op": "cast",
+                "to": "f64",
+                "args": [
+                  {
+                    "op": "mod",
+                    "args": [
+                      {
+                        "op": "add",
+                        "args": [
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "axis": "i"
+                              },
+                              {
+                                "literal": 31,
+                                "type": "u64"
+                              }
+                            ]
+                          },
+                          {
+                            "literal": 5,
+                            "type": "u64"
+                          }
+                        ]
+                      },
+                      {
+                        "literal": 1024,
+                        "type": "u64"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "literal": 1024.0,
+                "type": "f64"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "y",
+      "op": "map",
+      "type": "f64",
+      "axes": [
+        {
+          "name": "i",
+          "extent": {
+            "var": "n"
+          }
+        }
+      ],
+      "expr": {
+        "op": "add",
+        "args": [
+          {
+            "literal": 1.0,
+            "type": "f64"
+          },
+          {
+            "op": "mul",
+            "args": [
+              {
+                "literal": 2.0,
+                "type": "f64"
+              },
+              {
+                "load": "p",
+                "indices": [
+                  {
+                    "axis": "i"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "checksum",
+      "op": "reduce",
+      "kind": "sum",
+      "accumulator": {
+        "base": "f64",
+        "mode": "tolerant",
+        "absolute_error": 1e-12,
+        "relative_error": 1e-10
+      },
+      "axes": [
+        {
+          "name": "i",
+          "extent": {
+            "var": "n"
+          }
+        }
+      ],
+      "expr": {
+        "load": "y",
+        "indices": [
+          {
+            "axis": "i"
+          }
+        ]
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "label": "checksum",
+      "expr": {
+        "var": "checksum"
+      }
+    }
+  ]
+}

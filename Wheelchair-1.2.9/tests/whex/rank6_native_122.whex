@@ -1,0 +1,6 @@
+program rank6_native_122
+tolerance 1e-12
+input n: u64 range 4..1000000
+sum checksum[i in n, j in 2, k in 2, l in 2, m in 2, p in 2]: f64 = cast(f64, i * 32 + j * 16 + k * 8 + l * 4 + m * 2 + p)
+output checksum
+test (4) => { checksum = 8128.0 }

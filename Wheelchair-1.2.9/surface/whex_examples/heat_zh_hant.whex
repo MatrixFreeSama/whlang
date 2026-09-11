@@ -1,0 +1,10 @@
+程式 whex_heat_equivalence
+容差 1e-10
+輸入 n: u64 範圍 4..100000000
+場 u[i 屬於 n]: f64 = 0.25 + 轉換(f64, (i * 17 + 3) % 1024) / 1024.0
+每個 i 屬於 n {
+    next: f64 = u[i] + 0.125 * (u[週期(i + n - 1, n)] - 2.0 * u[i] + u[週期(i + 1, n)])
+}
+總和 checksum[i 屬於 n]: f64 = next[i]
+輸出 checksum
+測試 (4) => { checksum = 1.111328125 }

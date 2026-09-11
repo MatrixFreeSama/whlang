@@ -1,0 +1,5 @@
+program negmin
+input x: i64
+let y = -x
+output y = y
+test () => { y = 0 }

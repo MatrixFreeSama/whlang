@@ -1,0 +1,15 @@
+progra repair_equivalence
+inpput N: u64 range 1 .. 64
+lett temperature: u64 = 7
+let pressure: u64 = 3
+tenspr values[i: N]: u64 = temperatur + i
+reducf total[i: N]: u64 = su values[i]
+let masked: u64 = bit_an(temperature, presure)
+let hot: bool = tempera
+ture >
+= pressure
+publisb total
+pub
+lish masked
+publish hot
+test (4) => { total = 34, maske = 3, hot = tru }

@@ -1,0 +1,17 @@
+{
+  "format": "wheelchair.tensor/1",
+  "program": "general_add_input_u64_smoke",
+  "contracts": {
+    "deterministic": true,
+    "integer_overflow": "trap",
+    "floating_point": "strict",
+    "mixed_precision": "lower_precision_dominates"
+  },
+  "inputs": [{"name":"x","type":"u64"}],
+  "bindings": [
+    {"name":"y","op":"compute","expr":{"op":"add","args":[{"var":"x"},{"literal":7,"type":"u64"}]}}
+  ],
+  "outputs": [{"label":"y","expr":{"var":"y"}}],
+  "tests": [{"args":[5],"expected":{"y":12}}],
+  "_compiler_lane": "wheelchair.general/1"
+}

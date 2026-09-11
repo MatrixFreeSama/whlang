@@ -1,0 +1,10 @@
+程序 whex_heat_equivalence
+tolerance 1e-10
+輸入 n: u64 range 4..100000000
+field u[i 属于 n]: f64 = 0.25 + cast(f64, (i * 17 + 3) % 1024) / 1024.0
+每個 i in n {
+    next: f64 = u[i] + 0.125 * (u[周期(i + n - 1, n)] - 2.0 * u[i] + u[periodic(i + 1, n)])
+}
+sum checksum[i 屬於 n]: f64 = next[i]
+输出 checksum
+test (4) => { checksum = 1.111328125 }

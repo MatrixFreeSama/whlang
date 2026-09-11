@@ -1,0 +1,5 @@
+program selectmix
+input c: bool
+let y = select(c, 1, 2.5)
+output y = y
+test () => { y = 1.0 }
