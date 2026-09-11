@@ -35,3 +35,30 @@ jobs:
       - name: Wheelchair complete regression
         working-directory: Wheelchair-1.2.10
         run: ./test_complete.sh
+
+  capture-generated-assembly:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Materialize current deterministic assembly physicalizations
+        working-directory: Wheelchair-1.2.10
+        run: |
+          ./build.sh >/dev/null
+          mkdir -p build/pure_asm_capture
+          cp -a build/generated_derived build/pure_asm_capture/
+          cp -a build/generated_native256 build/pure_asm_capture/
+          cp build/topologyc_multi_isa_x86_64.S build/pure_asm_capture/
+          cp build/tensor_frontend_profile_base.S build/pure_asm_capture/
+          cp build/tensor_frontend_profile_wide.S build/pure_asm_capture/
+          cp build/runtime_derived_offsets.inc build/pure_asm_capture/
+          cp build/runtime_native256_offsets.inc build/pure_asm_capture/
+          cp build/runtime_derived_native256_offsets.inc build/pure_asm_capture/
+          cp build/general_parallel_release_offsets.json build/pure_asm_capture/
+          tar -C build -czf pure-asm-capture.tar.gz pure_asm_capture
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheelchair-1.2.10-generated-assembly
+          path: Wheelchair-1.2.10/build/pure-asm-capture.tar.gz
+          if-no-files-found: error
+          retention-days: 1
