@@ -36,6 +36,21 @@ jobs:
         working-directory: Wheelchair-1.2.10
         run: ./test_complete.sh
 
+  source-snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: wheelchair-1.2.10
+      - name: Pack clean 1.2.10 source
+        run: tar -czf wheelchair-1.2.10-source.tar.gz Wheelchair-1.2.10
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheelchair-1.2.10-source-snapshot
+          path: wheelchair-1.2.10-source.tar.gz
+          retention-days: 1
+
   freeze-native-assembly:
     if: github.event_name == 'pull_request' && github.head_ref == 'wheelchair-1.2.10'
     runs-on: ubuntu-latest
