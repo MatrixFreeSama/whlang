@@ -30,8 +30,7 @@ derived_product_va=$(nm -n "$BUILD/tensor_derived_runtime_template" | awk '$3=="
 [ -n "$derived_product_va" ]
 printf '.equ RUNTIME_RANK_N_PRODUCT_OFF, 0x%x\n' $((derived_product_va-0x400000)) >> "$BUILD/runtime_derived_offsets.inc"
 
-# True AVX2/YMM four-lane runtimes. These are independent physicalizations, not
-# scalar fallbacks and not wrappers around the 512-bit runtime.
+# True AVX2/YMM four-lane runtimes. Independent physicalizations, never scalar fallbacks.
 as --64 "$BUILD/generated_native256/tensor_runtime_native256_template_x86_64.S" -o "$BUILD/tensor_runtime_native256_template.o"
 ld -nostdlib -static -z noexecstack -T runtime/tensor_runtime.ld \
   "$BUILD/tensor_runtime_native256_template.o" -o "$BUILD/tensor_runtime_native256_template"
@@ -54,22 +53,24 @@ ld -nostdlib -static -z noexecstack -T runtime/general_runtime.ld \
   "$BUILD/general_runtime_template.o" -o "$BUILD/general_runtime_template"
 ./tools/generate_general_runtime_offsets.sh "$BUILD/general_runtime_template" compiler/general_runtime_offsets.inc
 
-# Generic binding-level causal slot engine is ISA-orthogonal.
-as --64 runtime/general_parallel_slot_x86_64.S -o "$BUILD/general_parallel_slot.o"
-ld -nostdlib -static -z noexecstack -T runtime/general_parallel_slot.ld \
-  "$BUILD/general_parallel_slot.o" -o "$BUILD/general_parallel_slot.elf"
+# 1.2.9 recipient-blind general causal engine. There is deliberately no home-slot
+# engine, per-worker inbox, causal resource router, work-stealing witness, or
+# schedulerless legacy runtime in the active source tree.
+as --64 runtime/general_parallel_release_x86_64.S -o "$BUILD/general_parallel_release.o"
+ld -nostdlib -static -z noexecstack -T runtime/general_parallel_release.ld \
+  "$BUILD/general_parallel_release.o" -o "$BUILD/general_parallel_release.elf"
 objcopy -O binary --only-section=.text \
-  "$BUILD/general_parallel_slot.elf" "$BUILD/general_parallel_slot_template.bin"
-python3 tools/generate_general_parallel_slot_offsets.py \
-  "$BUILD/general_parallel_slot.elf" "$BUILD/general_parallel_slot_template.bin" \
-  "$BUILD/general_parallel_slot_offsets.json"
+  "$BUILD/general_parallel_release.elf" "$BUILD/general_parallel_release_template.bin"
+python3 tools/generate_general_parallel_release_offsets.py \
+  "$BUILD/general_parallel_release.elf" "$BUILD/general_parallel_release_template.bin" \
+  "$BUILD/general_parallel_release_offsets.json"
 
 # Shared handwritten sovereign topology core with physical-shape capability algebra.
 as --64 "$BUILD/topologyc_multi_isa_x86_64.S" -o "$BUILD/topologyc_core.o"
 as --64 compiler/general_frontend_x86_64.S -o "$BUILD/general_frontend.o"
 as --64 compiler/general_runtime_blob_x86_64.S -o "$BUILD/general_runtime_blob.o"
 
-# Native/split 512 physicalizers: execution bytes remain inherited from 1.2.6.
+# Native/split 512 physicalizers: protected execution bytes remain inherited.
 as --64 "$BUILD/tensor_frontend_profile_base.S" -o "$BUILD/tensor_frontend_base.o"
 as --64 "$BUILD/tensor_frontend_profile_wide.S" -o "$BUILD/tensor_frontend_wide.o"
 as --64 compiler/runtime_blob_x86_64.S -o "$BUILD/runtime_blob.o"
@@ -101,23 +102,12 @@ ld -nostdlib -static -z noexecstack \
   "$BUILD/topologyc_core.o" "$BUILD/tensor_frontend_derived_native256.o" "$BUILD/general_frontend.o" \
   "$BUILD/runtime_derived_native256_blob.o" "$BUILD/general_runtime_blob.o" -o "$BUILD/topologyc-derived-native256"
 
-# Historical 1.2.5 fabrics remain witnesses only. topology-parallel remains the
-# general causal execution authority independent of vector width.
-as --64 runtime/causal_return_fabric_x86_64.S -o "$BUILD/causal_return_fabric.o"
-ld -nostdlib -static -z noexecstack "$BUILD/causal_return_fabric.o" -o "$BUILD/topology-fabric-125-witness"
-as --64 runtime/causal_return_parallel_x86_64.S -o "$BUILD/causal_return_parallel.o"
-ld -nostdlib -static -z noexecstack "$BUILD/causal_return_parallel.o" -o "$BUILD/topology-fabric-run-125-witness"
-as --64 runtime/schedulerless_causal_x86_64.S -o "$BUILD/topology_parallel.o"
-ld -nostdlib -static -z noexecstack "$BUILD/topology_parallel.o" -o "$BUILD/topology-parallel"
-
 for f in \
   "$BUILD/topologyc" "$BUILD/topologyc-wide" "$BUILD/topologyc-derived" \
   "$BUILD/topologyc-native256" "$BUILD/topologyc-wide-native256" "$BUILD/topologyc-derived-native256" \
   "$BUILD/tensor_runtime_template" "$BUILD/tensor_derived_runtime_template" \
   "$BUILD/tensor_runtime_native256_template" "$BUILD/tensor_derived_runtime_native256_template" \
-  "$BUILD/general_runtime_template" "$BUILD/general_parallel_slot.elf" \
-  "$BUILD/topology-fabric-125-witness" "$BUILD/topology-fabric-run-125-witness" \
-  "$BUILD/topology-parallel"; do
+  "$BUILD/general_runtime_template" "$BUILD/general_parallel_release.elf"; do
   readelf -d "$f" 2>&1 | grep -q 'There is no dynamic section'
 done
 
@@ -136,13 +126,19 @@ echo 'NATIVE256_DERIVED=BUILT'
 echo 'NATIVE256_SCALAR_FALLBACK=0'
 echo 'PHYSICAL_VECTOR_PROFILE_WORKLOAD_DISPATCH=0'
 echo 'PHYSICAL_VECTOR_RUNTIME_PROFITABILITY_SELECTOR=0'
-echo 'GENERAL_PARALLEL_SLOT_ENGINE=BUILT'
-echo 'GENERAL_PARALLEL_SLOT_FOREIGN_RUNTIME_BACKEND=0'
-echo 'GENERAL_PARALLEL_FABRIC_1_2_7=BUILT'
-echo 'GENERAL_PARALLEL_FABRIC_AUTHORITY=topology-parallel'
+echo 'GENERAL_PARALLEL_BLIND_RELEASE_ENGINE=BUILT'
+echo 'GENERAL_PARALLEL_FABRIC_AUTHORITY=blind-release-program-slot'
 echo 'GENERAL_PARALLEL_GLOBAL_READY_QUEUE=0'
 echo 'GENERAL_PARALLEL_ROOT_SCHEDULER=0'
 echo 'GENERAL_PARALLEL_RUNTIME_COST_SELECTOR=0'
 echo 'GENERAL_PARALLEL_SERIAL_FALLBACK=0'
+echo 'GENERAL_PARALLEL_RUNTIME_FIXED_HOME_OWNERSHIP=0'
+echo 'GENERAL_PARALLEL_PERSISTENT_IDLE_WORKER_SPIN=0'
+echo 'GENERAL_PARALLEL_POST_COMPLETION_WORK_SEARCH=0'
+echo 'GENERAL_PARALLEL_POST_COMPLETION_PEER_QUERY=0'
+echo 'GENERAL_PARALLEL_RESOURCE_RELEASE_DESTINATION=0'
+echo 'GENERAL_PARALLEL_RESOURCE_HANDOFF=0'
+echo 'GENERAL_PARALLEL_BLIND_RESOURCE_RELEASE=PASS'
 echo 'ACTIVE_SPECIAL_PURPOSE_NATIVE_ROUTE=0'
+echo 'WHEELCHAIR_1_2_9_RESOURCE_SEMANTIC_CORRECTION=BUILT'
 echo 'WHEELCHAIR_BUILD=PASS'
