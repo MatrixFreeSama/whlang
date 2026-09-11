@@ -1,0 +1,55 @@
+name: cleanup 1.2.14 once
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/cleanup-1.2.14-once.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    if: github.actor != 'github-actions[bot]'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Remove generated and redundant 1.2.14 artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          root='Wheelchair-1.2.14'
+          test -d "$root"
+
+          rm -rf \
+            "$root/build" \
+            "$root/history_1_2_10" \
+            "$root/history_1_2_11" \
+            "$root/history_1_2_12" \
+            "$root/history_1_2_13"
+
+          rm -f \
+            "$root/.release_build_1214.log" \
+            "$root/SHA256SUMS" \
+            "$root/topologyc" \
+            "$root/topologyc-derived" \
+            "$root/topologyc-wide" \
+            "$root/wheelchairc" \
+            "$root/whexc" \
+            "$root/.cleanup-note.tmp" \
+            "$root/CLEANUP_PLAN_1_2_14.tmp" \
+            "$root/DELETE_ME.tmp" \
+            "$root/.tmp-do-not-keep" \
+            "$root/.tmp-last"
+
+          rm -f .github/workflows/cleanup-1.2.14-once.yml
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --quiet || git commit -m 'Clean redundant artifacts from expanded 1.2.14 [skip ci]'
+          git push origin HEAD:main
