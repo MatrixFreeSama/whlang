@@ -55,7 +55,7 @@ jobs:
           cp build/runtime_native256_offsets.inc build/pure_asm_capture/
           cp build/runtime_derived_native256_offsets.inc build/pure_asm_capture/
           cp build/general_parallel_release_offsets.json build/pure_asm_capture/
-          tar -C build -czf pure-asm-capture.tar.gz pure_asm_capture
+          tar -czf build/pure-asm-capture.tar.gz -C build pure_asm_capture
       - uses: actions/upload-artifact@v4
         with:
           name: wheelchair-1.2.10-generated-assembly
