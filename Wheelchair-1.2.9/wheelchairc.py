@@ -10,6 +10,9 @@ import native_backend_matrix as nbm
 import general_parallel_plan as gpp
 import general_parallel_native as gpn
 
+PARALLEL_AUTHORITY='blind-release-causality'
+COMPILER_RELEASE='1.2.9'
+
 
 def _compile_native(core_bytes: bytes, output: Path, executors: int, *, profile: dict, isa_limit: str | None=None) -> tuple[int,str,str,dict|None]:
     try:
@@ -26,13 +29,11 @@ def _compile_native(core_bytes: bytes, output: Path, executors: int, *, profile:
 
 
 def _compile_general_parallel(core_bytes: bytes, data: dict, output: Path, executors: int, *, isa_limit: str | None=None):
-    """Keep handwritten topologyc as native lowerer; replace only slot layout."""
+    """Keep handwritten topologyc as native lowerer; replace only the general program slot."""
     with tempfile.TemporaryDirectory(prefix='wheelchair_general_parallel_') as td:
         scalar=Path(td)/'serial-general.elf'
         profile=nrp.analyze(data)
         if profile.get('backend_class')!='base':
-            # General scalar/control fragments have no tensor resource pressure.
-            # Any other class here means the structural/general boundary changed.
             return 65,'','Wheelchair general-parallel native rejection: non-base general profile\n',None,None
         rc,out,err,physical=_compile_native(core_bytes,scalar,1,profile=profile,isa_limit=isa_limit)
         if rc:
@@ -47,11 +48,12 @@ def _compile_general_parallel(core_bytes: bytes, data: dict, output: Path, execu
 def main():
     ap=argparse.ArgumentParser(description='Wheelchair UTF-8 human surface -> native static ELF')
     ap.add_argument('source',type=Path); ap.add_argument('-o','--output',type=Path,required=True)
-    ap.add_argument('--executors',type=int,choices=[1,2,4],default=1)
+    ap.add_argument('--executors',type=int,choices=[1,2,4],default=1,
+                    help='maximum CPU width; runnable causal nodes are scheduled by the OS inside this AOT affinity envelope')
     ap.add_argument('--isa-limit',choices=['native','avx512f','avx512dq','avx2'],default=None,
                     help='AOT backend capability ceiling for ISA audit/testing; never selects a scalar fallback')
     ap.add_argument('--semantic-plan',type=Path,default=None,
-                    help='write structural/general semantics plus universal causal physicalization')
+                    help='write structural/general semantics plus recipient-blind causal physicalization')
     a=ap.parse_args()
 
     if a.source.suffix.lower() != '.wh':
@@ -77,7 +79,7 @@ def main():
         print(json.dumps({
             'source':str(a.source), 'output':str(a.output),
             'surface_lane':'wheelchair.wh.inference_surface/1',
-            'compiler_release':'1.2.7',
+            'compiler_release':COMPILER_RELEASE,
             'core_sha256':wh_structural.core_hash(data),
             'native_core_sha256':wh_structural.core_hash(data),
             'general_topology_recovery':{'active':False,'reason':'structural_lane_selected_before_native_compilation'},
@@ -86,8 +88,8 @@ def main():
             'native_physical_backend':physical,
             'semantic_sha256':plan.get('semantic_sha256'),
             'requested_executors':a.executors,
-            'effective_executors':a.executors,
-            'parallel_fabric_authority':'topology-parallel',
+            'effective_cpu_width':a.executors,
+            'parallel_fabric_authority':PARALLEL_AUTHORITY,
             'repair_count':len(parser.repairs),
             'repairs':[r.as_dict() for r in parser.repairs]
         },ensure_ascii=False,indent=2))
@@ -112,8 +114,6 @@ def main():
         rc,out,err,physical=_compile_native(blob,a.output,a.executors,profile=profile,isa_limit=a.isa_limit)
         effective=a.executors
     elif a.executors==1:
-        # Width-one causal materialization is an explicit AOT specialization,
-        # not a failure path and never a runtime profitability decision.
         rc,out,err,physical=_compile_native(blob,a.output,1,profile=profile,isa_limit=a.isa_limit)
         effective=1
     else:
@@ -124,8 +124,8 @@ def main():
         sys.stderr.write(err or out); return rc
 
     semantic={
-        'semantic_format':'wheelchair.wh.general/1',
-        'compiler_release':'1.2.7',
+        'semantic_format':'wheelchair.wh.general/2',
+        'compiler_release':COMPILER_RELEASE,
         'structural_recovery':gtr,
         'general_parallel_fabric':parallel,
         'native_resource_profile':profile,
@@ -137,12 +137,18 @@ def main():
             'runtime_cost_selector':0,
             'hidden_serial_fallback':0,
             'intermediate_global_barriers':0,
+            'runtime_fixed_home_ownership':0,
+            'persistent_idle_worker_spin':0,
+            'post_completion_work_search':0,
+            'post_completion_peer_query':0,
+            'resource_release_destination':0,
+            'resource_handoff':0,
             'terminal_join_only':bool(native_parallel),
         },
         'native_physicalization':{
-            'lane':'recovered_topology_native' if gtr.get('active') else ('direct_general_native_q1' if a.executors==1 else 'general_causal_native'),
-            'executor_materialization':effective,
-            'parallel_fabric_authority':'topology-parallel',
+            'lane':'recovered_topology_native' if gtr.get('active') else ('direct_general_native_q1' if a.executors==1 else 'general_blind_release_native'),
+            'cpu_width':effective,
+            'parallel_fabric_authority':PARALLEL_AUTHORITY,
             'native_fragments':native_parallel,
             'machine_code_lowerer':'handwritten_topologyc_general_frontend',
             'foreign_runtime_backend':False,
@@ -154,8 +160,8 @@ def main():
         a.semantic_plan.write_text(json.dumps(semantic,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
     print(json.dumps({
         'source':str(a.source), 'output':str(a.output),
-        'surface_lane':'wheelchair.wh.legacy_general/1',
-        'compiler_release':'1.2.7',
+        'surface_lane':'wheelchair.wh.legacy_general/2',
+        'compiler_release':COMPILER_RELEASE,
         'core_sha256':wh_surface.core_hash(data),
         'lowered_core_sha256':wh_surface.core_hash(lowered_data),
         'native_core_sha256':wh_surface.core_hash(native_data),
@@ -166,9 +172,8 @@ def main():
         'native_resource_profile':profile,
         'native_physical_backend':physical,
         'requested_executors':a.executors,
-        'effective_executors':effective,
-        'parallel_fabric_executors':parallel.get('materialized_slots',0),
-        'parallel_fabric_authority':'topology-parallel',
+        'effective_cpu_width':effective,
+        'parallel_fabric_authority':PARALLEL_AUTHORITY,
         'repair_count':len(parser.repairs),
         'repairs':[r.as_dict() for r in parser.repairs]
     },ensure_ascii=False,indent=2))
