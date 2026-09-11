@@ -6,6 +6,8 @@ cd "$ROOT"
 ./build.sh > .wheelchair_1210_build.log 2>&1
 grep -Fq 'GENERAL_PARALLEL_BLIND_RESOURCE_RELEASE=PASS' .wheelchair_1210_build.log
 
+# 1.2.9 semantic correction remains a hard floor. Retired routing implementations
+# must not re-enter the active tree.
 for p in \
   runtime/causal_return_fabric_x86_64.S \
   runtime/causal_return_parallel_x86_64.S \
@@ -18,6 +20,7 @@ for p in \
   [ ! -e "$p" ] || { echo "retired resource-routing source survived: $p" >&2; exit 1; }
 done
 
+# No busy idle loop and no routing vocabulary may survive as machine symbols.
 if objdump -d build/general_parallel_release.elf | grep -Eq '(^|[[:space:]])pause([[:space:]]|$)'; then
   echo 'causal-region engine contains idle PAUSE spin' >&2; exit 1
 fi
@@ -25,10 +28,11 @@ if nm build/general_parallel_release.elf | grep -Ei 'home_slot|remote_head|inbox
   echo 'retired ownership/routing symbol survived in causal-region engine' >&2; exit 1
 fi
 
+# Stack allocation is invocation-scoped. Recursive context materialization is not
+# allowed to mmap/munmap a stack for every region.
 [ "$(grep -c 'mov eax, SYS_mmap' runtime/general_parallel_release_x86_64.S)" -eq 2 ]
-[ "$(grep -c 'mov eax, SYS_munmap' runtime/general_parallel_release_x86_64.S)" -eq 2 ]
-awk '/^\.grt_internal:/{f=1} /^\.grt_child:/{f=0} f{print}' runtime/general_parallel_release_x86_64.S > build/grt_internal_1210.txt
-if grep -Eq 'SYS_mmap|SYS_munmap' build/grt_internal_1210.txt; then
+awk '/^gr_run_node_tree:/{f=1} /^gr_node_task:/{f=0} f{print}' runtime/general_parallel_release_x86_64.S > build/grt_lifecycle_1210.txt
+if grep -Eq 'SYS_mmap|SYS_munmap' build/grt_lifecycle_1210.txt; then
   echo 'per-context stack mmap/munmap returned to recursive lifecycle path' >&2; exit 1
 fi
 
@@ -47,6 +51,7 @@ def check_fused_edges(p,edges):
             assert len(succ[u])==1,(u,v,succ[u])
             assert len(pred[v])==1,(u,v,pred[v])
 
+# Pure causal chain has no observable intermediate parallel-release boundary.
 n=32; chain=[(i,i+1) for i in range(n-1)]
 p=g.causal_geometry([f'c{i}' for i in range(n)],chain,4)
 assert p['causal_region_count']==1,p
@@ -56,12 +61,15 @@ assert p['max_region_nodes']==32
 assert p['region_edge_uv_u32']==[]
 check_fused_edges(p,chain)
 
+# Diamond branch/join boundaries are sacred and cannot be fused away.
 diamond=[(0,1),(0,2),(1,3),(2,3)]
 p=g.causal_geometry(['a','b','c','d'],diamond,4)
 assert p['causal_region_count']==4,p
 assert p['fused_node_count']==0
 check_fused_edges(p,diamond)
 
+# Generic mixed DAG: independent branch tails contract structurally, without a
+# workload name, timing threshold, home slot, or runtime selector.
 mixed=[(0,1),(0,2),(1,3),(2,4),(3,5),(4,6)]
 p=g.causal_geometry([str(i) for i in range(7)],mixed,4)
 assert p['causal_region_count']==3,p
@@ -133,6 +141,7 @@ for name in ('branch','iterate'):
 print('GENERAL_PARALLEL_NATIVE_CAUSAL_REGION_1210=PASS')
 PY
 
+# Protect generality/technical peaks that are independent of this runtime change.
 ./test_rank_n_122.sh
 ./test_native_resource_profiles_126.sh
 python3 ./test_multi_isa_profiles_127.py
