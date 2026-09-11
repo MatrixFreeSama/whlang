@@ -1,0 +1,30 @@
+Wheelchair 1.2.10 release gates
+
+[required] build.sh completes and emits GENERAL_PARALLEL_BLIND_RESOURCE_RELEASE=PASS
+[required] test_1210.sh completes
+[required] chain32 contracts to exactly 1 causal region
+[required] diamond4 remains exactly 4 causal regions
+[required] generic mixed branch/tail graph contracts only degree-proved edges
+[required] every fused u->v boundary proves outdegree(u)=1 and indegree(v)=1
+[required] region fusion uses no workload name, benchmark identity, timing, or runtime selector
+[required] native q2/q4 outputs match q1 for branch_probe and iterate_probe
+[required] generated executables remain static ELF
+[required] per-context stack mmap=0
+[required] per-context stack munmap=0
+[required] no PAUSE idle spin in the blind-release engine
+[required] global ready queue=0
+[required] global ready scan=0
+[required] root scheduler=0
+[required] work stealing=0
+[required] fixed runtime home ownership=0
+[required] post-completion work search=0
+[required] post-completion peer query=0
+[required] resource release destination=0
+[required] resource handoff=0
+[required] Rank-N regression gate passes
+[required] native resource profile gate passes
+[required] multi-ISA profile gate passes
+[required] native256 physicalizer/maturity gates pass
+[required] 1.2.8 release-preservation gate passes
+
+Release status is PASS only after the above commands execute successfully on the release tree.

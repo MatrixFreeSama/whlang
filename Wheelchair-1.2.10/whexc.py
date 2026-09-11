@@ -9,7 +9,7 @@ import native_backend_matrix as nbm
 import general_parallel_plan as gpp
 
 PARALLEL_AUTHORITY='blind-release-causality'
-COMPILER_RELEASE='1.2.9'
+COMPILER_RELEASE='1.2.10'
 
 
 def compile_native(data, output: Path, executors: int, isa_limit: str | None):
@@ -35,7 +35,7 @@ def main():
     ap.add_argument('--executors',type=int,choices=[1,2,4],default=1,
                     help='maximum CPU width; resource reuse remains OS/hardware authority')
     ap.add_argument('--isa-limit',choices=['native','avx512f','avx512dq','avx2'],default=None,help='AOT backend capability ceiling for ISA audit/testing; never selects a scalar fallback')
-    ap.add_argument('--semantic-plan',type=Path,default=None,help='write Region/Effect/Dependency semantics plus recipient-blind causal plan')
+    ap.add_argument('--semantic-plan',type=Path,default=None,help='write Region/Effect/Dependency semantics plus recipient-blind causal-region plan')
     a=ap.parse_args()
     data,parser,_=whex_surface.load_surface(a.source)
     profile,physical=compile_native(data,a.output,a.executors,a.isa_limit)

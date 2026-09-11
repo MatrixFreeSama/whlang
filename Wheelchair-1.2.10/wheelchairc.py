@@ -11,7 +11,7 @@ import general_parallel_plan as gpp
 import general_parallel_native as gpn
 
 PARALLEL_AUTHORITY='blind-release-causality'
-COMPILER_RELEASE='1.2.9'
+COMPILER_RELEASE='1.2.10'
 
 
 def _compile_native(core_bytes: bytes, output: Path, executors: int, *, profile: dict, isa_limit: str | None=None) -> tuple[int,str,str,dict|None]:
@@ -49,11 +49,11 @@ def main():
     ap=argparse.ArgumentParser(description='Wheelchair UTF-8 human surface -> native static ELF')
     ap.add_argument('source',type=Path); ap.add_argument('-o','--output',type=Path,required=True)
     ap.add_argument('--executors',type=int,choices=[1,2,4],default=1,
-                    help='maximum CPU width; runnable causal nodes are scheduled by the OS inside this AOT affinity envelope')
+                    help='maximum CPU width; runnable causal regions are scheduled by the OS inside this AOT affinity envelope')
     ap.add_argument('--isa-limit',choices=['native','avx512f','avx512dq','avx2'],default=None,
                     help='AOT backend capability ceiling for ISA audit/testing; never selects a scalar fallback')
     ap.add_argument('--semantic-plan',type=Path,default=None,
-                    help='write structural/general semantics plus recipient-blind causal physicalization')
+                    help='write structural/general semantics plus recipient-blind causal-region physicalization')
     a=ap.parse_args()
 
     if a.source.suffix.lower() != '.wh':
@@ -124,7 +124,7 @@ def main():
         sys.stderr.write(err or out); return rc
 
     semantic={
-        'semantic_format':'wheelchair.wh.general/2',
+        'semantic_format':'wheelchair.wh.general/3',
         'compiler_release':COMPILER_RELEASE,
         'structural_recovery':gtr,
         'general_parallel_fabric':parallel,
@@ -146,7 +146,7 @@ def main():
             'terminal_join_only':bool(native_parallel),
         },
         'native_physicalization':{
-            'lane':'recovered_topology_native' if gtr.get('active') else ('direct_general_native_q1' if a.executors==1 else 'general_blind_release_native'),
+            'lane':'recovered_topology_native' if gtr.get('active') else ('direct_general_native_q1' if a.executors==1 else 'general_blind_release_causal_region_native'),
             'cpu_width':effective,
             'parallel_fabric_authority':PARALLEL_AUTHORITY,
             'native_fragments':native_parallel,
@@ -160,7 +160,7 @@ def main():
         a.semantic_plan.write_text(json.dumps(semantic,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
     print(json.dumps({
         'source':str(a.source), 'output':str(a.output),
-        'surface_lane':'wheelchair.wh.legacy_general/2',
+        'surface_lane':'wheelchair.wh.legacy_general/3',
         'compiler_release':COMPILER_RELEASE,
         'core_sha256':wh_surface.core_hash(data),
         'lowered_core_sha256':wh_surface.core_hash(lowered_data),

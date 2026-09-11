@@ -90,13 +90,13 @@ echo 'WHEELCHAIR_1_0_15_COMPLETE=PASS'
 # 1.1.0 general high-level / true-parallel semantic gate.
 ./test_whex_semantic_parallel_121.sh
 
-echo 'WHEELCHAIR_1_1_0_SEMANTIC_INVARIANTS_ON_1_2_1=PASS'
+echo 'WHEELCHAIR_1_1_0_SEMANTIC_INVARIANTS_ON_1_2_10=PASS'
 
 # 1.2.x WH/WHEX equivalent-surface gate. Human/canonical semantics stay frozen;
 # native bytes may improve only while WH and WHEX remain byte-identical peers.
 ./test_wh_equivalence_121.sh
 
-echo 'WHEELCHAIR_1_2_0_SURFACE_INVARIANTS_ON_1_2_1=PASS'
+echo 'WHEELCHAIR_1_2_0_SURFACE_INVARIANTS_ON_1_2_10=PASS'
 
 # 1.2.1 generic interior periodic-composition and mature Newton/Jv regression gates.
 ./test_121.sh
@@ -104,8 +104,8 @@ echo 'WHEELCHAIR_1_2_0_SURFACE_INVARIANTS_ON_1_2_1=PASS'
 
 echo 'WHEELCHAIR_1_2_1_COMPLETE=PASS'
 
-# 1.2.9 recipient-blind resource semantics. This gate also proves that the
-# retired causal-resource-routing source is physically absent from the tree.
-./test_129.sh
+# 1.2.10 retains recipient-blind release and replaces per-node physicalization
+# with AOT-proved causal regions plus one invocation-scoped stack arena.
+./test_1210.sh
 
-echo 'WHEELCHAIR_1_2_9_COMPLETE=PASS'
+echo 'WHEELCHAIR_1_2_10_COMPLETE=PASS'
