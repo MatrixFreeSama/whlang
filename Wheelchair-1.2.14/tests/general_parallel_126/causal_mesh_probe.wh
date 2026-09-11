@@ -1,0 +1,12 @@
+program causal_mesh_probe
+contract integer_overflow = wrap
+input x: u64
+let root = x + 1
+let l1 = root + 2
+let l2 = l1 + 3
+let r1 = root + 4
+let r2 = r1 + 5
+let join = l2 + r2
+let tail = join + 6
+output y = tail
+test (1) => { y = 24 }

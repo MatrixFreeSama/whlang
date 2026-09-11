@@ -1,0 +1,6 @@
+program dense_bilinear_128
+strict
+input n: u64 range 64..8192
+sum checksum[b in n, i in 128, j in 128]: f64 = (0.5 + cast(f64, (b * 31 + i * 17 + j * 13 + 7) % 2048) / 2048.0) * (-0.375 + cast(f64, (b * 19 + j * 23 + 5) % 1024) / 1024.0) + 0.03125 * cast(f64, i) * cast(f64, j) / 16384.0
+output checksum
+test (64) => { checksum = 0.0 }

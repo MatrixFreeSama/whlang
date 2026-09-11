@@ -1,0 +1,21 @@
+program profile_recompute15
+tolerance 1e-10
+input n: u64 range 4..1000000
+field a0[i in n]: f64 = cast(f64, (i + 0) % 1024) / 1024.0
+field a1[i in n]: f64 = cast(f64, (i + 1) % 1024) / 1024.0
+field a2[i in n]: f64 = cast(f64, (i + 2) % 1024) / 1024.0
+field a3[i in n]: f64 = cast(f64, (i + 3) % 1024) / 1024.0
+field a4[i in n]: f64 = cast(f64, (i + 4) % 1024) / 1024.0
+field a5[i in n]: f64 = cast(f64, (i + 5) % 1024) / 1024.0
+field a6[i in n]: f64 = cast(f64, (i + 6) % 1024) / 1024.0
+field a7[i in n]: f64 = cast(f64, (i + 7) % 1024) / 1024.0
+field a8[i in n]: f64 = cast(f64, (i + 8) % 1024) / 1024.0
+field a9[i in n]: f64 = cast(f64, (i + 9) % 1024) / 1024.0
+field a10[i in n]: f64 = cast(f64, (i + 10) % 1024) / 1024.0
+field a11[i in n]: f64 = cast(f64, (i + 11) % 1024) / 1024.0
+field a12[i in n]: f64 = cast(f64, (i + 12) % 1024) / 1024.0
+field a13[i in n]: f64 = cast(f64, (i + 13) % 1024) / 1024.0
+field a14[i in n]: f64 = cast(f64, (i + 14) % 1024) / 1024.0
+sum checksum[i in n]: f64 = a0[i] + a1[i] + a2[i] + a3[i] + a4[i] + a5[i] + a6[i] + a7[i] + a8[i] + a9[i] + a10[i] + a11[i] + a12[i] + a13[i] + a14[i]
+output checksum
+test (4) => { checksum = 0.498046875 }

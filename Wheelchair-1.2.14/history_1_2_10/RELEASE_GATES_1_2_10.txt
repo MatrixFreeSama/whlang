@@ -1,0 +1,26 @@
+Wheelchair 1.2.10 final release gates
+
+[required] no .py file exists in release package
+[required] build.sh contains no Python invocation
+[required] build.sh completes with python3 absent from PATH
+[required] native wheelchairc/whexc are static ELF64 executables
+[required] native branch_probe q4 output matches authority
+[required] native iterate_probe q4 output matches authority
+[required] Rank-6 q4 checksum = 0x40bfc00000000000
+[required] feature_showcase produces the frozen eight outputs
+[required] multilingual WH surface compiles
+[required] conservative auto-repair source compiles
+[required] dynamic dictionary rejects with exit 65
+[required] dynamic cascade rejects with exit 65
+[required] causal-region contraction remains AOT structural only
+[required] per-context stack mmap=0
+[required] global ready queue=0
+[required] root scheduler=0
+[required] work stealing=0
+[required] fixed runtime home ownership=0
+[required] persistent idle worker spin=0
+[required] post-completion work search=0
+[required] post-completion peer query=0
+[required] resource release destination=0
+[required] resource handoff=0
+[required] release rule = OWNED -> FREE, no recipient
