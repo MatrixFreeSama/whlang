@@ -87,7 +87,6 @@ echo 'WHEELCHAIR_1_0_14_COMPLETE=PASS'
 
 echo 'WHEELCHAIR_1_0_15_COMPLETE=PASS'
 
-
 # 1.1.0 general high-level / true-parallel semantic gate.
 ./test_whex_semantic_parallel_121.sh
 
@@ -104,3 +103,9 @@ echo 'WHEELCHAIR_1_2_0_SURFACE_INVARIANTS_ON_1_2_1=PASS'
 ./test_newton_jv_121.sh
 
 echo 'WHEELCHAIR_1_2_1_COMPLETE=PASS'
+
+# 1.2.9 recipient-blind resource semantics. This gate also proves that the
+# retired causal-resource-routing source is physically absent from the tree.
+./test_129.sh
+
+echo 'WHEELCHAIR_1_2_9_COMPLETE=PASS'
