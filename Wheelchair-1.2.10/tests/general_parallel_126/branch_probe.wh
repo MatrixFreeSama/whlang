@@ -1,0 +1,12 @@
+program general_parallel_native_probe
+contract integer_overflow = wrap
+input seed: u64
+let a = seed + 10
+let b = seed * 3
+let c = a + 1
+let d = b + 2
+let e = c + d
+output e = e
+output c = c
+output d = d
+test (7) => { e = 41; c = 18; d = 23 }

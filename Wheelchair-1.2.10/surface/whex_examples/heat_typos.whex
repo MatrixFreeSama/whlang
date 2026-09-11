@@ -1,0 +1,10 @@
+progra whex_heat_equivalence
+toleranc 1e-10
+inpu n: u64 rang 4..100000000
+fiel u[i in n]: f64 = 0.25 + cas(f64, (i * 17 + 3) % 1024) / 1024.0
+eac i in n {
+    next: f64 = u[i] + 0.125 * (u[periodi(i + n - 1, n)] - 2.0 * u[i] + u[periodi(i + 1, n)])
+}
+su checksum[i in n]: f64 = nex[i]
+outpu checksum
+tes (4) => { checksum = 1.111328125 }

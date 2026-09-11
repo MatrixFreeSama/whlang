@@ -1,0 +1,8 @@
+program interior_periodic_composition
+tolerance 1e-10
+input n: u64 range 4..100000000
+field p[i in n]: f64 = -0.375 + cast(f64, (i * 37 + 11) % 2048) / 2048.0
+field q[i in n]: f64 = p[periodic(i + n - 1, n)] + 0.5 * p[i] + p[periodic(i + 1, n)]
+sum checksum[i in n]: f64 = q[i]
+output checksum
+test (4) => { checksum = -3.42529296875 }
