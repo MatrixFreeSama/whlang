@@ -8,6 +8,9 @@ import native_resource_profile as nrp
 import native_backend_matrix as nbm
 import general_parallel_plan as gpp
 
+PARALLEL_AUTHORITY='blind-release-causality'
+COMPILER_RELEASE='1.2.9'
+
 
 def compile_native(data, output: Path, executors: int, isa_limit: str | None):
     profile=nrp.analyze(data)
@@ -29,9 +32,10 @@ def compile_native(data, output: Path, executors: int, isa_limit: str | None):
 def main():
     ap=argparse.ArgumentParser(description='Wheelchair Expert .whex -> native static ELF')
     ap.add_argument('source',type=Path); ap.add_argument('-o','--output',type=Path,required=True)
-    ap.add_argument('--executors',type=int,choices=[1,2,4],default=1)
+    ap.add_argument('--executors',type=int,choices=[1,2,4],default=1,
+                    help='maximum CPU width; resource reuse remains OS/hardware authority')
     ap.add_argument('--isa-limit',choices=['native','avx512f','avx512dq','avx2'],default=None,help='AOT backend capability ceiling for ISA audit/testing; never selects a scalar fallback')
-    ap.add_argument('--semantic-plan',type=Path,default=None,help='write Region/Effect/Dependency semantics plus universal causal plan')
+    ap.add_argument('--semantic-plan',type=Path,default=None,help='write Region/Effect/Dependency semantics plus recipient-blind causal plan')
     a=ap.parse_args()
     data,parser,_=whex_surface.load_surface(a.source)
     profile,physical=compile_native(data,a.output,a.executors,a.isa_limit)
@@ -47,10 +51,11 @@ def main():
         'source':str(a.source),'output':str(a.output),
         'core_sha256':whex_surface.core_hash(data),
         'repair_count':len(parser.repairs),'repairs':[r.as_dict() for r in parser.repairs],
-        'bottom_layer_modified':True,'compiler_release':'1.2.7',
+        'bottom_layer_modified':True,'compiler_release':COMPILER_RELEASE,
         'semantic_sha256':plan['semantic_sha256'],
         'general_parallel_fabric':parallel,
-        'parallel_fabric_authority':'topology-parallel',
+        'parallel_fabric_authority':PARALLEL_AUTHORITY,
+        'effective_cpu_width':a.executors,
         'native_resource_profile':profile,
         'native_physical_backend':physical
     },ensure_ascii=False,indent=2))
