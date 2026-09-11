@@ -1,4 +1,4 @@
-ENTRY(gp_slot_base)
+ENTRY(gr_release_base)
 SECTIONS
 {
   . = 0;
