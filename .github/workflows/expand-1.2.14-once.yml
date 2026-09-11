@@ -1,0 +1,53 @@
+name: expand 1.2.14 once
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/expand-1.2.14-once.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  expand:
+    runs-on: ubuntu-latest
+    if: github.actor != 'github-actions[bot]'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Replace expanded 1.2.8 with 1.2.14
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f dist/Wheelchair-1.2.14.zip
+          python3 - <<'PY'
+          import zipfile, sys
+          p='dist/Wheelchair-1.2.14.zip'
+          with zipfile.ZipFile(p) as z:
+              for n in z.namelist():
+                  s=n.replace('\\','/')
+                  if s.startswith('/') or any(part=='..' for part in s.split('/')):
+                      raise SystemExit(f'unsafe zip path: {n}')
+          PY
+          rm -rf Wheelchair-1.2.8 Wheelchair-1.2.14 .tmp_1214_unpack
+          mkdir .tmp_1214_unpack
+          unzip -q dist/Wheelchair-1.2.14.zip -d .tmp_1214_unpack
+          shopt -s dotglob nullglob
+          entries=(.tmp_1214_unpack/*)
+          if [ "${#entries[@]}" -eq 1 ] && [ -d "${entries[0]}" ]; then
+            mv "${entries[0]}" Wheelchair-1.2.14
+          else
+            mkdir Wheelchair-1.2.14
+            mv .tmp_1214_unpack/* Wheelchair-1.2.14/
+          fi
+          rm -rf .tmp_1214_unpack
+          rm -f .github/workflows/expand-1.2.14-once.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Replace expanded 1.2.8 with 1.2.14 [skip ci]'
+          git push origin HEAD:main
+          git push origin --delete tmp-expand-1.2.14 || true
