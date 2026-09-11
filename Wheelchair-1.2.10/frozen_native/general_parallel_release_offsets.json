@@ -1,0 +1,20 @@
+{
+  "format": "wheelchair.general_parallel_release_offsets/1",
+  "max_cpu_width": 4,
+  "max_edges": 1024,
+  "max_nodes": 96,
+  "offsets": {
+    "gr_cpu_width": 1160,
+    "gr_edge_count": 1156,
+    "gr_edge_v": 1936,
+    "gr_entry_offsets": 10128,
+    "gr_first_out": 1552,
+    "gr_indegree": 1168,
+    "gr_next_edge": 6032,
+    "gr_node_count": 1152,
+    "gr_release_base": 0,
+    "gr_template_end": 10512
+  },
+  "program_slot_capacity": 131072,
+  "template_size": 10512
+}
