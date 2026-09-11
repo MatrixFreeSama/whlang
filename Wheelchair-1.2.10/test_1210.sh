@@ -142,12 +142,12 @@ print('GENERAL_PARALLEL_NATIVE_CAUSAL_REGION_1210=PASS')
 PY
 
 # Protect generality/technical peaks that are independent of this runtime change.
-./test_rank_n_122.sh
-./test_native_resource_profiles_126.sh
+sh ./test_rank_n_122.sh
+sh ./test_native_resource_profiles_126.sh
 python3 ./test_multi_isa_profiles_127.py
-./test_native256_physicalizer_127.sh
-./test_native256_maturity_128.sh
-./test_release_128.sh
+sh ./test_native256_physicalizer_127.sh
+sh ./test_native256_maturity_128.sh
+sh ./test_release_128.sh
 
 echo 'RESOURCE_RELEASE_DESTINATION_FIELDS=0'
 echo 'POST_COMPLETION_PEER_SCAN=0'
