@@ -2,9 +2,22 @@
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 BUILD="$ROOT/build"
+FROZEN="$ROOT/frozen_native"
 rm -rf "$BUILD"
-mkdir -p "$BUILD"
+mkdir -p "$BUILD/generated_derived" "$BUILD/generated_native256"
 cd "$ROOT"
+
+# 1.2.10 native physicalizations are source authority, not regenerated policy.
+# Verify every frozen assembly byte before it can enter the build.
+(cd "$FROZEN" && sha256sum -c FROZEN_ASM_MANIFEST.sha256 >/dev/null)
+cp -a "$FROZEN/generated_derived/." "$BUILD/generated_derived/"
+cp -a "$FROZEN/generated_native256/." "$BUILD/generated_native256/"
+cp "$FROZEN/topologyc_multi_isa_x86_64.S" "$BUILD/topologyc_multi_isa_x86_64.S"
+cp "$FROZEN/tensor_frontend_profile_base.S" "$BUILD/tensor_frontend_profile_base.S"
+cp "$FROZEN/tensor_frontend_profile_wide.S" "$BUILD/tensor_frontend_profile_wide.S"
+
+echo 'FROZEN_NATIVE_ASSEMBLY_SHA256=PASS'
+echo 'PRODUCTION_BUILD_PYTHON_GENERATORS=0'
 
 # Mature native-512 runtime remains the protected physical peak.
 as --64 runtime/tensor_runtime_template_x86_64.S -o "$BUILD/tensor_runtime_template.o"
@@ -12,16 +25,7 @@ ld -nostdlib -static -z noexecstack -T runtime/tensor_runtime.ld \
   "$BUILD/tensor_runtime_template.o" -o "$BUILD/tensor_runtime_template"
 ./tools/generate_tensor_runtime_offsets.sh "$BUILD/tensor_runtime_template" compiler/runtime_offsets.inc
 
-# Generic structural capability generation. No workload identity enters routing.
-python3 tools/generate_derived_native_backend.py
-python3 tools/generate_product_subtract_frontend.py
-python3 tools/generate_vector_reduction_residency.py
-python3 tools/generate_native_resource_profiles.py
-python3 tools/generate_multi_isa_topologyc.py
-python3 tools/augment_native256_capabilities.py
-python3 tools/generate_native256_runtime.py
-
-# Mature derived native-512 runtime.
+# Mature derived native-512 runtime from frozen authoritative assembly.
 as --64 "$BUILD/generated_derived/tensor_derived_runtime_template_x86_64.S" -o "$BUILD/tensor_derived_runtime_template.o"
 ld -nostdlib -static -z noexecstack -T runtime/tensor_runtime.ld \
   "$BUILD/tensor_derived_runtime_template.o" -o "$BUILD/tensor_derived_runtime_template"
@@ -30,7 +34,7 @@ derived_product_va=$(nm -n "$BUILD/tensor_derived_runtime_template" | awk '$3=="
 [ -n "$derived_product_va" ]
 printf '.equ RUNTIME_RANK_N_PRODUCT_OFF, 0x%x\n' $((derived_product_va-0x400000)) >> "$BUILD/runtime_derived_offsets.inc"
 
-# True AVX2/YMM four-lane runtimes. Independent physicalizations, never scalar fallbacks.
+# True AVX2/YMM runtimes, also frozen as source rather than regenerated.
 as --64 "$BUILD/generated_native256/tensor_runtime_native256_template_x86_64.S" -o "$BUILD/tensor_runtime_native256_template.o"
 ld -nostdlib -static -z noexecstack -T runtime/tensor_runtime.ld \
   "$BUILD/tensor_runtime_native256_template.o" -o "$BUILD/tensor_runtime_native256_template"
@@ -44,33 +48,38 @@ derived256_product_va=$(nm -n "$BUILD/tensor_derived_runtime_native256_template"
 [ -n "$derived256_product_va" ]
 printf '.equ RUNTIME_RANK_N_PRODUCT_OFF, 0x%x\n' $((derived256_product_va-0x400000)) >> "$BUILD/runtime_derived_native256_offsets.inc"
 
-python3 tools/run_native256_frontend_generator.py
-python3 tools/finalize_native256_frontends.py
-python3 tools/size_native256_fixup_ledger.py
+# The freshly derived offsets must remain byte-identical to the frozen proof.
+cmp "$BUILD/runtime_derived_offsets.inc" "$FROZEN/runtime_derived_offsets.inc"
+cmp "$BUILD/runtime_native256_offsets.inc" "$FROZEN/runtime_native256_offsets.inc"
+cmp "$BUILD/runtime_derived_native256_offsets.inc" "$FROZEN/runtime_derived_native256_offsets.inc"
+
+echo 'FROZEN_RUNTIME_OFFSETS_EQUIVALENCE=PASS'
 
 as --64 runtime/general_runtime_template_x86_64.S -o "$BUILD/general_runtime_template.o"
 ld -nostdlib -static -z noexecstack -T runtime/general_runtime.ld \
   "$BUILD/general_runtime_template.o" -o "$BUILD/general_runtime_template"
 ./tools/generate_general_runtime_offsets.sh "$BUILD/general_runtime_template" compiler/general_runtime_offsets.inc
 
-# 1.2.9 recipient-blind general causal engine. There is deliberately no home-slot
-# engine, per-worker inbox, causal resource router, work-stealing witness, or
-# schedulerless legacy runtime in the active source tree.
+# Recipient-blind causal-region runtime. Offset derivation is shell + native ELF
+# symbols only; no Python participates in production build authority.
 as --64 runtime/general_parallel_release_x86_64.S -o "$BUILD/general_parallel_release.o"
 ld -nostdlib -static -z noexecstack -T runtime/general_parallel_release.ld \
   "$BUILD/general_parallel_release.o" -o "$BUILD/general_parallel_release.elf"
 objcopy -O binary --only-section=.text \
   "$BUILD/general_parallel_release.elf" "$BUILD/general_parallel_release_template.bin"
-python3 tools/generate_general_parallel_release_offsets.py \
+sh tools/generate_general_parallel_release_offsets.sh \
   "$BUILD/general_parallel_release.elf" "$BUILD/general_parallel_release_template.bin" \
   "$BUILD/general_parallel_release_offsets.json"
+cmp "$BUILD/general_parallel_release_offsets.json" "$FROZEN/general_parallel_release_offsets.json"
+
+echo 'GENERAL_PARALLEL_RELEASE_OFFSETS_NO_PYTHON=PASS'
 
 # Shared handwritten sovereign topology core with physical-shape capability algebra.
 as --64 "$BUILD/topologyc_multi_isa_x86_64.S" -o "$BUILD/topologyc_core.o"
 as --64 compiler/general_frontend_x86_64.S -o "$BUILD/general_frontend.o"
 as --64 compiler/general_runtime_blob_x86_64.S -o "$BUILD/general_runtime_blob.o"
 
-# Native/split 512 physicalizers: protected execution bytes remain inherited.
+# Native/split 512 physicalizers.
 as --64 "$BUILD/tensor_frontend_profile_base.S" -o "$BUILD/tensor_frontend_base.o"
 as --64 "$BUILD/tensor_frontend_profile_wide.S" -o "$BUILD/tensor_frontend_wide.o"
 as --64 compiler/runtime_blob_x86_64.S -o "$BUILD/runtime_blob.o"
@@ -111,6 +120,12 @@ for f in \
   readelf -d "$f" 2>&1 | grep -q 'There is no dynamic section'
 done
 
+# Production build closure must not invoke Python. Python remains allowed only
+# in reference/validation tooling while the human surface is being migrated.
+if grep -En '(^|[[:space:]])python(3)?([[:space:]]|$)' build.sh; then
+  echo 'Python invocation leaked into production build' >&2; exit 1
+fi
+
 echo 'GENERIC_PRODUCT_SUBTRACT_CONTRACTION=BUILT'
 echo 'GENERIC_VECTOR_REDUCTION_RESIDENCY=BUILT'
 echo 'NATIVE_RESOURCE_PROFILE_BASE=BUILT'
@@ -140,5 +155,6 @@ echo 'GENERAL_PARALLEL_RESOURCE_RELEASE_DESTINATION=0'
 echo 'GENERAL_PARALLEL_RESOURCE_HANDOFF=0'
 echo 'GENERAL_PARALLEL_BLIND_RESOURCE_RELEASE=PASS'
 echo 'ACTIVE_SPECIAL_PURPOSE_NATIVE_ROUTE=0'
-echo 'WHEELCHAIR_1_2_9_RESOURCE_SEMANTIC_CORRECTION=BUILT'
+echo 'PRODUCTION_BUILD_PYTHON_INVOCATIONS=0'
+echo 'WHEELCHAIR_1_2_10_FROZEN_ASSEMBLY_BUILD=PASS'
 echo 'WHEELCHAIR_BUILD=PASS'
