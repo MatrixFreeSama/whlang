@@ -1,22 +1,18 @@
 .intel_syntax noprefix
 
-# Wheelchair 1.2.9 blind-release general parallel fabric.
+# Wheelchair 1.2.10 blind-release causal-region fabric.
 #
-# Execution doctrine:
-#   * a node knows only its true data-dependency neighbors;
-#   * readiness is remaining_deps -> 0;
-#   * no node, finisher, or producer selects a worker or resource consumer;
-#   * no home slot, runnable queue, inbox, work stealing, resource token routing,
-#     peer-load query, or idle spin exists;
-#   * every causal node has a finite execution context. While dependencies are
-#     absent it sleeps in the kernel; after completion it publishes only true
-#     dependency transitions and returns/exits;
-#   * requested width is an inherited CPU-affinity envelope. Linux chooses which
-#     runnable task uses which CPU inside that envelope; the CPU microarchitecture
-#     decides its own internal silicon allocation.
+# The compiler has already fused only provably non-branching causal chains.
+# Runtime contexts therefore represent maximal finite causal regions, not source
+# statements and not workers. A region may wait only on its own true dependency
+# count; after completion it publishes true dependency transitions and exits.
+# There is no home slot, ready queue, work stealing, peer query, recipient-aware
+# release, idle spin, or runtime profitability selector.
 #
-# This binary is linked at VMA 0 and copied into the direct-general program slot.
-# Every internal reference is RIP-relative. Fragment entry offsets are patched AOT.
+# 1.2.10 removes the O(region_count) mmap/munmap stack churn from 1.2.9.
+# One stack arena is reserved once for the invocation; the recursive clone tree
+# uses statically disjoint stack slices. Linux chooses runnable placement inside
+# the inherited affinity envelope, and the CPU chooses internal silicon use.
 
 .equ SYS_mmap, 9
 .equ SYS_munmap, 11
@@ -42,6 +38,8 @@
 
 .equ ST_REMAIN, 0
 .equ ST_DONE, ST_REMAIN + GR_MAX_NODES*4
+.equ ST_STACK_BASE, ST_DONE + GR_MAX_NODES
+.equ ST_STACK_SIZE, ST_STACK_BASE + 8
 .equ ST_SIZE, 4096
 
 .section .text
@@ -93,11 +91,39 @@ gr_release_base:
     test eax, eax
     jnz .gr_state_fail
 
+    # A single region needs no child stack arena at all.
+    cmp dword ptr [rip+gr_node_count], 1
+    jbe .gr_run
+
+    mov eax, dword ptr [rip+gr_node_count]
+    imul eax, GR_STACK_BYTES
+    mov dword ptr [r15+ST_STACK_SIZE], eax
+    mov esi, eax
+    mov eax, SYS_mmap
+    xor edi, edi
+    mov edx, PROT_RW
+    mov r10d, MAP_PRIVATE_ANON_STACK
+    mov r8d, -1
+    xor r9d, r9d
+    syscall
+    test rax, rax
+    js .gr_state_fail
+    mov qword ptr [r15+ST_STACK_BASE], rax
+
+.gr_run:
     xor edi, edi
     mov esi, dword ptr [rip+gr_node_count]
     call gr_run_node_tree
     mov r14d, eax
 
+    mov rdi, qword ptr [r15+ST_STACK_BASE]
+    test rdi, rdi
+    jz .gr_unmap_state
+    mov esi, dword ptr [r15+ST_STACK_SIZE]
+    mov eax, SYS_munmap
+    syscall
+
+.gr_unmap_state:
     mov eax, SYS_munmap
     mov rdi, qword ptr [rsp+256]
     mov esi, ST_SIZE
@@ -133,7 +159,6 @@ gr_release_base:
     ret
 
 # rdi=original mask, rsi=selected mask, edx=requested width.
-# The mask is an execution envelope, never a node->CPU assignment.
 gr_enter_affinity:
     push rbx
     push r12
@@ -215,18 +240,21 @@ gr_init_state:
     lea rdx, [rip+gr_indegree]
 .gis_loop:
     cmp ecx, dword ptr [rip+gr_node_count]
-    jae .gis_ok
+    jae .gis_zero_aux
     mov eax, dword ptr [rdx+rcx*4]
     mov dword ptr [r15+ST_REMAIN+rcx*4], eax
     mov byte ptr [r15+ST_DONE+rcx], 0
     inc ecx
     jmp .gis_loop
-.gis_ok:
+.gis_zero_aux:
+    mov qword ptr [r15+ST_STACK_BASE], 0
+    mov dword ptr [r15+ST_STACK_SIZE], 0
     xor eax, eax
     ret
 
-# Binary lifecycle materialization. It creates and joins finite node contexts;
-# it never selects which CPU executes a node and carries no resource ownership.
+# r12d=lo, r13d=hi. The right subtree receives stack slice 'mid'. Every split
+# point is unique, so active child contexts never share a stack. No per-context
+# stack mapping or unmapping occurs.
 gr_run_node_tree:
     push rbx
     push r12
@@ -250,18 +278,13 @@ gr_run_node_tree:
     shr eax, 1
     mov r14d, eax
 
-    mov eax, SYS_mmap
-    xor edi, edi
-    mov esi, GR_STACK_BYTES
-    mov edx, PROT_RW
-    mov r10d, MAP_PRIVATE_ANON_STACK
-    mov r8d, -1
-    xor r9d, r9d
-    syscall
-    test rax, rax
-    js .grt_fail
-    mov qword ptr [rsp+8], rax
-    lea rsi, [rax+GR_STACK_BYTES-16]
+    mov rsi, qword ptr [r15+ST_STACK_BASE]
+    test rsi, rsi
+    jz .grt_fail
+    mov eax, r14d
+    imul rax, GR_STACK_BYTES
+    add rsi, rax
+    add rsi, GR_STACK_BYTES-16
 
     mov eax, SYS_clone
     mov edi, CLONE_VM_FILES_FS_SIGCHLD
@@ -270,7 +293,7 @@ gr_run_node_tree:
     xor r8d, r8d
     syscall
     test rax, rax
-    js .grt_unmap_fail
+    js .grt_fail
     jz .grt_child
     mov qword ptr [rsp+16], rax
 
@@ -286,16 +309,11 @@ gr_run_node_tree:
     xor r10d, r10d
     syscall
     test rax, rax
-    js .grt_parent_fail
+    js .grt_fail
     cmp dword ptr [rsp+24], 0
-    jne .grt_parent_fail
+    jne .grt_fail
     test ebx, ebx
-    jnz .grt_parent_fail
-
-    mov eax, SYS_munmap
-    mov rdi, qword ptr [rsp+8]
-    mov esi, GR_STACK_BYTES
-    syscall
+    jnz .grt_fail
     xor eax, eax
     jmp .grt_return
 
@@ -315,19 +333,7 @@ gr_run_node_tree:
     syscall
     ud2
 
-.grt_parent_fail:
-    mov eax, SYS_munmap
-    mov rdi, qword ptr [rsp+8]
-    mov esi, GR_STACK_BYTES
-    syscall
 .grt_fail:
-    mov eax, 1
-    jmp .grt_return
-.grt_unmap_fail:
-    mov eax, SYS_munmap
-    mov rdi, qword ptr [rsp+8]
-    mov esi, GR_STACK_BYTES
-    syscall
     mov eax, 1
 .grt_return:
     add rsp, 32
@@ -337,8 +343,8 @@ gr_run_node_tree:
     pop rbx
     ret
 
-# A node waits only on its own dependency count. FUTEX_WAIT releases the CPU.
-# Completion wakes a causal node, never a worker; the kernel chooses the CPU.
+# A region waits only on its own causal indegree. FUTEX_WAIT relinquishes CPU
+# execution capacity; completion wakes only a true causal successor.
 gr_node_task:
     push rbx
     push r12

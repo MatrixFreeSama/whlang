@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""Wheelchair 1.2.9 general true-parallel causality plan.
+"""Wheelchair 1.2.10 general true-parallel causality plan.
 
-The planner derives only mathematical/data causality. It never assigns a future
-resource owner. Runtime resource release is recipient-blind: completion publishes
-true dependency transitions and ends the current ownership episode. CPU placement
-of runnable node contexts is left to the OS inside the requested AOT affinity
-envelope; in-core silicon allocation remains hardware authority.
+Planning contains only mathematical/data causality. AOT may contract a causal
+edge u->v only when u has exactly one successor and v has exactly one
+predecessor. Such an edge exposes no observable parallel release boundary:
+finishing u can make only v newly ready, and v can become ready only from u.
+The contraction therefore removes execution-context overhead without assigning a
+resource owner, choosing a consumer, or introducing a runtime scheduler.
+
+Runtime release remains recipient-blind: a finite causal region publishes true
+dependency transitions and ends. CPU placement of runnable contexts is OS
+policy inside the requested affinity envelope; in-core silicon allocation is
+microarchitecture policy.
 """
 from __future__ import annotations
 
@@ -14,7 +20,7 @@ import json
 from collections import deque
 from typing import Any, Iterable
 
-FORMAT = "wheelchair.general_parallel/2"
+FORMAT = "wheelchair.general_parallel/3"
 MAX_NODES = 96
 MAX_EDGES = 1024
 VALID_WIDTHS = (1, 2, 4)
@@ -75,18 +81,7 @@ def _literal_work(binding: dict[str, Any]) -> int:
     return 1
 
 
-def causal_geometry(node_ids: list[str], edges: list[tuple[int, int]], width: int,
-                    *, work: list[int] | None = None) -> dict[str, Any]:
-    n = len(node_ids)
-    if n == 0:
-        raise GeneralParallelError("causal geometry requires at least one node")
-    if n > MAX_NODES:
-        raise GeneralParallelError(f"node count exceeds native blind-release cap {MAX_NODES}")
-    if len(edges) > MAX_EDGES:
-        raise GeneralParallelError(f"edge count exceeds native blind-release cap {MAX_EDGES}")
-    if width not in VALID_WIDTHS:
-        raise GeneralParallelError(f"requested CPU width must be one of {VALID_WIDTHS}")
-
+def _topology(n: int, edges: list[tuple[int, int]]) -> tuple[list[list[int]], list[list[int]], list[int], list[int], list[int]]:
     pred = [[] for _ in range(n)]
     succ = [[] for _ in range(n)]
     indeg = [0] * n
@@ -99,7 +94,6 @@ def causal_geometry(node_ids: list[str], edges: list[tuple[int, int]], width: in
         if (u, v) in seen:
             raise GeneralParallelError("duplicate causal edge")
         seen.add((u, v)); pred[v].append(u); succ[u].append(v); indeg[v] += 1
-
     q = deque(i for i, d in enumerate(indeg) if d == 0)
     rem = indeg[:]
     level = [0] * n
@@ -111,21 +105,99 @@ def causal_geometry(node_ids: list[str], edges: list[tuple[int, int]], width: in
             if rem[v] == 0: q.append(v)
     if len(order) != n:
         raise GeneralParallelError("causal relation contains a cycle")
+    return pred, succ, indeg, level, order
 
+
+def _causal_regions(node_ids: list[str], pred: list[list[int]], succ: list[list[int]], order: list[int]) -> tuple[list[list[int]], list[tuple[int, int]], list[int]]:
+    """Contract only causal edges that cannot expose runnable parallel width."""
+    n = len(node_ids)
+    assigned = [-1] * n
+    regions: list[list[int]] = []
+    for start in order:
+        if assigned[start] >= 0:
+            continue
+        rid = len(regions)
+        chain = [start]
+        assigned[start] = rid
+        u = start
+        while len(succ[u]) == 1:
+            v = succ[u][0]
+            if len(pred[v]) != 1 or assigned[v] >= 0:
+                break
+            # v's sole predecessor is necessarily u because v is in succ[u].
+            chain.append(v)
+            assigned[v] = rid
+            u = v
+        regions.append(chain)
+    if any(r < 0 for r in assigned):
+        raise GeneralParallelError("causal region contraction left an unassigned node")
+    region_edges = sorted({(assigned[u], assigned[v]) for u in range(n) for v in succ[u] if assigned[u] != assigned[v]})
+    return regions, region_edges, assigned
+
+
+def causal_geometry(node_ids: list[str], edges: list[tuple[int, int]], width: int,
+                    *, work: list[int] | None = None) -> dict[str, Any]:
+    n = len(node_ids)
+    if n == 0:
+        raise GeneralParallelError("causal geometry requires at least one node")
+    if n > MAX_NODES:
+        raise GeneralParallelError(f"node count exceeds native blind-release cap {MAX_NODES}")
+    if len(edges) > MAX_EDGES:
+        raise GeneralParallelError(f"edge count exceeds native blind-release cap {MAX_EDGES}")
+    if width not in VALID_WIDTHS:
+        raise GeneralParallelError(f"requested CPU width must be one of {VALID_WIDTHS}")
+
+    pred, succ, indeg, level, order = _topology(n, edges)
     widths: dict[int, int] = {}
     for lev in level: widths[lev] = widths.get(lev, 0) + 1
     sources = [i for i, d in enumerate(indeg) if d == 0]
-    payload = {"nodes": node_ids, "edges": [[u, v] for u, v in edges], "work": list(work or [1] * n), "width": width}
+
+    regions, region_edges, region_of = _causal_regions(node_ids, pred, succ, order)
+    region_ids = ["+".join(node_ids[i] for i in region) for region in regions]
+    region_pred = [[] for _ in regions]
+    for u, v in region_edges:
+        region_pred[v].append(u)
+    region_sources = [i for i, p in enumerate(region_pred) if not p]
+    max_region_nodes = max((len(r) for r in regions), default=0)
+
+    original_work = list(work or [1] * n)
+    if len(original_work) != n:
+        raise GeneralParallelError("work vector length does not match causal node count")
+    region_work = [sum(original_work[i] for i in region) for region in regions]
+    payload = {
+        "nodes": node_ids,
+        "edges": [[u, v] for u, v in edges],
+        "work": original_work,
+        "width": width,
+        "regions": regions,
+        "region_edges": [[u, v] for u, v in region_edges],
+    }
     return {
-        "format": "wheelchair.blind_release_causal/1",
+        "format": "wheelchair.blind_release_causal/2",
         "requested_cpu_width": width,
-        "materialized_node_contexts": n,
+        "original_node_count": n,
+        "materialized_node_contexts": len(regions),
+        "causal_region_count": len(regions),
+        "fused_node_count": n - len(regions),
+        "max_region_nodes": max_region_nodes,
         "node_count": n,
         "edge_count": len(edges),
         "source_count": len(sources),
         "sources": [node_ids[i] for i in sources],
         "topological_depth": 1 + max(level, default=0),
         "max_ready_width": max(widths.values(), default=0),
+        "causal_region_indices": regions,
+        "causal_regions": [[node_ids[i] for i in region] for region in regions],
+        "region_ids": region_ids,
+        "region_of_node": region_of,
+        "region_edge_uv_u32": [[u, v] for u, v in region_edges],
+        "region_source_count": len(region_sources),
+        "region_sources": region_sources,
+        "region_work": region_work,
+        "fusion_rule": "producer_outdegree_one_and_consumer_indegree_one",
+        "fusion_runtime_selector": False,
+        "fusion_workload_identity": False,
+        "fusion_preserves_parallel_release_boundaries": True,
         "readiness_rule": "declared_dependency_zero_transition",
         "communication_rule": "true_dependency_neighbors_only",
         "release_rule": "owned_to_free_no_recipient",
@@ -171,7 +243,7 @@ def plan(data: dict[str, Any], slots: int, *, semantic: dict[str, Any] | None = 
                      "causal_enclave":"true_recurrence" if recurrence else "none","declared_work":_literal_work(binding)})
 
     index = {name:i for i,name in enumerate(names)}
-    edges = sorted((index[src],index[dst]) for dst,sources in deps.items() for src in sources)
+    edges = sorted((index[src],index[dst]) for dst,sources_ in deps.items() for src in sources_)
     physical = causal_geometry(names,edges,slots,work=[r["declared_work"] for r in rows])
     independent_pairs: list[list[str]] = []
     reach = {name:set(deps[name]) for name in names}; changed = True
@@ -194,6 +266,7 @@ def plan(data: dict[str, Any], slots: int, *, semantic: dict[str, Any] | None = 
         "post_completion_peer_query":0,"resource_release_destination":0,"resource_handoff":0,
         "readiness_rule":"declared_dependency_zero_transition","ordering_rule":"true_data_causality_only",
         "release_rule":"owned_to_free_no_recipient","recurrence_rule":"true_recurrence_is_a_causal_enclave_not_a_global_spine",
+        "causal_region_fusion":"producer_outdegree_one_and_consumer_indegree_one",
         "physical_lane":physical_lane,
         "specialization_contract":"mature_native_peak_may_replace_general_fabric_only_if_semantically_equivalent_and_nonregressive",
         "cpu_specialization":"AOT_only_never_runtime_profitability_selector","blind_release_causal":physical,
