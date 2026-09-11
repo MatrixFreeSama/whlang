@@ -1,0 +1,37 @@
+name: Validate Wheelchair 1.2.10
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'Wheelchair-1.2.10/**'
+      - '.github/workflows/validate-wheelchair-1.2.10.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  physicalization-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain witness
+        run: |
+          as --version | head -1
+          ld --version | head -1
+          python3 --version
+          uname -a
+      - name: Wheelchair 1.2.10 physicalization gate
+        working-directory: Wheelchair-1.2.10
+        run: ./test_1210.sh
+
+  complete-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Wheelchair complete regression
+        working-directory: Wheelchair-1.2.10
+        run: ./test_complete.sh
