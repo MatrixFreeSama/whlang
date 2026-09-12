@@ -1,0 +1,108 @@
+name: sparse structural match once
+on:
+  push:
+    branches: [ main ]
+    paths: ['.github/workflows/sparse-structural-match-once.yml']
+permissions:
+  contents: write
+jobs:
+  benchmark:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Benchmark structural match
+        shell: bash
+        run: |
+          set -euo pipefail
+          lscpu | grep -E 'Model name|CPU\(s\)|Thread|Core|Socket' | head -n 7
+          cd Wheelchair-1.2.14
+          chmod +x bin/whexc bin/topologyc* || true
+          ./bin/whexc benchmarks/caretaker_1214/irregular_sparse.whex -o /tmp/wh --executors 1
+          cat >/tmp/array.c <<'EOF'
+          #define _POSIX_C_SOURCE 200809L
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <stdint.h>
+          int main(int argc,char**argv){uint64_t n=strtoull(argv[1],0,10);double *x=0;if(posix_memalign((void**)&x,64,n*sizeof(double)))return 3;
+          #pragma omp simd
+          for(uint64_t i=0;i<n;i++)x[i]=-.375+(double)((i*31u+5u)%1024u)/1024.;double s=0.;
+          #pragma omp simd reduction(+:s)
+          for(uint64_t i=0;i<n;i++){uint64_t j1=(i*97u+17u)%n,j2=(i*193u+31u)%n,j3=(i*389u+47u)%n,j4=(i*769u+71u)%n,j5=(i*1543u+101u)%n,j6=(i*3079u+131u)%n,j7=(i*6151u+167u)%n,j8=(i*12289u+211u)%n,j9=(i*24593u+257u)%n,j10=(i*49157u+313u)%n;double xi=x[i],a=x[j1],b=x[j10];s+=1.25*xi-.125*a+.0625*x[j2]-.03125*x[j3]+.015625*x[j4]-.0078125*x[j5]+.00390625*x[j6]-.001953125*x[j7]+.0009765625*x[j8]-.00048828125*x[j9]+.000244140625*b+.0078125*xi*xi*xi+.00390625*a*b;}printf("%.17g\n",s);free(x);}
+          EOF
+          cat >/tmp/formula.c <<'EOF'
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <stdint.h>
+          static inline double xv(uint64_t i){return -.375+(double)((i*31u+5u)%1024u)/1024.;}
+          int main(int argc,char**argv){uint64_t n=strtoull(argv[1],0,10);double s=0.;
+          #pragma omp simd reduction(+:s)
+          for(uint64_t i=0;i<n;i++){uint64_t j1=(i*97u+17u)%n,j2=(i*193u+31u)%n,j3=(i*389u+47u)%n,j4=(i*769u+71u)%n,j5=(i*1543u+101u)%n,j6=(i*3079u+131u)%n,j7=(i*6151u+167u)%n,j8=(i*12289u+211u)%n,j9=(i*24593u+257u)%n,j10=(i*49157u+313u)%n;double xi=xv(i),a=xv(j1),b=xv(j10);s+=1.25*xi-.125*a+.0625*xv(j2)-.03125*xv(j3)+.015625*xv(j4)-.0078125*xv(j5)+.00390625*xv(j6)-.001953125*xv(j7)+.0009765625*xv(j8)-.00048828125*xv(j9)+.000244140625*b+.0078125*xi*xi*xi+.00390625*a*b;}printf("%.17g\n",s);}
+          EOF
+          cat >/tmp/array.f90 <<'EOF'
+          program sparse
+          use iso_fortran_env,only:int64,real64
+          implicit none
+          integer(int64)::n,i,j1,j2,j3,j4,j5,j6,j7,j8,j9,j10
+          real(real64),allocatable::x(:)
+          real(real64)::s,xi,a,b
+          character(len=64)::arg
+          call get_command_argument(1,arg);read(arg,*)n;allocate(x(0:n-1))
+          !$omp simd
+          do i=0,n-1;x(i)=-.375_real64+real(mod(i*31_int64+5_int64,1024_int64),real64)/1024._real64;end do
+          s=0._real64
+          !$omp simd reduction(+:s)
+          do i=0,n-1
+          j1=mod(i*97_int64+17_int64,n);j2=mod(i*193_int64+31_int64,n);j3=mod(i*389_int64+47_int64,n);j4=mod(i*769_int64+71_int64,n);j5=mod(i*1543_int64+101_int64,n);j6=mod(i*3079_int64+131_int64,n);j7=mod(i*6151_int64+167_int64,n);j8=mod(i*12289_int64+211_int64,n);j9=mod(i*24593_int64+257_int64,n);j10=mod(i*49157_int64+313_int64,n);xi=x(i);a=x(j1);b=x(j10)
+          s=s+1.25_real64*xi-.125_real64*a+.0625_real64*x(j2)-.03125_real64*x(j3)+.015625_real64*x(j4)-.0078125_real64*x(j5)+.00390625_real64*x(j6)-.001953125_real64*x(j7)+.0009765625_real64*x(j8)-.00048828125_real64*x(j9)+.000244140625_real64*b+.0078125_real64*xi*xi*xi+.00390625_real64*a*b
+          end do
+          print '(ES24.16E3)',s
+          end program
+          EOF
+          cat >/tmp/formula.f90 <<'EOF'
+          program sparse
+          use iso_fortran_env,only:int64,real64
+          implicit none
+          integer(int64)::n,i,j1,j2,j3,j4,j5,j6,j7,j8,j9,j10
+          real(real64)::s,xi,a,b
+          character(len=64)::arg
+          call get_command_argument(1,arg);read(arg,*)n;s=0._real64
+          !$omp simd reduction(+:s)
+          do i=0,n-1
+          j1=mod(i*97_int64+17_int64,n);j2=mod(i*193_int64+31_int64,n);j3=mod(i*389_int64+47_int64,n);j4=mod(i*769_int64+71_int64,n);j5=mod(i*1543_int64+101_int64,n);j6=mod(i*3079_int64+131_int64,n);j7=mod(i*6151_int64+167_int64,n);j8=mod(i*12289_int64+211_int64,n);j9=mod(i*24593_int64+257_int64,n);j10=mod(i*49157_int64+313_int64,n);xi=xv(i);a=xv(j1);b=xv(j10)
+          s=s+1.25_real64*xi-.125_real64*a+.0625_real64*xv(j2)-.03125_real64*xv(j3)+.015625_real64*xv(j4)-.0078125_real64*xv(j5)+.00390625_real64*xv(j6)-.001953125_real64*xv(j7)+.0009765625_real64*xv(j8)-.00048828125_real64*xv(j9)+.000244140625_real64*b+.0078125_real64*xi*xi*xi+.00390625_real64*a*b
+          end do
+          print '(ES24.16E3)',s
+          contains
+          pure function xv(k) result(v)
+          integer(int64),intent(in)::k
+          real(real64)::v
+          v=-.375_real64+real(mod(k*31_int64+5_int64,1024_int64),real64)/1024._real64
+          end function
+          end program
+          EOF
+          gcc -O3 -march=native -fopenmp-simd -fno-fast-math /tmp/array.c -o /tmp/ca
+          gcc -O3 -march=native -fopenmp-simd -fno-fast-math /tmp/formula.c -o /tmp/cf
+          gfortran -O3 -march=native -fopenmp -fno-fast-math -ffree-line-length-none /tmp/array.f90 -o /tmp/fa
+          gfortran -O3 -march=native -fopenmp -fno-fast-math -ffree-line-length-none /tmp/formula.f90 -o /tmp/ff
+          python3 - <<'PY'
+          import subprocess,time,statistics
+          bins=[('Wheelchair','/tmp/wh'),('C_array','/tmp/ca'),('Fortran_array','/tmp/fa'),('C_formula','/tmp/cf'),('Fortran_formula','/tmp/ff')]
+          for n in (1000000,10000000):
+            print('=== N=%d ==='%n)
+            for label,exe in bins:
+              ts=[];out=''
+              for r in range(6):
+                t=time.perf_counter();p=subprocess.run([exe,str(n)],stdout=subprocess.PIPE,text=True,check=True);d=time.perf_counter()-t
+                if r:ts.append(d)
+                out=p.stdout.strip()
+              print(f'{label},median_ms={statistics.median(ts)*1000:.6f},min_ms={min(ts)*1000:.6f},out={out}')
+          PY
+          echo '=== MAXRSS_KB N=10000000 ==='
+          for p in wh ca fa cf ff; do printf "$p,"; /usr/bin/time -f '%M' /tmp/$p 10000000 >/dev/null; done
+      - name: Self clean
+        if: always()
+        shell: bash
+        run: |
+          rm -f .github/workflows/sparse-structural-match-once.yml
+          git config user.name 'github-actions[bot]';git config user.email '41898282+github-actions[bot]@users.noreply.github.com';git add -A;git diff --cached --quiet||git commit -m 'Remove one-shot sparse structural benchmark [skip ci]';git push origin HEAD:main
