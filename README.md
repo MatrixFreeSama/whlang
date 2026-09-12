@@ -199,3 +199,7 @@ WHEELCHAIR_1_2_18_RELEASE=PASS
 ```
 
 See `RELEASE_NOTES_1_2_18.md`, `RELEASE_GATES_1_2_18.txt`, `WHEELCHAIR_CHARTER_1_2_18.md` and `PURE_ASSEMBLY_RELEASE_PROOF_1_2_18.md` for the exact release boundary.
+
+## 简体中文概览
+
+Wheelchair（轮椅）是一门以 **HPC 与科学仿真为首要目标的国产自研通用语言**：坚持矩阵自由、Rank-N 数据化语义、AOT 专一化编译、直接生成原生机器码，并以 WH 人类友好壳层与 WHEX 显式结构语义共同驱动同一套底层。它强调真并行而不是“并行外壳里藏串行”，不采用工作窃取、全局就绪队列和中央调度器，资源完成后立即盲释放；同时拒绝 C/LLVM/MLIR/JIT 套壳和隐藏标量回退，尽量把重复地址、重复访存和无效机器工作在编译期压掉。1.2.18 已把真实 Rank-N `f32` 物化场正式接回 WH/WHEX 顶层，支持动态多维形状、周期邻域、输入/输出/原地场、纯函数零开销展开、UTF-8 标识符以及 AVX2/AVX-512 原生物理化。项目追求的不是“看起来像传统语言”，而是让用户尽量只写数学关系，把并行、SIMD、邻域访问、寄存器驻留和结构压缩这些脏活交给编译器自己完成。
