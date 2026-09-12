@@ -1,274 +1,201 @@
-# Wheelchair 1.2.8
+# Wheelchair 1.2.18
 
-Wheelchair is an ahead-of-time, native, structure-first programming language project for general programming with HPC and simulation as primary design targets.
+Wheelchair 1.2.18 is the **WH/WHEX Native Materialized-Field Surface Completion** release.
+
+1.2.16 made real dynamic Rank-N `f32` fields executable. 1.2.17 removed the dominant repeated field/address work. 1.2.18 closes the remaining human-source gap: users can now express the supported materialized-field semantics directly in WH/WHEX instead of hand-writing the expanded `wheelchair.field/1` canonical graph.
+
+The field ABI, locality optimizer, SIMD backends and parallel runtime are unchanged.
 
 ## Official release archive
 
-[Download Wheelchair-1.2.8.zip](https://github.com/MatrixFreeSama/whlang/raw/refs/heads/main/dist/Wheelchair-1.2.8.zip) · [Archive SHA-256](https://github.com/MatrixFreeSama/whlang/blob/main/dist/Wheelchair-1.2.8.zip.sha256)
+[Download Wheelchair-1.2.18.zip](https://github.com/MatrixFreeSama/whlang/raw/refs/heads/main/dist/Wheelchair-1.2.18.zip) · [Archive SHA-256](https://github.com/MatrixFreeSama/whlang/blob/main/dist/Wheelchair-1.2.18.zip.sha256)
 
-The archive retains the complete release source, benchmarks, assets, and validation workflows from commit `749b12d3a9bfcafa285548018c29c74e4155fc48`. Historical release archives remain in `dist/` in the repository and are not recursively embedded in this ZIP.
-
-The extracted directory contains `worktree/`, `benchmarks/`, `assets/`, the validation workflows, and `release-evidence/`. The bundled `DIST_RELEASE.md` documents provenance, validation, and integrity checks. Use this archive or the `build-1.2.8-native256-maturity` branch for the 1.2.8 source. The archive's root `SHA256SUMS` covers the distribution; older checksum files under `worktree/` are preserved historical records.
+Archive size: **3,945,930 bytes**
 
 Archive SHA-256:
 
 ```text
-62fc059c4ff0055bbcc532ede7ecb2e940a876316be93f7a8b5d206d4aec1d78
+29fe6a352dc1d6fdec9cd29a072434e13cee812884943cec6ef7ef81abc42735
 ```
 
-[Distribution validation record](dist/Wheelchair-1.2.8.release.json)
+The release archive contains the complete 1.2.18 source, native compiler/runtime images, historical regression authority, release proofs, and the self-checking `SHA256SUMS` manifest. The supported release gate is `./test_release_native_1218.sh`.
 
-## 1.2.8: Native256 maturity
+## Human field source
 
-Wheelchair 1.2.8 completes the normal-build AVX2/YMM realization for the admitted structural tensor slice. It retains the native-512 physical peaks and the schedulerless General Parallel Fabric.
-
-The release adds general finite-register transformations, complete 32-byte vector spills, constant-multiply register-lifetime correctness, and a compiler-local fixup ledger sized independently from the 512-entry unique constant pool. These transformations are part of ordinary `build.sh`; release validation requires no diagnostic injection or second-stage relink.
-
-The coupled structural witness passes the AVX2 execution gate at `N = 4, 17, 100000, 10000000` with `Q = 1, 2, 4`. The executable-code audit requires YMM operations and rejects ZMM/opmask state. Three jobs passed on the exact source commit in [release validation run 34017756455](https://github.com/MatrixFreeSama/whlang/actions/runs/34017756455).
-
-See the [1.2.8 release notes](https://github.com/MatrixFreeSama/whlang/blob/749b12d3a9bfcafa285548018c29c74e4155fc48/worktree/RELEASE_NOTES_1_2_8.md) and [release proof](https://github.com/MatrixFreeSama/whlang/blob/749b12d3a9bfcafa285548018c29c74e4155fc48/worktree/RELEASE_PROOF_1_2_8.md). These are correctness and structural checks; no new speedup is inferred from them.
-
-## 1.2.7: General Multi-ISA Physicalization
-
-Wheelchair 1.2.7 makes physical vector width a general AOT property of the target silicon rather than a workload-specific routing decision.
-
-The compiler combines two independent structural dimensions:
+A periodic Rank-N field kernel can now be written directly as:
 
 ```text
-native resource profile: base | wide | derived
-physical vector shape:   native256 | split512x256 | native512
+program shift_z
+strict
+
+input nx: u64
+input ny: u64
+input nz: u64
+
+input field a[
+    x in nx periodic,
+    y in ny periodic,
+    z in nz periodic
+]: f32
+
+output field out[x in nx, y in ny, z in nz]: f32 =
+    a[x,y,z+1]
 ```
 
-The resulting backend matrix is general:
+The WH shell may use structural `for` syntax for the same data-domain semantics, while WHEX may use `region ... effect pure parallel`. Equivalent forms are required by the release suite to generate byte-identical native executables.
+
+Supported surface features in 1.2.18 include:
+
+- `input field`, `output field`, `inout field`;
+- multiple independent dynamic extents;
+- Rank-N logical axes;
+- per-axis `periodic` boundaries and explicit `periodic(expr, extent)`;
+- WH fake-for field assignment;
+- WHEX pure-parallel regions;
+- materialized-field `sum` reduction;
+- UTF-8 identifiers;
+- compile-time `pure fn` expressions;
+- normal `whexc` routing into the sovereign field backend.
+
+## Pure functions are zero-cost abstractions
 
 ```text
-                    native256   split512x256   native512
-base                    yes           yes           yes
-wide                    yes           yes           yes
-derived                 yes           yes           yes
+pure fn twice(v: f32) -> f32 = v * 2.0
+output field out[x in nx, y in ny, z in nz]: f32 = twice(a[x,y,z])
 ```
 
-No workload name, benchmark identity, source path, or physics domain is accepted as a backend selector.
+The function call disappears at compile time. The release tests require the one-character parameter form above, a long-name parameter form, the direct expression `a[x,y,z] * 2.0`, and the equivalent canonical JSON to generate byte-for-byte identical ELF images.
 
-The hard 1.2.7 invariants are:
+1.2.18 also fixes lexical precedence so an exact pure-function parameter identity outranks optional one-edit human-shell typo repair.
+
+## Strict boundary semantics
+
+A field axis is strict unless a real boundary contract is declared. Therefore:
 
 ```text
-active special-purpose native route   = 0
-active workload-specific route        = 0
-active benchmark-specific route       = 0
-source-path-specific route            = 0
-runtime backend selector              = 0
-runtime profitability selector        = 0
-scalar fallback                       = 0
-hidden serial spine                   = 0
+a[x+1,y,z]
 ```
 
-Physical selection is AOT-only. The sovereign native `topologyc --silicon-audit` classifies the machine shape; the human-facing drivers bind the matching compiler image before the user program is emitted. Python is not the native execution authority.
-
-Current x86-64 physical classes include:
+rejects when `x` has no proved boundary rule. With:
 
 ```text
-AVX2-only silicon        -> native256
-AMD Zen 4 / Zen 4c       -> split512x256
-native 512-bit datapath  -> native512
+x in nx periodic
 ```
 
-Vendor/family information is used only to identify physical datapath shape where ISA presence alone is insufficient. It never selects a workload recipe.
+or an explicit `periodic(x+1,nx)`, the access is legal and lowers to the existing Rank-N coordinate algebra.
 
-## Real native256 authority
+The compiler does not silently invent periodicity.
 
-1.2.7 contains a genuine AVX2/YMM tensor physicalizer, not a scalar compatibility mode.
+## Runtime shape truth
 
-The release gate compiles and executes a neutral structural vector program through the native256 backend, including non-multiple-of-four vector tails. The emitted executable segment is audited directly for YMM state and rejects leaked ZMM/opmask state.
-
-The native256 route is available across the same generic resource classes:
+Materialized-field shape truth comes from `WHFLD216` descriptors. Human source names the logical extent symbols:
 
 ```text
-topologyc-native256
-topologyc-wide-native256
-topologyc-derived-native256
+input nc: u64
+input field p[x in nx, y in ny, z in nz, c in nc]: f32
 ```
 
-No runtime dispatcher is embedded in the emitted user program.
+1.2.18 deliberately does **not** pretend that `c in 3` is a runtime-checked static component contract, because the current ABI does not encode such a source constraint. That spelling remains rejected until a real semantic/ABI contract exists.
 
-## General parallel execution
+## Zero-cost surface bridge
 
-Wheelchair retains the schedulerless causal execution architecture introduced in 1.2.6.
-
-The central rule remains:
+The production path is:
 
 ```text
-No dependency edge = no synchronization edge.
+WH / WHEX
+   -> compile-time human Field lowering
+   -> wheelchair.field/1
+   -> 1.2.17 load/coordinate locality compression
+   -> direct AVX2 / AVX-512 AOT machine code
 ```
 
-Independent bindings are represented by causal dependencies rather than source-order serialization. The general parallel fabric does not require a global runnable queue, global ready scan, root scheduler, work stealing, runtime cost selector, or hidden serial fallback.
+`wheelchair.field/1` remains accepted for compatibility, testing and compiler work, but it is no longer the required human authoring surface for the supported Field subset.
 
-True recurrence is a causal enclave rather than a global sequential spine.
+There is no FieldLang, wrapper runtime, bytecode layer, C/LLVM/MLIR backend or JIT.
 
-WH and WHEX both attach the same general parallel semantics, while mature specialized native realizers may remain only when they are semantically equivalent and preserve or improve the earlier technical peak.
+## 1.2.17 locality engine remains intact
 
-## WH and WHEX
-
-Wheelchair has two human-facing source styles over one structural/native core:
-
-- **WH (`.wh`)** is the inference-heavy conventional-looking surface.
-- **WHEX (`.whex`)** is the explicit expert semantic surface.
-
-For shared semantics, both converge on the same structural core and general physicalization rules.
+The full strict-f32 integration authority still contains 6,921 canonical operations and 2,304 logical field loads. The 1.2.17 backend reduces these to:
 
 ```text
-WH source                 WHEX source
-   |                          |
-   | inference                | explicit structure
-   v                          v
-        Unified Structural Core
-                 |
-                 | proof + erasure + causal lowering
-                 v
-      AOT native physicalization
-                 |
-                 v
-          Native x86-64 ELF
+logical field loads                2304
+unique field+coordinate values       97
+unique neighborhood coordinates      27
+fast-path direct gathers              97
 ```
 
-Wheelchair does not silently rebuild unsupported structural programs as scalar fallback, a hidden global task queue, or a conventional sequential execution spine.
+Launch-time layout proof, dynamic power-of-two address strength reduction, reuse-weighted residency, general-layout fallback and strict accumulation order are preserved.
 
-## Preserved technical peaks
+The historical same-host 1.2.16 -> 1.2.17 regression probe remains:
 
-1.2.7 retains the mature technical layers rather than flattening them during generalization:
+| Physicalization | 1.2.16 | 1.2.17 | Speedup |
+|---|---:|---:|---:|
+| AVX-512 | 2033.430 ms | 30.146 ms | 67.45x |
+| AVX2 | 4241.540 ms | 47.666 ms | 88.98x |
 
-- **1.2.1** Interior Periodic Composition Erasure;
-- **1.2.2** proof-gated Rank-N Cartesian-product physicalization;
-- **1.2.3** Sparse Causal Expansion;
-- **1.2.4** Product-Subtract contraction and Vector Reduction Residency;
-- **1.2.5** Shared Dependency Episode;
-- **1.2.6** Schedulerless Sparse Causal Execution and General Parallel Fabric.
+1.2.18 does not alter that backend.
 
-The qualified native512 gate preserves earlier emitted AVX-512 execution bytes where the host can execute that authority check.
+## Native field ABI
 
-Historical benchmark names remain in the repository only as evidence and regression witnesses. They are not routing keys.
+The storage ABI remains **`WHFLD216`**. A field descriptor carries rank, logical extents, physical byte strides, logical element count and data offset. Intentional read/write aliasing uses one `inout` field; distinct declarations remain under the noalias contract.
 
-## Platform
+See `FIELD_ABI_1_2_16.md`.
 
-The current native toolchain targets Linux x86-64.
+## Compile
 
-Requirements:
+Human WHEX/WH field source can be compiled through the ordinary launcher:
 
-- Python 3 for human-facing AOT source processing and compile-time proof;
-- GNU `as`, `ld`, `readelf`, `objdump`, and related binutils;
-- POSIX shell;
-- AVX2 or a supported wider x86 vector shape for structural tensor realization.
-
-The emitted native program does not execute through Python, C, C++, LLVM, or a JIT.
-
-Unsupported hardware or structural graphs reject instead of silently becoming scalar tensor code.
-
-## Build
-
-From the extracted release directory:
-
-```bash
-cd worktree
-./build.sh
+```sh
+./whexc kernel.whex -o kernel
 ```
 
-A successful build ends with:
+or through an explicit field physicalization:
+
+```sh
+./fieldc kernel.whex -o kernel
+./fieldc-native256 kernel.whex -o kernel-avx2
+```
+
+Canonical `wheelchair.field/1` input remains compatible with the same commands.
+
+## Parallel contract
+
+1.2.18 adds no scheduler. The existing recipient-blind release model remains unchanged:
+
+- no work stealing;
+- no global ready queue;
+- no central scheduler;
+- no post-completion peer query;
+- no destination-aware resource handoff;
+- no hidden scalar field fallback.
+
+Unsupported physical behavior rejects. AVX2 non-contiguous output remains an explicit rejection rather than hidden scalar lane stores.
+
+## Production closure
+
+The production compiler/runtime chain remains handwritten assembly and static native ELF. `build.sh` invokes no Python, and the release contains no Python source.
+
+Run the complete release suite with:
+
+```sh
+./test_release_native_1218.sh
+```
+
+Key terminal markers include:
 
 ```text
-WHEELCHAIR_BUILD=PASS
+WH_WHEX_CANONICAL_ELF_IDENTITY=PASS
+WH_FAKE_FOR_FIELD_LOWERING=PASS
+WHEX_REGION_FIELD_LOWERING=PASS
+FIELD_INPUT_OUTPUT_INOUT_SURFACE=PASS
+RANK4_COMPONENT_AXIS_SURFACE=PASS
+PURE_FN_SHORT_PARAMETER_SCOPE=PASS
+PURE_FN_ZERO_RUNTIME_ABSTRACTION=PASS
+UTF8_FIELD_IDENTIFIERS=PASS
+STRICT_BOUNDARY_REJECTION=PASS
+NO_FAKE_STATIC_COMPONENT_CONTRACT=PASS
+WHEELCHAIR_HUMAN_FIELD_SURFACE_1_2_18=PASS
+WHEELCHAIR_1_2_18_RELEASE=PASS
 ```
 
-## Compile WH
-
-```bash
-cd worktree
-./wheelchairc program.wh -o program
-```
-
-With four executors:
-
-```bash
-./wheelchairc program.wh -o program --executors 4
-```
-
-## Compile WHEX
-
-```bash
-./whexc program.whex -o program
-```
-
-For an explicit AOT ISA ceiling during audit/testing:
-
-```bash
-./whexc program.whex -o program --isa-limit avx2
-```
-
-`--isa-limit` is a compile-time capability ceiling. It is not a runtime selector and does not authorize scalar fallback.
-
-## Inspect structural proof
-
-```bash
-./wheelchairc program.wh -o program --semantic-plan plan.json
-```
-
-or:
-
-```bash
-./whexc program.whex -o program --semantic-plan plan.json
-```
-
-The semantic plan exposes questions that matter physically:
-
-- which dependencies are real;
-- which objects were erased before runtime;
-- which axes survived;
-- which regions are independent;
-- which native resource class was derived;
-- which physical vector shape was selected;
-- whether scalar fallback, runtime dispatch, synthetic synchronization, or central control appeared.
-
-## Structural execution rules
-
-A WH `for` does not promise a serial machine loop. If points are independent, the structural object is an axis map and may be realized using the physical vector width available on the target, masked/vectorized tails, executor regions, sparse causal expansion, or another proved general contraction.
-
-A scalar final reduction value does not imply a scalar execution history. Reduction is represented as a dependency topology.
-
-Structural predicates may lower to select/dataflow structure rather than a central dispatcher.
-
-Arbitrary dynamic `while` is not silently converted into a conventional serial backedge. Unsupported recurrence/control topology rejects until a genuine structural realization exists.
-
-## Release philosophy
-
-A general optimization must satisfy:
-
-```text
-Generality Gain
-+ Measured Physical Gain
-+ Existing Peak Preservation
-```
-
-The intended direction is:
-
-```text
-narrow technical peak
--> identify the structural property
--> promote it into general algebra
--> prove matching programs
--> preserve or improve physical realization
-```
-
-Workload-name dispatch is not an accepted substitute for generality.
-
-## Current maturity boundary
-
-Wheelchair 1.2.8 is an active research compiler/language project. It does not claim every systems-language feature is complete.
-
-In particular:
-
-- supported x86 physical shapes are explicitly gated rather than assumed universal;
-- arbitrary unsupported topology may reject;
-- arbitrary dynamic `while` has no hidden serial fallback;
-- general-language memory safety is not formally claimed as complete;
-- current authority is CPU/x86-64 evidence, not a universal ranking across every device or workload.
-
-The final execution authority is the emitted machine code, not the appearance of the source syntax.
+See `RELEASE_NOTES_1_2_18.md`, `RELEASE_GATES_1_2_18.txt`, `WHEELCHAIR_CHARTER_1_2_18.md` and `PURE_ASSEMBLY_RELEASE_PROOF_1_2_18.md` for the exact release boundary.
