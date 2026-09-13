@@ -1,253 +1,161 @@
-# Wheelchair 1.3.6
+# Wheelchair 1.3.10
 
-Wheelchair is an **HPC- and scientific-simulation-first general-purpose language** built around matrix-free execution, Rank-N data semantics, AOT specialization, direct native code generation, and aggressive removal of unnecessary physical machine work.
+Wheelchair is an HPC- and simulation-first general-purpose language built around matrix-free execution, Rank-N semantics, AOT compilation, direct x86-64 machine code, and causal physical execution.
 
-The current release is **Wheelchair 1.3.6: Global Physical Reality Unification**.
+Wheelchair 1.3.10 is the **Blind Surplus Reflow and Load-Balancing Extinction** release. It turns the Active-Silicon Purity doctrine introduced in 1.3.9 into production execution architecture.
 
 ## Latest release
 
-[Download Wheelchair-1.3.6.zip](https://github.com/MatrixFreeSama/whlang/raw/refs/heads/main/dist/Wheelchair-1.3.6.zip) · [SHA-256 file](https://github.com/MatrixFreeSama/whlang/blob/main/dist/Wheelchair-1.3.6.zip.sha256)
+[Download Wheelchair-1.3.10.zip](https://github.com/MatrixFreeSama/whlang/raw/refs/heads/main/dist/Wheelchair-1.3.10.zip) · [SHA-256 file](https://github.com/MatrixFreeSama/whlang/blob/main/dist/Wheelchair-1.3.10.zip.sha256)
 
-Archive size: **4,220,745 bytes**
+Archive size: **4,730,734 bytes**
 
 ```text
 SHA-256
-99e30c7a4a9b9a8ec4049deda7341e3f0a571fa84feffd63e04ef599233ab25d
+3922de77ca3c0beb5ea0b46eb12a59e656f5de1add98d194b3a4e8fedceef3f1
 ```
 
-The release archive contains the complete 1.3.6 source tree, native compiler/runtime images, historical regression authority, release proofs, machine-code gates, and the self-checking manifest.
-
-Release authority:
+The final archive was validated from a fresh extraction. Its 503-file manifest passed before and after the complete release gate, and the extracted release ended with:
 
 ```text
-WHEELCHAIR_1_3_6_RELEASE=PASS
+WHEELCHAIR_1_3_10_RELEASE=PASS
 ```
 
-## What Wheelchair is trying to do
-
-Most compilers begin with a program and ask how to execute its instructions efficiently. Wheelchair tries to move the boundary earlier:
+The supreme objective is not CPU occupancy:
 
 ```text
-problem structure
-    -> semantic facts
-    -> true dependency relations
-    -> physical facts and lifetimes
-    -> ISA-specific realization
-    -> native machine code
+not: CPU utilization -> 100%
+
+but: necessary physical work / all active physical work -> 100%
 ```
 
-The central rule is simple:
+Idle silicon is legal when no independent causal work exists. Activated silicon doing avoidable coordination, balancing, polling, redistribution, duplicate realization, artificial synchronization, or occupancy maintenance is a design failure.
 
-> Source structure is not a reason to preserve machine work. Only semantic, numerical, causal, and hardware necessity justify physical work.
+The governing rule is:
 
-That rule drives several long-lived design constraints:
+> **Activate no silicon without necessary work. Waste no activated silicon on avoidable work.**
 
-- matrix-free execution wherever the problem does not require a materialized global matrix;
-- Rank-N dataized semantics instead of forcing every problem into scalar control flow;
-- AOT specialization rather than JIT specialization;
-- direct native x86-64 emission rather than a C, LLVM, MLIR, or JIT production backend;
-- strict and tolerant floating-point contracts as separate legal optimization domains;
+## 1.3.10 execution architecture
+
+### Work exists before capacity
+
+Hardware width is only a ceiling. It does not create work.
+
+```text
+causal work -> eligibility to activate silicon
+hardware     -> maximum permission ceiling
+```
+
+Affinity and the compatibility option `--executors N` therefore mean only the maximum permitted concurrent execution capacity. They do not mean "create N workers".
+
+### Load balancing is extinct from Tensor and Field production execution
+
+1.3.10 removes the remaining worker-equality family:
+
+- no static `id * chunks / P` work partition;
+- no proportional executor assignment by subtree size;
+- no executor-ID work topology;
 - no work stealing;
+- no push or pull balancing;
+- no peer load observation;
+- no idle-worker or busy-worker discovery for redistribution;
+- no global load table;
 - no global ready queue;
-- no central runtime scheduler;
-- no post-completion peer query;
-- no destination-aware resource handoff;
-- no hidden scalar fallback for protected Tensor/Field semantics.
+- no post-completion work search;
+- no runtime occupancy autotuning.
 
-WH and WHEX are two human-facing surfaces over the same underlying semantics. WH may present familiar-looking control syntax, while WHEX exposes the structural form more explicitly. They are not intended to describe two different execution models.
+Execution topology comes from the canonical causal work tree. A capacity ceiling may change how many independent subtrees run at once, but it must not change which causal work exists.
 
-## 1.3.6: Global Physical Reality Unification
+### Blind Surplus Reflow
 
-1.3.5 introduced **Physical Realization Uniqueness** in the hot Field/native256 path: if a still-valid physical fact had already been realized, the compiler should not pay for the same realization again merely because the source graph mentioned it again.
-
-1.3.6 promotes that idea into a wider compile-time physical-fact system.
-
-### Versioned PhysicalFact authority
-
-The Field physicalizer now distinguishes several kinds of physical fact instead of treating them as one generic load or expression:
+A completed causal region releases anonymous execution capacity. It never selects a recipient. A region that already owns another independent causal subtree may make one bounded blind claim for anonymous capacity. It never searches for a donor.
 
 ```text
-AddressFact = where a value lives
-LoadFact    = a value read from a particular memory version
-ValueFact   = the resulting computational value
+finished causal work
+        |
+        v
+anonymous capacity release
+        |
+        v
+unowned execution permission
+        ^
+        |
+blind bounded claim
+        |
+pre-existing independent causal work
 ```
 
-A store increments only the version of the field actually mutated. Address identity can remain valid while a previous LoadFact becomes invalid. This avoids both unsafe reuse and unnecessary global invalidation.
-
-### Duplicate physical work is canonicalized
-
-Exact duplicate regular addresses can map to one invocation-stable address authority. Generic exact-bit `f32` constants can share one persistent constant fact. Pure work may be reused while the corresponding authority is still valid and physically profitable to retain.
-
-Wheelchair does **not** turn this into a global cache. Retain versus recompute remains a compile-time physical-cost decision. If keeping a cheap fact alive would create more pressure than rebuilding it later, the fact is allowed to die.
-
-### Semantic width no longer equals register width
-
-1.3.5 had a bounded three-output optimized supernode. 1.3.6 removes that semantic ceiling.
-
-A legal cross-output supernode may cover the full supported Field output set. The current AVX2 realization consumes the graph in physical register windows, so a four-output case becomes:
+The claimed object is execution permission, not another thread's work.
 
 ```text
-semantic supernode: 4 outputs
-physical realization: 3 + 1 accumulator windows
+resource release is recipient-blind
+resource acquisition is donor-blind
 ```
 
-The language-level structure is therefore no longer constrained by a hard-coded register-width constant.
+Anonymous credits are distributed across four cache-line-isolated bitsets. There is no single global surplus counter. A failed claim does not spin, poll, inspect peers, or retry the same point. Execution continues through necessary local work, and a later genuine causal expansion point may perform a new bounded claim.
 
-### AVX-512 joins the direct fact path
+### Protected mechanisms
 
-AVX-512 now consumes the same class of physical facts instead of remaining a conservative side path. The 1.3.6 machine-code gate observes, on the canonical high-pressure graph:
+The load-balancing purge does not remove mechanisms that perform real causal or machine work:
+
+- General causal futex waiting on a region's own indegree;
+- AOT Kahn topology queues used only during compilation;
+- intra-kernel SIMD carrier scheduling that removes dependency stalls inside already-active silicon;
+- locality constraints that express physical permission or cost;
+- compile-time physical scheduling that removes instructions or dependencies without runtime worker redistribution.
+
+## Numerical contracts
+
+Wheelchair keeps strict and tolerant floating-point contracts distinct.
+
+The 1.3.8 strict reduction repair remains preserved. On the FSI diagnostic, native512 and native256 strict execution produces the same final bits across capacity ceilings q1, q2 and q4. In 1.3.10, tolerant execution also uses a capacity-independent canonical causal reduction tree.
+
+Selected 100M FSI checksums:
 
 ```text
-AVX-512 high ZMM references:       809
-AVX-512 direct stack-memory FMAs:  648
-AVX-512 tolerant FMA sites:       2041
-AVX2 high YMM references:         1029
-strict AVX-512 FMA sites:            0
+tolerant q1/q2/q4: 0x416522bcff4adae6
+strict   q1/q2/q4: 0x416522bcff4adb3a
 ```
 
-This is important for correctness as well as speed. Strict FP still forbids contraction on the strict release graph, while tolerant FP may use the stronger direct realization when its declared numerical contract permits it.
+The FSI graph is a regression probe only. Production source contains no FSI, fluid, or solid specialization trigger.
 
-### No runtime fact manager
+## Active-Silicon audit
 
-Physical Reality is a compile-time contract, not a new runtime scheduler.
+Host-specific 1.3.8 to 1.3.10 measurements on an Intel Xeon Platinum 8573C with 5 visible vCPUs and a sustained 4-CPU cgroup quota show the intended distinction between occupancy and useful active work.
 
-1.3.6 still forbids:
+At N=100M:
 
-```text
-runtime fact manager
-runtime residency manager
-runtime autotuning
-work stealing
-global ready queue
-peer work acquisition
-resource-recipient selection
-workload-name specialization
-benchmark-size specialization
-```
+| Contract | q | 1.3.8 wall | 1.3.10 wall | 1.3.8 CPU time | 1.3.10 CPU time |
+|---|---:|---:|---:|---:|---:|
+| tolerant | 2 | 163.058 ms | 164.698 ms | 320.053 ms | 269.260 ms |
+| tolerant | 4 | 83.526 ms | 85.106 ms | 318.845 ms | 270.973 ms |
+| strict | 4 | 163.809 ms | 124.686 ms | 477.018 ms | 402.070 ms |
 
-The runtime executes the AOT physical plan. It is not asked to rediscover the plan while the program is running.
+Tolerant q2/q4 reduces total active CPU time by about 16% and 15% while wall time stays within about 1% to 2%. Strict q4 reduces wall time by about 23.9% while also reducing total CPU active time by about 15.7%.
 
-## 1.3.5 -> 1.3.6 same-host rematch
+The generated FSI arithmetic hot payload is byte-identical between 1.3.8 and 1.3.10, so these measurements isolate execution-fabric changes rather than an FSI arithmetic rewrite.
 
-A post-release 41-round interleaved rematch was run on an **Intel Xeon Platinum 8573C** host with **5 visible vCPUs**, using the same 64^3 tolerant Field workload and one executor for both versions.
+These measurements are host- and workload-specific. They are not a transistor-level Active-Silicon Purity percentage and are not a universal performance claim.
 
-| ISA path | Wheelchair 1.3.5 median | Wheelchair 1.3.6 median | Ratio |
-|---|---:|---:|---:|
-| AVX2 / native256 | 20.738 ms | 20.196 ms | 1.027x |
-| AVX-512 | 23.935 ms | **18.146 ms** | **1.319x** |
+See `PERFORMANCE_1_3_10_BLIND_SURPLUS_REFLOW.md` for the full measurement table and claim boundary.
 
-Interpretation:
+## Core language and compiler model
 
-- AVX2 is effectively near parity on this already heavily optimized three-output workload. It won 21 of 41 paired rounds, so the small median difference should not be presented as a broad AVX2 speedup claim.
-- AVX-512 won 39 of 41 paired rounds. Its median execution time fell by about **24.2%**, corresponding to about **31.9% more throughput** on this workload.
-- The fastest route available to 1.3.5 on this host was AVX2 at 20.738 ms. The fastest 1.3.6 route was AVX-512 at 18.146 ms, a best-path ratio of about **1.143x**.
-- Compared outputs were byte-identical in this rematch.
+Wheelchair remains:
 
-These are workload- and host-specific measurements, not a universal language ranking. The important architectural result is that AVX-512 now receives the same PhysicalFact-oriented treatment that previously existed mainly on the AVX2 path.
+- matrix-free by default;
+- Rank-N oriented;
+- AOT only;
+- direct x86-64 native code;
+- no C, LLVM, MLIR, or JIT production backend;
+- no Python source in the release implementation path;
+- WH human surface plus WHEX lower-level semantics;
+- strict and tolerant numerical contracts;
+- AVX2 and AVX-512 native Tensor and Field paths;
+- recipient-blind resource release;
+- no work stealing and no central runtime scheduler.
 
-## Language surface
-
-A periodic Rank-N field kernel can be written directly in human source:
-
-```text
-program shift_z
-strict
-
-input nx: u64
-input ny: u64
-input nz: u64
-
-input field a[
-    x in nx periodic,
-    y in ny periodic,
-    z in nz periodic
-]: f32
-
-output field out[x in nx, y in ny, z in nz]: f32 =
-    a[x,y,z+1]
-```
-
-The same underlying Field semantics can be reached from WH or WHEX. The canonical Field format remains:
-
-```text
-wheelchair.field/1
-```
-
-The native materialized-field storage ABI remains:
-
-```text
-WHFLD216
-```
-
-Supported Field-side capabilities include dynamic Rank-N extents, periodic boundaries, input/output/inout fields, UTF-8 identifiers, zero-runtime pure-function expansion, strict `f32` semantics, tolerant contracts, AVX2 and AVX-512 native physicalization, and multi-executor execution where the physical proof permits it.
-
-## Compiler architecture
-
-```text
-WH / WHEX
-   |
-   +-> semantic / Rank-N structure
-   |
-   +-> compile-time Physical Reality contract
-   |
-   +-> versioned physical facts
-   |      AddressFact
-   |      LoadFact
-   |      ValueFact
-   |      exact-bit constants
-   |
-   +-> dependency and lifetime proof
-   |
-   +-> physical profitability
-   |
-   +-> ISA-specific realization
-          scalar legality paths
-          AVX2 / native256
-          AVX-512
-   |
-   `-> static native ELF
-```
-
-The production path does not pass through C, LLVM, MLIR, or a JIT.
-
-## Strict and tolerant floating point
-
-Wheelchair deliberately keeps two different optimization authorities.
-
-### Strict
-
-Strict mode preserves the required arithmetic ordering and rounding structure. Physical identity may still remove redundant address formation or other bit-preserving work, but it does not grant permission to reassociate floating-point arithmetic or contract operations into FMA.
-
-The 1.3.6 release gate requires:
-
-```text
-STRICT_FP_FMA_CONTRACTION=0
-```
-
-on the canonical strict graph.
-
-### Tolerant
-
-Tolerant mode may use legal reassociation, FMA realization, wider fact reuse, and tree-shaped reductions when those changes remain within the declared numerical contract.
-
-Tolerant is not the default excuse for approximate arithmetic. It is a separate contract.
-
-## Parallel and resource model
-
-Wheelchair does not use work stealing as a hidden load-balancing layer.
-
-A completed execution domain releases its own physical constraints and does not choose where the newly available silicon capacity should go next. The intended model is recipient-blind release:
-
-```text
-finish true local work
-    -> publish only true causal results
-    -> release local resources immediately
-    -> do not query peers
-    -> do not select a recipient
-    -> do not search for more work
-```
-
-This rule exists to prevent a nominally parallel runtime from reintroducing global coordination or serial scheduling decisions behind the user's back.
+WH may present familiar surface forms such as `if` or `while`, but the lower execution model is dataized and physical rather than a requirement for sequential von-Neumann control.
 
 ## Build
 
@@ -255,101 +163,123 @@ This rule exists to prevent a nominally parallel runtime from reintroducing glob
 ./build.sh
 ```
 
-The production build uses shell plus handwritten native assembly tooling. The release source tree does not require a Python compiler generator.
+The production build uses shell plus handwritten assembly tooling. It invokes no Python compiler generator and no C/LLVM production backend.
 
 ## Compile
 
 General WH/WHEX:
 
 ```sh
-./whexc program.whex -o program
 ./wheelchairc program.wh -o program
+./whexc program.whex -o program
 ```
 
-Explicit Tensor physicalization:
+Tensor:
 
 ```sh
-./topologyc program.whex -o program --executors 256
-./topologyc-native256 program.whex -o program-avx2 --executors 256
+./topologyc program.whex -o program
+./topologyc-wide program.whex -o program
+./topologyc-native256 program.whex -o program-avx2
+```
+
+`--executors N` remains accepted for compatibility, but in 1.3.10 it means only a capacity ceiling:
+
+```sh
+./topologyc-wide program.whex -o program --executors 4
 ```
 
 Field:
 
 ```sh
-./fieldc kernel.whex -o kernel --executors 256
-./fieldc-native256 kernel.whex -o kernel-avx2 --executors 256
+./fieldc kernel.whex -o kernel
+./fieldc-native256 kernel.whex -o kernel-avx2
 ```
-
-The current implementation accepts up to 256 requested executors, but reachable work may reduce the actual executor geometry. The number 256 is an implementation ceiling, not a language-semantic definition of parallelism.
 
 ## Release validation
 
-Inside the 1.3.6 archive:
+Run the complete 1.3.10 release authority:
 
 ```sh
-./test_global_physical_reality_136.sh
-./test_release_native_136.sh
+./test_release_native_1310.sh
 ```
 
-The 1.3.6 release authority requires, among other things:
+The dedicated Blind Surplus Reflow and load-balancing-extinction gate is:
 
-```text
-GLOBAL_PHYSICAL_REALITY contract shared by Field/Tensor/General AOT frontends
-AddressFact / LoadFact / ValueFact separation
-per-field version invalidation
-exact duplicate address canonicalization
-compile-time retain-vs-recompute authority
-four-output optimized oracle
-AVX2 high-register/direct-memory fact consumption
-AVX-512 high-register/direct-memory fact consumption
-strict FP zero FMA contraction
-truthful irregular/padded gather fallback
-NO runtime fact manager
-NO runtime residency manager
-NO runtime autotuner
-NO global ready queue
-NO work stealing
-NO resource-recipient selector
-complete Wheelchair 1.3.5 historical authority preserved
-WHEELCHAIR_1_3_6_RELEASE=PASS
+```sh
+./test_blind_surplus_reflow_1310.sh
 ```
 
-The release archive also contains:
+The final release must end with:
 
 ```text
-WHEELCHAIR_CHARTER_1_3_6.md
-RELEASE_NOTES_1_3_6.md
-RELEASE_GATES_1_3_6.txt
-PURE_ASSEMBLY_RELEASE_PROOF_1_3_6.md
-PERFORMANCE_1_3_6_GLOBAL_PHYSICAL_REALITY.md
-RELEASE_TEST_LOG_1_3_6.txt
+COMPLETE_1_3_7_RELEASE_AUTHORITY_PRESERVED=PASS
+WHEELCHAIR_STRICT_PARALLEL_REDUCTION_1_3_8=PASS
+WHEELCHAIR_BLIND_SURPLUS_REFLOW_1_3_10=PASS
+WHEELCHAIR_1_3_10_RELEASE=PASS
+```
+
+## 1.3.10 authority documents
+
+- `WHEELCHAIR_CHARTER_1_3_10.md`
+- `RELEASE_NOTES_1_3_10.md`
+- `RELEASE_GATES_1_3_10.txt`
+- `PURE_ASSEMBLY_RELEASE_PROOF_1_3_10.md`
+- `PERFORMANCE_1_3_10_BLIND_SURPLUS_REFLOW.md`
+- `LOAD_BALANCING_EXTINCTION_1_3_10.md`
+- `test_blind_surplus_reflow_1310.sh`
+- `test_release_native_1310.sh`
+
+Historical charter, release-note, proof, and regression files remain in the package for auditability.
+
+## Permanent 1.3.10 red lines
+
+```text
+HARDWARE_WIDTH_IS_DEMAND_AUTHORITY=0
+STATIC_EQUAL_WORK_PARTITION=0
+PROPORTIONAL_EXECUTOR_SPLIT=0
+EXECUTOR_ID_WORK_TOPOLOGY=0
+WORK_STEALING=0
+PUSH_BALANCING=0
+PULL_BALANCING=0
+PEER_LOAD_OBSERVATION=0
+PEER_WORK_OBSERVATION=0
+GLOBAL_LOAD_TABLE=0
+GLOBAL_READY_QUEUE=0
+GLOBAL_SURPLUS_COUNTER=0
+POST_COMPLETION_WORK_SEARCH=0
+FAILED_CLAIM_SPIN=0
+RUNTIME_BALANCING_AUTOTUNE=0
+OCCUPANCY_AS_OPTIMIZATION_TARGET=0
+
+CAUSAL_WORK_IS_DEMAND_AUTHORITY=1
+HARDWARE_WIDTH_IS_ONLY_CEILING=1
+ANONYMOUS_SURPLUS_RELEASE=1
+BLIND_CAPACITY_CLAIM=1
+RESOURCE_RELEASE_IS_RECIPIENT_BLIND=1
+RESOURCE_ACQUISITION_IS_DONOR_BLIND=1
+CLAIM_REQUIRES_PREEXISTING_CAUSAL_WORK=1
+ACTIVE_SILICON_PURITY_IS_PRIMARY=1
 ```
 
 ## Recent architecture progression
 
-The current compiler line can be summarized as:
-
 ```text
-1.3.3  Causal Physical Optimization
-       Do not preserve machine work that is physically unprofitable.
+1.3.7  Tensor Physical Reality Completion
+       Remove repeated physical realization inside high-pressure f64 Tensor execution.
 
-1.3.4  Physical Regularity
-       Once regular structure is proved, do not rediscover it at runtime.
+1.3.8  Strict Parallel Reduction Identity Repair
+       Preserve capacity-independent strict reduction bits without collapsing to one executor.
 
-1.3.5  Physical Realization Uniqueness
-       Do not recreate a still-valid physical realization.
+1.3.9  Active-Silicon Purity Charter Reset
+       Stop treating CPU occupancy as the objective. Necessary active work becomes the objective.
 
-1.3.6  Global Physical Reality Unification
-       Make versioned physical facts, lifetimes, and true dependency relations
-       first-class AOT compiler authority across the current architecture.
+1.3.10 Blind Surplus Reflow & Load-Balancing Extinction
+       Remove worker-equality execution authority and let pre-existing causal work blindly claim
+       anonymous released execution capacity.
 ```
 
 ## Claim boundary
 
-Wheelchair is already an aggressive HPC compiler core, but this repository does not claim universal superiority over C, C++, Fortran, CUDA, Julia, Rust, Zig, or other mature HPC ecosystems.
+Wheelchair does not claim universal superiority over C, C++, Fortran, CUDA, Julia, Rust, Zig, or other mature HPC ecosystems. The measurements in this README are host- and workload-specific evidence about particular compiler and execution mechanisms.
 
-Current strengths are concentrated in structure-aware numerical execution, matrix-free/Rank-N workloads, AOT physical specialization, direct ISA realization, elimination of redundant work, and explicit anti-serialization rules.
-
-Mature HPC ecosystems still have much broader library coverage, tooling, platform support, GPU ecosystems, distributed-memory infrastructure, debuggers, profilers, and decades of production validation.
-
-The project therefore treats benchmark wins as evidence about a specific compiler mechanism and workload, not as permission to erase those boundaries.
+Current strengths are concentrated in matrix-free and Rank-N numerical execution, direct AOT native realization, causal dependency exposure, elimination of redundant physical work, strict/tolerant floating-point separation, and execution structures designed to minimize avoidable active-silicon work. Mature HPC ecosystems still provide much broader libraries, tooling, platform support, GPU and distributed-memory infrastructure, debugging, profiling, and production validation.
