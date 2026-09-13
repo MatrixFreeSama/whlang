@@ -1,28 +1,153 @@
-# Wheelchair 1.2.18
+# Wheelchair 1.3.6
 
-Wheelchair 1.2.18 is the **WH/WHEX Native Materialized-Field Surface Completion** release.
+Wheelchair is an **HPC- and scientific-simulation-first general-purpose language** built around matrix-free execution, Rank-N data semantics, AOT specialization, direct native code generation, and aggressive removal of unnecessary physical machine work.
 
-1.2.16 made real dynamic Rank-N `f32` fields executable. 1.2.17 removed the dominant repeated field/address work. 1.2.18 closes the remaining human-source gap: users can now express the supported materialized-field semantics directly in WH/WHEX instead of hand-writing the expanded `wheelchair.field/1` canonical graph.
+The current release is **Wheelchair 1.3.6: Global Physical Reality Unification**.
 
-The field ABI, locality optimizer, SIMD backends and parallel runtime are unchanged.
+## Latest release
 
-## Official release archive
+[Download Wheelchair-1.3.6.zip](https://github.com/MatrixFreeSama/whlang/raw/refs/heads/main/dist/Wheelchair-1.3.6.zip) · [SHA-256 file](https://github.com/MatrixFreeSama/whlang/blob/main/dist/Wheelchair-1.3.6.zip.sha256)
 
-[Download Wheelchair-1.2.18.zip](https://github.com/MatrixFreeSama/whlang/raw/refs/heads/main/dist/Wheelchair-1.2.18.zip) · [Archive SHA-256](https://github.com/MatrixFreeSama/whlang/blob/main/dist/Wheelchair-1.2.18.zip.sha256)
-
-Archive size: **3,945,930 bytes**
-
-Archive SHA-256:
+Archive size: **4,220,745 bytes**
 
 ```text
-29fe6a352dc1d6fdec9cd29a072434e13cee812884943cec6ef7ef81abc42735
+SHA-256
+99e30c7a4a9b9a8ec4049deda7341e3f0a571fa84feffd63e04ef599233ab25d
 ```
 
-The release archive contains the complete 1.2.18 source, native compiler/runtime images, historical regression authority, release proofs, and the self-checking `SHA256SUMS` manifest. The supported release gate is `./test_release_native_1218.sh`.
+The release archive contains the complete 1.3.6 source tree, native compiler/runtime images, historical regression authority, release proofs, machine-code gates, and the self-checking manifest.
 
-## Human field source
+Release authority:
 
-A periodic Rank-N field kernel can now be written directly as:
+```text
+WHEELCHAIR_1_3_6_RELEASE=PASS
+```
+
+## What Wheelchair is trying to do
+
+Most compilers begin with a program and ask how to execute its instructions efficiently. Wheelchair tries to move the boundary earlier:
+
+```text
+problem structure
+    -> semantic facts
+    -> true dependency relations
+    -> physical facts and lifetimes
+    -> ISA-specific realization
+    -> native machine code
+```
+
+The central rule is simple:
+
+> Source structure is not a reason to preserve machine work. Only semantic, numerical, causal, and hardware necessity justify physical work.
+
+That rule drives several long-lived design constraints:
+
+- matrix-free execution wherever the problem does not require a materialized global matrix;
+- Rank-N dataized semantics instead of forcing every problem into scalar control flow;
+- AOT specialization rather than JIT specialization;
+- direct native x86-64 emission rather than a C, LLVM, MLIR, or JIT production backend;
+- strict and tolerant floating-point contracts as separate legal optimization domains;
+- no work stealing;
+- no global ready queue;
+- no central runtime scheduler;
+- no post-completion peer query;
+- no destination-aware resource handoff;
+- no hidden scalar fallback for protected Tensor/Field semantics.
+
+WH and WHEX are two human-facing surfaces over the same underlying semantics. WH may present familiar-looking control syntax, while WHEX exposes the structural form more explicitly. They are not intended to describe two different execution models.
+
+## 1.3.6: Global Physical Reality Unification
+
+1.3.5 introduced **Physical Realization Uniqueness** in the hot Field/native256 path: if a still-valid physical fact had already been realized, the compiler should not pay for the same realization again merely because the source graph mentioned it again.
+
+1.3.6 promotes that idea into a wider compile-time physical-fact system.
+
+### Versioned PhysicalFact authority
+
+The Field physicalizer now distinguishes several kinds of physical fact instead of treating them as one generic load or expression:
+
+```text
+AddressFact = where a value lives
+LoadFact    = a value read from a particular memory version
+ValueFact   = the resulting computational value
+```
+
+A store increments only the version of the field actually mutated. Address identity can remain valid while a previous LoadFact becomes invalid. This avoids both unsafe reuse and unnecessary global invalidation.
+
+### Duplicate physical work is canonicalized
+
+Exact duplicate regular addresses can map to one invocation-stable address authority. Generic exact-bit `f32` constants can share one persistent constant fact. Pure work may be reused while the corresponding authority is still valid and physically profitable to retain.
+
+Wheelchair does **not** turn this into a global cache. Retain versus recompute remains a compile-time physical-cost decision. If keeping a cheap fact alive would create more pressure than rebuilding it later, the fact is allowed to die.
+
+### Semantic width no longer equals register width
+
+1.3.5 had a bounded three-output optimized supernode. 1.3.6 removes that semantic ceiling.
+
+A legal cross-output supernode may cover the full supported Field output set. The current AVX2 realization consumes the graph in physical register windows, so a four-output case becomes:
+
+```text
+semantic supernode: 4 outputs
+physical realization: 3 + 1 accumulator windows
+```
+
+The language-level structure is therefore no longer constrained by a hard-coded register-width constant.
+
+### AVX-512 joins the direct fact path
+
+AVX-512 now consumes the same class of physical facts instead of remaining a conservative side path. The 1.3.6 machine-code gate observes, on the canonical high-pressure graph:
+
+```text
+AVX-512 high ZMM references:       809
+AVX-512 direct stack-memory FMAs:  648
+AVX-512 tolerant FMA sites:       2041
+AVX2 high YMM references:         1029
+strict AVX-512 FMA sites:            0
+```
+
+This is important for correctness as well as speed. Strict FP still forbids contraction on the strict release graph, while tolerant FP may use the stronger direct realization when its declared numerical contract permits it.
+
+### No runtime fact manager
+
+Physical Reality is a compile-time contract, not a new runtime scheduler.
+
+1.3.6 still forbids:
+
+```text
+runtime fact manager
+runtime residency manager
+runtime autotuning
+work stealing
+global ready queue
+peer work acquisition
+resource-recipient selection
+workload-name specialization
+benchmark-size specialization
+```
+
+The runtime executes the AOT physical plan. It is not asked to rediscover the plan while the program is running.
+
+## 1.3.5 -> 1.3.6 same-host rematch
+
+A post-release 41-round interleaved rematch was run on an **Intel Xeon Platinum 8573C** host with **5 visible vCPUs**, using the same 64^3 tolerant Field workload and one executor for both versions.
+
+| ISA path | Wheelchair 1.3.5 median | Wheelchair 1.3.6 median | Ratio |
+|---|---:|---:|---:|
+| AVX2 / native256 | 20.738 ms | 20.196 ms | 1.027x |
+| AVX-512 | 23.935 ms | **18.146 ms** | **1.319x** |
+
+Interpretation:
+
+- AVX2 is effectively near parity on this already heavily optimized three-output workload. It won 21 of 41 paired rounds, so the small median difference should not be presented as a broad AVX2 speedup claim.
+- AVX-512 won 39 of 41 paired rounds. Its median execution time fell by about **24.2%**, corresponding to about **31.9% more throughput** on this workload.
+- The fastest route available to 1.3.5 on this host was AVX2 at 20.738 ms. The fastest 1.3.6 route was AVX-512 at 18.146 ms, a best-path ratio of about **1.143x**.
+- Compared outputs were byte-identical in this rematch.
+
+These are workload- and host-specific measurements, not a universal language ranking. The important architectural result is that AVX-512 now receives the same PhysicalFact-oriented treatment that previously existed mainly on the AVX2 path.
+
+## Language surface
+
+A periodic Rank-N field kernel can be written directly in human source:
 
 ```text
 program shift_z
@@ -42,164 +167,189 @@ output field out[x in nx, y in ny, z in nz]: f32 =
     a[x,y,z+1]
 ```
 
-The WH shell may use structural `for` syntax for the same data-domain semantics, while WHEX may use `region ... effect pure parallel`. Equivalent forms are required by the release suite to generate byte-identical native executables.
-
-Supported surface features in 1.2.18 include:
-
-- `input field`, `output field`, `inout field`;
-- multiple independent dynamic extents;
-- Rank-N logical axes;
-- per-axis `periodic` boundaries and explicit `periodic(expr, extent)`;
-- WH fake-for field assignment;
-- WHEX pure-parallel regions;
-- materialized-field `sum` reduction;
-- UTF-8 identifiers;
-- compile-time `pure fn` expressions;
-- normal `whexc` routing into the sovereign field backend.
-
-## Pure functions are zero-cost abstractions
+The same underlying Field semantics can be reached from WH or WHEX. The canonical Field format remains:
 
 ```text
-pure fn twice(v: f32) -> f32 = v * 2.0
-output field out[x in nx, y in ny, z in nz]: f32 = twice(a[x,y,z])
+wheelchair.field/1
 ```
 
-The function call disappears at compile time. The release tests require the one-character parameter form above, a long-name parameter form, the direct expression `a[x,y,z] * 2.0`, and the equivalent canonical JSON to generate byte-for-byte identical ELF images.
-
-1.2.18 also fixes lexical precedence so an exact pure-function parameter identity outranks optional one-edit human-shell typo repair.
-
-## Strict boundary semantics
-
-A field axis is strict unless a real boundary contract is declared. Therefore:
+The native materialized-field storage ABI remains:
 
 ```text
-a[x+1,y,z]
+WHFLD216
 ```
 
-rejects when `x` has no proved boundary rule. With:
+Supported Field-side capabilities include dynamic Rank-N extents, periodic boundaries, input/output/inout fields, UTF-8 identifiers, zero-runtime pure-function expansion, strict `f32` semantics, tolerant contracts, AVX2 and AVX-512 native physicalization, and multi-executor execution where the physical proof permits it.
 
-```text
-x in nx periodic
-```
-
-or an explicit `periodic(x+1,nx)`, the access is legal and lowers to the existing Rank-N coordinate algebra.
-
-The compiler does not silently invent periodicity.
-
-## Runtime shape truth
-
-Materialized-field shape truth comes from `WHFLD216` descriptors. Human source names the logical extent symbols:
-
-```text
-input nc: u64
-input field p[x in nx, y in ny, z in nz, c in nc]: f32
-```
-
-1.2.18 deliberately does **not** pretend that `c in 3` is a runtime-checked static component contract, because the current ABI does not encode such a source constraint. That spelling remains rejected until a real semantic/ABI contract exists.
-
-## Zero-cost surface bridge
-
-The production path is:
+## Compiler architecture
 
 ```text
 WH / WHEX
-   -> compile-time human Field lowering
-   -> wheelchair.field/1
-   -> 1.2.17 load/coordinate locality compression
-   -> direct AVX2 / AVX-512 AOT machine code
+   |
+   +-> semantic / Rank-N structure
+   |
+   +-> compile-time Physical Reality contract
+   |
+   +-> versioned physical facts
+   |      AddressFact
+   |      LoadFact
+   |      ValueFact
+   |      exact-bit constants
+   |
+   +-> dependency and lifetime proof
+   |
+   +-> physical profitability
+   |
+   +-> ISA-specific realization
+          scalar legality paths
+          AVX2 / native256
+          AVX-512
+   |
+   `-> static native ELF
 ```
 
-`wheelchair.field/1` remains accepted for compatibility, testing and compiler work, but it is no longer the required human authoring surface for the supported Field subset.
+The production path does not pass through C, LLVM, MLIR, or a JIT.
 
-There is no FieldLang, wrapper runtime, bytecode layer, C/LLVM/MLIR backend or JIT.
+## Strict and tolerant floating point
 
-## 1.2.17 locality engine remains intact
+Wheelchair deliberately keeps two different optimization authorities.
 
-The full strict-f32 integration authority still contains 6,921 canonical operations and 2,304 logical field loads. The 1.2.17 backend reduces these to:
+### Strict
+
+Strict mode preserves the required arithmetic ordering and rounding structure. Physical identity may still remove redundant address formation or other bit-preserving work, but it does not grant permission to reassociate floating-point arithmetic or contract operations into FMA.
+
+The 1.3.6 release gate requires:
 
 ```text
-logical field loads                2304
-unique field+coordinate values       97
-unique neighborhood coordinates      27
-fast-path direct gathers              97
+STRICT_FP_FMA_CONTRACTION=0
 ```
 
-Launch-time layout proof, dynamic power-of-two address strength reduction, reuse-weighted residency, general-layout fallback and strict accumulation order are preserved.
+on the canonical strict graph.
 
-The historical same-host 1.2.16 -> 1.2.17 regression probe remains:
+### Tolerant
 
-| Physicalization | 1.2.16 | 1.2.17 | Speedup |
-|---|---:|---:|---:|
-| AVX-512 | 2033.430 ms | 30.146 ms | 67.45x |
-| AVX2 | 4241.540 ms | 47.666 ms | 88.98x |
+Tolerant mode may use legal reassociation, FMA realization, wider fact reuse, and tree-shaped reductions when those changes remain within the declared numerical contract.
 
-1.2.18 does not alter that backend.
+Tolerant is not the default excuse for approximate arithmetic. It is a separate contract.
 
-## Native field ABI
+## Parallel and resource model
 
-The storage ABI remains **`WHFLD216`**. A field descriptor carries rank, logical extents, physical byte strides, logical element count and data offset. Intentional read/write aliasing uses one `inout` field; distinct declarations remain under the noalias contract.
+Wheelchair does not use work stealing as a hidden load-balancing layer.
 
-See `FIELD_ABI_1_2_16.md`.
+A completed execution domain releases its own physical constraints and does not choose where the newly available silicon capacity should go next. The intended model is recipient-blind release:
+
+```text
+finish true local work
+    -> publish only true causal results
+    -> release local resources immediately
+    -> do not query peers
+    -> do not select a recipient
+    -> do not search for more work
+```
+
+This rule exists to prevent a nominally parallel runtime from reintroducing global coordination or serial scheduling decisions behind the user's back.
+
+## Build
+
+```sh
+./build.sh
+```
+
+The production build uses shell plus handwritten native assembly tooling. The release source tree does not require a Python compiler generator.
 
 ## Compile
 
-Human WHEX/WH field source can be compiled through the ordinary launcher:
+General WH/WHEX:
 
 ```sh
-./whexc kernel.whex -o kernel
+./whexc program.whex -o program
+./wheelchairc program.wh -o program
 ```
 
-or through an explicit field physicalization:
+Explicit Tensor physicalization:
 
 ```sh
-./fieldc kernel.whex -o kernel
-./fieldc-native256 kernel.whex -o kernel-avx2
+./topologyc program.whex -o program --executors 256
+./topologyc-native256 program.whex -o program-avx2 --executors 256
 ```
 
-Canonical `wheelchair.field/1` input remains compatible with the same commands.
-
-## Parallel contract
-
-1.2.18 adds no scheduler. The existing recipient-blind release model remains unchanged:
-
-- no work stealing;
-- no global ready queue;
-- no central scheduler;
-- no post-completion peer query;
-- no destination-aware resource handoff;
-- no hidden scalar field fallback.
-
-Unsupported physical behavior rejects. AVX2 non-contiguous output remains an explicit rejection rather than hidden scalar lane stores.
-
-## Production closure
-
-The production compiler/runtime chain remains handwritten assembly and static native ELF. `build.sh` invokes no Python, and the release contains no Python source.
-
-Run the complete release suite with:
+Field:
 
 ```sh
-./test_release_native_1218.sh
+./fieldc kernel.whex -o kernel --executors 256
+./fieldc-native256 kernel.whex -o kernel-avx2 --executors 256
 ```
 
-Key terminal markers include:
+The current implementation accepts up to 256 requested executors, but reachable work may reduce the actual executor geometry. The number 256 is an implementation ceiling, not a language-semantic definition of parallelism.
+
+## Release validation
+
+Inside the 1.3.6 archive:
+
+```sh
+./test_global_physical_reality_136.sh
+./test_release_native_136.sh
+```
+
+The 1.3.6 release authority requires, among other things:
 
 ```text
-WH_WHEX_CANONICAL_ELF_IDENTITY=PASS
-WH_FAKE_FOR_FIELD_LOWERING=PASS
-WHEX_REGION_FIELD_LOWERING=PASS
-FIELD_INPUT_OUTPUT_INOUT_SURFACE=PASS
-RANK4_COMPONENT_AXIS_SURFACE=PASS
-PURE_FN_SHORT_PARAMETER_SCOPE=PASS
-PURE_FN_ZERO_RUNTIME_ABSTRACTION=PASS
-UTF8_FIELD_IDENTIFIERS=PASS
-STRICT_BOUNDARY_REJECTION=PASS
-NO_FAKE_STATIC_COMPONENT_CONTRACT=PASS
-WHEELCHAIR_HUMAN_FIELD_SURFACE_1_2_18=PASS
-WHEELCHAIR_1_2_18_RELEASE=PASS
+GLOBAL_PHYSICAL_REALITY contract shared by Field/Tensor/General AOT frontends
+AddressFact / LoadFact / ValueFact separation
+per-field version invalidation
+exact duplicate address canonicalization
+compile-time retain-vs-recompute authority
+four-output optimized oracle
+AVX2 high-register/direct-memory fact consumption
+AVX-512 high-register/direct-memory fact consumption
+strict FP zero FMA contraction
+truthful irregular/padded gather fallback
+NO runtime fact manager
+NO runtime residency manager
+NO runtime autotuner
+NO global ready queue
+NO work stealing
+NO resource-recipient selector
+complete Wheelchair 1.3.5 historical authority preserved
+WHEELCHAIR_1_3_6_RELEASE=PASS
 ```
 
-See `RELEASE_NOTES_1_2_18.md`, `RELEASE_GATES_1_2_18.txt`, `WHEELCHAIR_CHARTER_1_2_18.md` and `PURE_ASSEMBLY_RELEASE_PROOF_1_2_18.md` for the exact release boundary.
+The release archive also contains:
 
-## 简体中文概览
+```text
+WHEELCHAIR_CHARTER_1_3_6.md
+RELEASE_NOTES_1_3_6.md
+RELEASE_GATES_1_3_6.txt
+PURE_ASSEMBLY_RELEASE_PROOF_1_3_6.md
+PERFORMANCE_1_3_6_GLOBAL_PHYSICAL_REALITY.md
+RELEASE_TEST_LOG_1_3_6.txt
+```
 
-Wheelchair（轮椅）是一门以 **HPC 与科学仿真为首要目标的国产自研通用语言**：坚持矩阵自由、Rank-N 数据化语义、AOT 专一化编译、直接生成原生机器码，并以 WH 人类友好壳层与 WHEX 显式结构语义共同驱动同一套底层。它强调真并行而不是“并行外壳里藏串行”，不采用工作窃取、全局就绪队列和中央调度器，资源完成后立即盲释放；同时拒绝 C/LLVM/MLIR/JIT 套壳和隐藏标量回退，尽量把重复地址、重复访存和无效机器工作在编译期压掉。1.2.18 已把真实 Rank-N `f32` 物化场正式接回 WH/WHEX 顶层，支持动态多维形状、周期邻域、输入/输出/原地场、纯函数零开销展开、UTF-8 标识符以及 AVX2/AVX-512 原生物理化。项目追求的不是“看起来像传统语言”，而是让用户尽量只写数学关系，把并行、SIMD、邻域访问、寄存器驻留和结构压缩这些脏活交给编译器自己完成。
+## Recent architecture progression
+
+The current compiler line can be summarized as:
+
+```text
+1.3.3  Causal Physical Optimization
+       Do not preserve machine work that is physically unprofitable.
+
+1.3.4  Physical Regularity
+       Once regular structure is proved, do not rediscover it at runtime.
+
+1.3.5  Physical Realization Uniqueness
+       Do not recreate a still-valid physical realization.
+
+1.3.6  Global Physical Reality Unification
+       Make versioned physical facts, lifetimes, and true dependency relations
+       first-class AOT compiler authority across the current architecture.
+```
+
+## Claim boundary
+
+Wheelchair is already an aggressive HPC compiler core, but this repository does not claim universal superiority over C, C++, Fortran, CUDA, Julia, Rust, Zig, or other mature HPC ecosystems.
+
+Current strengths are concentrated in structure-aware numerical execution, matrix-free/Rank-N workloads, AOT physical specialization, direct ISA realization, elimination of redundant work, and explicit anti-serialization rules.
+
+Mature HPC ecosystems still have much broader library coverage, tooling, platform support, GPU ecosystems, distributed-memory infrastructure, debuggers, profilers, and decades of production validation.
+
+The project therefore treats benchmark wins as evidence about a specific compiler mechanism and workload, not as permission to erase those boundaries.
