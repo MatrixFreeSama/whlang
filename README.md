@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/icon/wheelchair-logo.png" alt="Wheelchair logo" width="240">
+</p>
+
 # Wheelchair
 
 **An HPC- and simulation-first general-purpose programming language built around Rank-N structure, AOT compilation, ValueFacts, Physical Reality, Physical DAG execution, and direct native x86-64 code generation.**
