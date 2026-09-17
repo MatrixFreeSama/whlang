@@ -8,16 +8,71 @@
 
 Wheelchair targets the same broad numerical-computing territory as C and Fortran, but it does not start from a mandatory sequential instruction stream and then try to recover parallelism afterward. Its compiler treats mathematical structure, value identity, causal dependence, precision, locality, and physical realization as first-class compile-time information.
 
-> Current release: **1.3.46**  
+> Current release: **1.3.49**  
 > Target: **Linux x86-64, static ELF64**  
 > Source surfaces: **WH (`.wh`)** and **WHEX (`.whex`)**  
-> [Download Wheelchair 1.3.46](./dist/Wheelchair-1.3.46.zip)
+> [Download Wheelchair 1.3.49](./dist/Wheelchair-1.3.49.zip)
 
 Archive SHA-256:
 
 ```text
-6c02a46695a43fb06c10476c39901617cb3d5aff8a70497c3cfc0ba51bb40ea8
+d712d819319e3449eaaf8494ce6561466f67063074587e46553d990b844aa74d
 ```
+
+---
+
+## Features
+
+- **English, Simplified Chinese, and Traditional Chinese source.** The three spellings are aliases of the same semantics and may be mixed in one file. Unicode identifiers, emoji, and mathematical symbols are also accepted by the human surface.
+- **Conservative source auto-repair.** English keywords, selected built-ins, and declared names can recover from one insertion, deletion, or substitution. A recognized English token or declared name split by an accidental newline can also be rejoined. Repair is accepted only when the target is unique; ambiguous cases are rejected. Chinese, mixed-script, and emoji identifiers remain exact-only.
+- **WH and WHEX.** WH is the compact human-facing surface; WHEX exposes structural Field/Rank-N relations more explicitly. Both lower into the same AOT architecture.
+- **Native mathematical semantics.** Tensor/reduction, Field neighborhoods, matrices and contraction, differentiation, integration, root relations, complex values, special functions, and parameterized wide floating precision are part of the language surface.
+- **Structural execution.** ValueFacts, causal dependence, lifetime, locality, and Physical DAG structure are available before final machine realization instead of being reconstructed from a mandatory sequential stream.
+- **Native AOT toolchain.** The production compiler/runtime are handwritten x86-64 assembly and emit static ELF64 programs without a C/LLVM/JIT production backend.
+
+### Multilingual source
+
+The release archive contains equivalent English, Simplified Chinese, Traditional Chinese, and mixed-language programs under `surface/examples/`. For example:
+
+```wh
+程序 surface_shell_equivalence
+
+输入 123🔥输入: u64 范围 1..1000
+定义 123: u64 = 7
+定义 9️⃣平方: u64 = 123🔥输入 * 123🔥输入 + `123`
+张量 📦[0️⃣轴: 123🔥输入]: u64 = 9️⃣平方 + 0️⃣轴
+归约 Σ总和[0️⃣轴: 123🔥输入]: u64 = 求和 📦[0️⃣轴]
+发布 结果🚀 = Σ总和
+
+测试 (1) => { 结果🚀 = 8 }
+测试 (4) => { 结果🚀 = 98 }
+```
+
+In 1.3.49, the packaged English, Simplified Chinese, Traditional Chinese, and mixed `.wh` equivalents compile to byte-identical ELF64 output.
+
+### Source auto-repair
+
+The release also keeps a deliberately damaged source next to its clean counterpart:
+
+```wh
+progra repair_equivalence
+inpput N: u64 range 1 .. 64
+lett temperature: u64 = 7
+let pressure: u64 = 3
+tenspr values[i: N]: u64 = temperatur + i
+reducf total[i: N]: u64 = su values[i]
+let masked: u64 = bit_an(temperature, presure)
+let hot: bool = tempera
+ture >
+= pressure
+publisb total
+pub
+lish masked
+publish hot
+test (4) => { total = 34, maske = 3, hot = tru }
+```
+
+`surface/examples/auto_repair_typos.wh` and `surface/examples/auto_repair_clean.wh` compile to byte-identical ELF64 output in 1.3.49. The compiler redirects the repaired tokens internally; it does not rewrite the source file.
 
 ---
 
@@ -155,8 +210,8 @@ WH is the friendlier surface; WHEX is the more explicit structural surface. Both
 The release archive ships prebuilt static compiler binaries under `bin/`.
 
 ```sh
-unzip Wheelchair-1.3.46.zip
-cd Wheelchair-1.3.46
+unzip Wheelchair-1.3.49.zip
+cd Wheelchair-1.3.49
 
 ./bin/wheelchairc surface/examples/equivalent_en.wh -o demo
 ./demo 4
@@ -556,15 +611,15 @@ C, Fortran, Python, GMP, and other external tools may appear under `devtrash/` a
 A current release ZIP is organized roughly as:
 
 ```text
-Wheelchair-1.3.46/
+Wheelchair-1.3.49/
 ├── README.md                         # release-internal engineering notes
 ├── VERSION
 ├── SHA256SUMS
 ├── build.sh
-├── RELEASE_NOTES_1_3_46.md
-├── WHEELCHAIR_CHARTER_1_3_46.md
-├── PURE_ASSEMBLY_RELEASE_PROOF_1_3_46.md
-├── PRODUCTION_BIN_SHA256_1_3_46.txt
+├── RELEASE_NOTES_1_3_49.md
+├── WHEELCHAIR_CHARTER_1_3_49.md
+├── PURE_ASSEMBLY_RELEASE_PROOF_1_3_49.md
+├── PRODUCTION_BIN_SHA256_1_3_49.txt
 ├── bin/                              # production executables
 ├── compiler/                         # current compiler source authority
 ├── runtime/                          # current runtime source authority
@@ -606,6 +661,7 @@ Wheelchair changes quickly, but the following releases mark major changes in the
 | **1.3.42–1.3.43** | Sparse RootRelation and precision assimilation unified real/complex/wide-precision root work. |
 | **1.3.44** | Matrix and parameterized mathematics generalized beyond historical small fixed shapes. |
 | **1.3.45–1.3.46** | Human-shell static structure and static branch erasure made compact mathematical WH source collapse into the existing canonical graph without adding runtime authority. |
+| **1.3.47–1.3.49** | Native256 ValueFact ownership/lifetime and native256/native512 sparse physical materialization were folded into common physical-cost and lifetime authorities rather than separate workload routes. |
 
 The version numbers are retained here because they identify architectural turning points. Ordinary future releases do not require this table to be rewritten unless they introduce another comparable change in the execution model.
 
