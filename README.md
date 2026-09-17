@@ -76,6 +76,36 @@ test (4) => { total = 34, maske = 3, hot = tru }
 
 ---
 
+## Positioning: Fortran++
+
+The project sometimes uses **Fortran++** as a market-positioning shorthand. It does not mean that Wheelchair is a Fortran dialect, source-compatible superset, or replacement frontend for an existing Fortran compiler.
+
+The comparison is about the job the language is built to do:
+
+- HPC, numerical computing, and simulation remain the primary territory;
+- the human surface is intended to stay compact even as the mathematical and general-purpose language surface grows;
+- Rank-N structure, Field relations, precision, causal dependence, and physical realization are compiler-visible semantics rather than conventions layered over ordinary sequential loops;
+- native AOT code generation and low-level machine authority remain available instead of being hidden behind a managed runtime.
+
+The `++` is therefore a direction rather than a universal benchmark claim: **Fortran-like numerical focus, with a broader language surface and a different execution architecture.** The benchmark sections below deliberately keep cases where GCC C or GFortran is still faster.
+
+---
+
+## Why the name Wheelchair?
+
+The name comes from Chinese Soulslike gaming slang. In Chinese gaming communities, a **"wheelchair build" (轮椅)** is a build, weapon, or strategy with unusually high practical strength for the amount of mechanical skill it asks from the player. Instead of learning every dodge window, animation detail, or boss pattern, the player can skip part of that work and still get through the fight.
+
+That is the joke behind the language name. If the mathematical structure is already known, the user should not have to manually spell out every loop, global matrix, scheduling decision, or low-level compiler detail just to express it.
+
+The metaphor is deliberately stronger than the English gaming word **crutch**:
+
+> A crutch still helps you walk.  
+> A wheelchair lets you skip the walking.
+
+`wheelchair` does not automatically carry this gaming meaning in ordinary English; the name specifically refers to the Chinese Soulslike usage.
+
+---
+
 ## What Wheelchair is
 
 Wheelchair is a native AOT language and compiler project designed primarily for HPC, numerical simulation, scientific computing, structured mathematics, and workloads where the program already contains more mathematical structure than a conventional sequential execution model can expose cleanly.
