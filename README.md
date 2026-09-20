@@ -6,6 +6,11 @@
 
 **An HPC- and simulation-first general-purpose programming language built around Rank-N structure, AOT compilation, ValueFacts, Physical Reality, Physical DAG execution, and direct native x86-64 code generation.**
 
+> **C killer.**  
+> **Successor to Fortran.**  
+> **Beats Julia.**  
+> **Simpler than Python.**
+
 Wheelchair targets the same broad numerical-computing territory as C and Fortran, but it does not start from a mandatory sequential instruction stream and then try to recover parallelism afterward. Its compiler treats mathematical structure, value identity, causal dependence, precision, locality, and physical realization as first-class compile-time information.
 
 > Current release: **1.3.58**  
