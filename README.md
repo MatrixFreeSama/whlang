@@ -639,6 +639,44 @@ benchmark-name dispatcher
 
 C, Fortran, Python, GMP, and other external tools may appear under `devtrash/` as benchmarks, independent oracles, test harnesses, or historical evidence. They are not linked into the production compiler/runtime authority.
 
+### Why there is no production GPU backend yet
+
+Wheelchair deliberately does not currently ship a production NVIDIA GPU backend. The lowest stable NVIDIA programming layer normally exposed to compiler authors is PTX, which is a virtual ISA rather than an exact final machine-code contract. PTX is subsequently lowered by NVIDIA's toolchain to architecture-specific SASS, so final instruction selection, register allocation, and scheduling are not fully under Wheelchair's authority.
+
+The current CPU path keeps that last stage inside the language's own production architecture:
+
+```text
+WH / WHEX
+    ↓
+semantic structure
+    ↓
+Physical Reality / Physical DAG
+    ↓
+exact native x86-64 ISA
+    ↓
+machine
+```
+
+A PTX backend would instead introduce another code-generation authority after Wheelchair:
+
+```text
+WH / WHEX
+    ↓
+Wheelchair lowering
+    ↓
+PTX
+    ↓
+NVIDIA backend
+    ↓
+SASS
+    ↓
+GPU
+```
+
+This distinction matters because Wheelchair's architectural advantage is not defined only by benchmark speed. A central design property is direct authority over the path from semantic structure through physical realization to the final native instructions that the processor executes.
+
+GPU support will therefore be reconsidered when it can preserve that machine-level authority rather than merely adding GPU execution through a backend whose final native mapping is outside Wheelchair's control.
+
 ---
 
 ## Release archive structure
