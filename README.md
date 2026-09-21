@@ -13,15 +13,15 @@
 
 Wheelchair targets the same broad numerical-computing territory as C and Fortran, but it does not start from a mandatory sequential instruction stream and then try to recover parallelism afterward. Its compiler treats mathematical structure, value identity, causal dependence, precision, locality, and physical realization as first-class compile-time information.
 
-> Current release: **1.3.66**  
+> Current release: **1.3.78**  
 > Target: **Linux x86-64, static ELF64**  
 > Source surfaces: **WH (`.wh`)** and **WHEX (`.whex`)**  
-> [Download Wheelchair 1.3.66](./dist/Wheelchair-1.3.66.zip)
+> [Download Wheelchair 1.3.78](./dist/Wheelchair-1.3.78.zip)
 
 Archive SHA-256:
 
 ```text
-c83e735e3634dfe528b283e3fb234379425016c5c49fbf2870b6e17ad24ab39a
+24f391590eb3df5d35a1b320ae471e2eb986e6fb54d729bc9777d6255e2a042a
 ```
 
 ---
@@ -245,8 +245,8 @@ WH is the friendlier surface; WHEX is the more explicit structural surface. Both
 The release archive ships prebuilt static compiler binaries under `bin/`.
 
 ```sh
-unzip Wheelchair-1.3.66.zip
-cd Wheelchair-1.3.66
+unzip Wheelchair-1.3.78.zip
+cd Wheelchair-1.3.78
 
 ./bin/wheelchairc surface/examples/equivalent_en.wh -o demo
 ./demo 4
@@ -684,7 +684,7 @@ GPU support will therefore be reconsidered when it can preserve that machine-lev
 A current release ZIP is organized roughly as:
 
 ```text
-Wheelchair-1.3.66/
+Wheelchair-1.3.78/
 ├── README.md                         # release-internal engineering notes
 ├── VERSION
 ├── SHA256SUMS
