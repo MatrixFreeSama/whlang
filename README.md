@@ -13,15 +13,15 @@
 
 Wheelchair targets the same broad numerical-computing territory as C and Fortran, but it does not start from a mandatory sequential instruction stream and then try to recover parallelism afterward. Its compiler treats mathematical structure, value identity, causal dependence, precision, locality, and physical realization as first-class compile-time information.
 
-> Current release: **1.3.78**  
+> Current release: **1.3.79**  
 > Target: **Linux x86-64, static ELF64**  
 > Source surfaces: **WH (`.wh`)** and **WHEX (`.whex`)**  
-> [Download Wheelchair 1.3.78](./dist/Wheelchair-1.3.78.zip)
+> [Download Wheelchair 1.3.79](./dist/Wheelchair-1.3.79.zip)
 
 Archive SHA-256:
 
 ```text
-24f391590eb3df5d35a1b320ae471e2eb986e6fb54d729bc9777d6255e2a042a
+1eb52ff7f99981ddf6a9afebd2fe6f5427cd02bfeeba06847b5fbef9cbd53b02
 ```
 
 ---
@@ -255,8 +255,8 @@ WH is the friendlier surface; WHEX is the more explicit structural surface. Both
 The release archive ships prebuilt static compiler binaries under `bin/`.
 
 ```sh
-unzip Wheelchair-1.3.78.zip
-cd Wheelchair-1.3.78
+unzip Wheelchair-1.3.79.zip
+cd Wheelchair-1.3.79
 
 ./bin/wheelchairc surface/examples/equivalent_en.wh -o demo
 ./demo 4
@@ -746,15 +746,15 @@ GPU support will therefore be reconsidered when it can preserve that machine-lev
 A current release ZIP is organized roughly as:
 
 ```text
-Wheelchair-1.3.78/
+Wheelchair-1.3.79/
 ├── README.md                         # release-internal engineering notes
 ├── VERSION
 ├── SHA256SUMS
 ├── build.sh
-├── RELEASE_NOTES_1_3_78.md
+├── RELEASE_NOTES_1_3_79.md
 ├── WHEELCHAIR_CHARTER_1_3_78.md
 ├── PURE_ASSEMBLY_RELEASE_PROOF_1_3_78.md
-├── PRODUCTION_BIN_SHA256_1_3_78.txt
+├── PRODUCTION_BIN_SHA256_1_3_79.txt
 ├── bin/                              # production executables
 ├── compiler/                         # current compiler source authority
 ├── runtime/                          # current runtime source authority
