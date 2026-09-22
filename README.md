@@ -34,6 +34,10 @@ Archive SHA-256:
 - **Native mathematical semantics.** Tensor/reduction, Field neighborhoods, matrices and contraction, differentiation, integration, root relations, complex values, special functions, and parameterized wide floating precision are part of the language surface.
 - **Structural execution.** ValueFacts, causal dependence, lifetime, locality, and Physical DAG structure are available before final machine realization instead of being reconstructed from a mandatory sequential stream.
 - **Native AOT toolchain.** The production compiler/runtime are handwritten x86-64 assembly and emit static ELF64 programs without a C/LLVM/JIT production backend.
+- **Automatic Grouping.** GroupFact derives operation-affine groups from shape, dependence, and physical cost. Vector and scalar execution are degradations of the same structure.
+- **Semantic and execution-form convergence.** Proved equivalent pure expressions share one semantic representative. Admitted recursive relations lower to the existing state-iteration representation before machine emission.
+- **Rank-N transition power.** Proved affine wrap-u64 state updates use one dimension-bearing transform-composition kernel, including the scalar case.
+- **Physical facts through final ISA emission.** Region facts, value lifetimes, and causal depth govern address residency, register use, and legal instruction interleaving.
 
 ### Multilingual source
 
@@ -78,6 +82,12 @@ test (4) => { total = 34, maske = 3, hot = tru }
 ```
 
 `surface/examples/auto_repair_typos.wh` and `surface/examples/auto_repair_clean.wh` compile to byte-identical ELF64 output in 1.3.49. The compiler redirects the repaired tokens internally; it does not rewrite the source file.
+
+### Human feedback
+
+WH reports successful repair before automatic convergence. Convergence has one message, `Cheesed successfully.`, followed by source locations in the form `line N:`. A final compilation error takes precedence over intermediate repair and convergence presentation.
+
+The terminal character portrait uses one stored geometry with `!` for repair and `×` for an unresolved error in 1.3.78. WHEX and canonical expert inputs retain their technical diagnostics. Reporting consumes the existing compiler proofs and does not change the generated workload executable.
 
 ---
 
@@ -349,6 +359,34 @@ native machine code
 
 ---
 
+## Automatic Grouping
+
+GroupFact describes a group of related operations using the existing ValueFacts, ShapeFact-N axes, Operator relations, and Physical DAG. Physical Reality then determines how much of that structure the target can realize together. The degradation order is **Group → Vector → Scalar**: a vector is a one-axis group, and scalar execution is the final single-member form.
+
+Group body and carrier factors follow measured code/resource footprint, shape facts, causal depth, and live register pressure. A realized group can share one loop-control edge and use stronger boundary facts for its interior. The mature vector episode remains the baseline when no additional grouping structure is proved.
+
+Grouping is decided during compilation. There is no runtime group manager, fixed tile-size table, or separate compatibility vectorizer. Wider groups still pay for all necessary arithmetic; their benefit comes from the physical work they can share or remove.
+
+## Semantic and execution-form convergence
+
+Before General emits a machine fragment, immutable scalar computations can converge to one canonical semantic representative. The proof covers aliases, identical pure expression trees, neutral integer and Boolean operations, same-type casts, valid commutative operand order, comparison duality, and composition of already-proved child equivalence.
+
+Unproved expressions retain their original identity. Associative regrouping and strict floating-point arithmetic reordering are outside this proof. The existing symbol record owns the representative, so equivalent source forms do not require another intermediate representation or runtime service.
+
+The same principle extends to an admitted class of pure self-recursive `u64` functions. When the frontend proves a finite fixed-lag, autonomous, total wrap-u64 recurrence, it projects the dependency window into the existing `iterate` representation. Lag span comes from the relation itself. Dynamic lags, direct recurrence-axis dependence in the step, and trap-sensitive or otherwise unproved recursive forms are rejected by this lowering.
+
+### Rank-N transition power
+
+A counted iteration whose relevant state update proves affine has the form
+
+$$
+x_{k+1}=A x_k+b\pmod{2^{64}}.
+$$
+
+One native kernel composes this transformation by binary powering. For a fixed state dimension, the number of transform-composition stages grows as `O(log steps)` instead of executing every update. Matrix composition still has a cost that depends on the state dimension; this is not a constant-cost solution for arbitrary recurrences.
+
+The proof starts from the published result's causal backward slice. Scalar and multi-state cases share the same kernel. Non-affine iterations retain ordinary causal execution. An admitted recursive source form can reach this same path after convergence to `iterate`, without a recursive runtime or memoization table.
+
 ## Structural execution
 
 Wheelchair does not define parallelism as "take a sequential program and distribute loop iterations to workers." Instead, it treats independent causal structure as independently realizable physical work.
@@ -400,6 +438,16 @@ Wheelchair's parallel architecture does not use work stealing, donor/recipient l
 
 When a causal execution region is finished, its resources are released. Where those resources are subsequently used is left to the external operating-system/hardware substrate rather than managed through a Wheelchair-owned global redistribution fabric.
 
+Tensor and Field execution expose disjoint ownership regions at launch. Outward contexts are reaped by the invocation root, while mathematical reduction is handled separately. This removes the recursive runtime join tree and repeated subtree profitability checks. If the OS refuses outward materialization, the existing range worker evaluates that work locally. General retains its causal DAG where dependencies require it.
+
+### Region facts and final machine code
+
+Field execution retains the proved end of a regular physical region. Complete packets inside that region reuse its facts; coordinates and masks are reconstructed at actual boundaries, irregular layouts, and partial tails. Layout, uniform-input, and output-policy facts are packed once at launch instead of reloaded for each packet.
+
+The emitter carries these facts into native code. Region-lifetime addresses can remain in general-purpose registers and constants in SIMD registers. Legal Group episodes emit independent packet operations in Physical-DAG depth order, with group width constrained by actual live carriers. Where an instruction and numerical contract permit it, an immutable load becomes the instruction's memory operand directly.
+
+Strict reduction order remains authoritative. Generic layouts and boundary paths retain their established semantics. The existing Physical DAG supplies the order through emission; no post-code-generation machine scheduler is added.
+
 ---
 
 ## Where structural execution has beaten C, and where it has not
@@ -446,6 +494,8 @@ The same 1.3.18 rematch deliberately retained a negative control:
 | 7-state rigid-body causal control, 1M | 15.359 ms | **9.706 ms** | 10.132 ms | Wheelchair ≈ **1.58× C time** |
 
 Likewise, the 1.3.12 500M two-state recurrence measured 427.384 ms for Wheelchair versus 177.460 ms for C and 178.169 ms for Fortran. That release improved Wheelchair's own previous implementation by 4.783×, but it still remained about 2.4× slower than the mature scalar controls.
+
+This is a historical scalar-execution result. Since 1.3.67, that affine recurrence class can use Rank-N transition power. The old timings do not measure the current path; non-affine causal workloads still need their own performance evaluation.
 
 The intended boundary is therefore:
 
@@ -497,7 +547,7 @@ On the 1.3.26 validation host:
 | miniFE Hex8 heat, 21 numeric neighbors | **17.358 ms** | 50.167 ms | 25.817 ms |
 | CloverLeaf x-acceleration | **15.635 ms** | 31.704 ms | 24.371 ms |
 
-This is a useful snapshot of Wheelchair's real boundary: a regular narrow neighborhood can reach or slightly exceed C, while wider sparse/Field work still leaves room for the mature C compiler to win.
+These measurements describe the 1.3.26 implementation: the narrow regular neighborhood slightly exceeded the measured C kernel, while the wider probes remained behind C. Later Region and ISA work changes physical realization, but a new matched run is required to quantify the current performance boundary.
 
 ---
 
@@ -587,6 +637,12 @@ root(x, expression, guess, static_iterations)
 
 One RootRelation performs AOT Newton work over the existing structured-number semantics and emits sparse validity, real, and imaginary facts. A real result is a projection of the same relation, not a second solver family.
 
+### Compile-time composition and refinement
+
+Multi-parameter `pure fn` calls expand with simultaneous hygienic substitution: names in caller expressions cannot be captured by the callee's other formal parameters. Nested mathematical helpers compose through the same surface lowering.
+
+Advanced relations with an existing refinement budget accept an optional final AOT-static count. These include Lambert W, inverse erf, selected recurrence/series relations, elliptic refinement, matrix exponential/logarithm/square-root refinement, and eigen/SVD iteration. Omitting the count retains the relation's default. Integration can repeat its existing Gauss-Legendre panel over a static number of equal subintervals. A runtime-variable count is not admitted by this interface.
+
 ---
 
 ## Rank-N, Tensor, Field, and Matrix
@@ -639,6 +695,12 @@ benchmark-name dispatcher
 
 C, Fortran, Python, GMP, and other external tools may appear under `devtrash/` as benchmarks, independent oracles, test harnesses, or historical evidence. They are not linked into the production compiler/runtime authority.
 
+### Storage follows program structure
+
+Source buffers, parser metadata, symbol and causal-edge arenas, General inputs/states/outputs, Field counts/accesses, and several code-staging workspaces are sized from the actual program. This removes historical implementation ceilings without replacing them with larger fixed tables.
+
+ShapeFact-N stores axis identities and extents; rank, strides, and product cardinality are derived from those facts. Its logical shape model is separate from the capabilities of each physical consumer. Current limits such as Tensor's single runtime extent and the Field Rank-8/four-logical-VREG representation remain explicit. Instance-sized storage does not imply unrestricted execution support.
+
 ### Why there is no production GPU backend yet
 
 Wheelchair deliberately does not currently ship a production NVIDIA GPU backend. The lowest stable NVIDIA programming layer normally exposed to compiler authors is PTX, which is a virtual ISA rather than an exact final machine-code contract. PTX is subsequently lowered by NVIDIA's toolchain to architecture-specific SASS, so final instruction selection, register allocation, and scheduling are not fully under Wheelchair's authority.
@@ -689,10 +751,10 @@ Wheelchair-1.3.78/
 ├── VERSION
 ├── SHA256SUMS
 ├── build.sh
-├── RELEASE_NOTES_1_3_58.md
-├── WHEELCHAIR_CHARTER_1_3_58.md
-├── PURE_ASSEMBLY_RELEASE_PROOF_1_3_58.md
-├── PRODUCTION_BIN_SHA256_1_3_58.txt
+├── RELEASE_NOTES_1_3_78.md
+├── WHEELCHAIR_CHARTER_1_3_78.md
+├── PURE_ASSEMBLY_RELEASE_PROOF_1_3_78.md
+├── PRODUCTION_BIN_SHA256_1_3_78.txt
 ├── bin/                              # production executables
 ├── compiler/                         # current compiler source authority
 ├── runtime/                          # current runtime source authority
@@ -735,6 +797,13 @@ Wheelchair changes quickly, but the following releases mark major changes in the
 | **1.3.44** | Matrix and parameterized mathematics generalized beyond historical small fixed shapes. |
 | **1.3.45–1.3.46** | Human-shell static structure and static branch erasure made compact mathematical WH source collapse into the existing canonical graph without adding runtime authority. |
 | **1.3.47–1.3.49** | Native256 ValueFact ownership/lifetime and native256/native512 sparse physical materialization were folded into common physical-cost and lifetime authorities rather than separate workload routes. |
+| **1.3.50–1.3.60** | Program-sized storage replaced historical capacity tables; ShapeFact-N unified logical shape facts; multi-parameter pure composition and optional static mathematical refinement matured. |
+| **1.3.61–1.3.66** | Automatic Grouping established Group → Vector → Scalar degradation and executable groups governed by shared physical cost and carrier facts. |
+| **1.3.67** | One Rank-N affine transition-power kernel absorbed scalar and multi-state wrap-u64 recurrences. |
+| **1.3.68–1.3.70** | Semantic representatives and proof closure converged equivalent pure expressions; admitted recursive forms lowered into existing iteration facts. |
+| **1.3.71–1.3.73** | Field region proofs persisted across packets; Tensor/Field execution ownership was simplified; launch facts left the hot packet loop. |
+| **1.3.74–1.3.77** | Address and constant residency, live Group carriers, depth-ordered instruction emission, and direct memory operands carried Physical-DAG facts through final ISA realization. |
+| **1.3.78** | WH repair, convergence, source locations, and final-error presentation joined one shared human-feedback authority. |
 
 The version numbers are retained here because they identify architectural turning points. Ordinary future releases do not require this table to be rewritten unless they introduce another comparable change in the execution model.
 
@@ -794,6 +863,9 @@ Wheelchair 是一个面向 **HPC、数值计算和仿真** 的通用型 AOT 编�
 简单来说：
 
 - `WH` 是面向人的简洁语法，`WHEX` 是更显式的结构语义；
+- 自动群化按结构和物理成本形成执行群，并按硬件条件退化为向量或标量；
+- 自动收敛合并可证明等价的纯表达式，将满足条件的递归写法归入既有迭代结构；可证明的 `u64` 仿射状态关系进一步使用统一的 Rank-N 跃迁幂；
+- 区域事实与因果深度一直参与最终机器指令生成，同时保留严格浮点顺序和边界语义；
 - 当前生产链是 **手写 x86-64 汇编编译器 + AOT + 静态 ELF**，不以 C/LLVM/JIT 作为生产后端；
 - 结构执行在大型独立 Tensor/Field/FSI 工作中曾实测超过 GCC C 和 GFortran；
 - 在强因果标量递推、宽稀疏访存和成熟标量调度区域，C/Fortran 仍然可能更快；
@@ -807,6 +879,9 @@ Wheelchair 是一個面向 **HPC、數值計算與模擬** 的通用型 AOT 程�
 簡單來說：
 
 - `WH` 是面向使用者的簡潔語法，`WHEX` 則提供更顯式的結構語意；
+- 自動群化依結構與物理成本形成執行群，並依硬體條件退化為向量或純量；
+- 自動收斂合併可證明等價的純運算式，將符合條件的遞迴寫法歸入既有迭代結構；可證明的 `u64` 仿射狀態關係進一步使用統一的 Rank-N 躍遷冪；
+- 區域事實與因果深度持續參與最終機器指令生成，同時保留嚴格浮點順序與邊界語意；
 - 目前的生產工具鏈是 **手寫 x86-64 組合語言編譯器 + AOT + 靜態 ELF**，不以 C、LLVM 或 JIT 作為生產後端；
 - 結構執行在大型獨立 Tensor、Field 與 FSI 工作負載中，實測曾超過 GCC C 與 GFortran；
 - 在強因果純量遞推、寬稀疏記憶體存取，以及成熟的純量排程區域中，C／Fortran 仍然可能更快；
