@@ -32,6 +32,8 @@ Archive SHA-256:
 - **Conservative source auto-repair.** English keywords, selected built-ins, and declared names can recover from one insertion, deletion, or substitution. A recognized English token or declared name split by an accidental newline can also be rejoined. Repair is accepted only when the target is unique; ambiguous cases are rejected. Chinese, mixed-script, and emoji identifiers remain exact-only.
 - **WH and WHEX.** WH is the compact human-facing surface; WHEX exposes structural Field/Rank-N relations more explicitly. Both lower into the same AOT architecture.
 - **Native mathematical semantics.** Tensor/reduction, Field neighborhoods, matrices and contraction, differentiation, integration, root relations, complex values, special functions, and parameterized wide floating precision are part of the language surface.
+- **Compile-time abstraction erasure.** Pure structural functions, static records, and axis relations lower into the existing semantic graph. Admitted abstractions disappear before execution; equivalence gates compare them with manually expanded programs.
+- **Explicit precision contracts.** Strict/tolerant arithmetic and low/high precision propagation are separate choices. For `fpP` above 64 bits, precision is a parameter of the common Rank-N representation rather than a separate implementation for each named width.
 - **Structural execution.** ValueFacts, causal dependence, lifetime, locality, and Physical DAG structure are available before final machine realization instead of being reconstructed from a mandatory sequential stream.
 - **Native AOT toolchain.** The production compiler/runtime are handwritten x86-64 assembly and emit static ELF64 programs without a C/LLVM/JIT production backend.
 - **Automatic Grouping.** GroupFact derives operation-affine groups from shape, dependence, and physical cost. Vector and scalar execution are degradations of the same structure.
@@ -267,6 +269,8 @@ The same archive can rebuild the production binaries from source:
 ```sh
 ./build.sh
 ```
+
+For 1.3.79, `./test.sh` rebuilds and runs the 12 explicitly admitted release regression scripts. `./test.sh coverage` observes native compiler coverage externally; `./test.sh all` runs both phases. Coverage adds no instrumentation to production binaries. The packaged 43.83% figure describes executable assembly source lines reached by that corpus, not complete language or correctness coverage.
 
 Typical compiler entry points are:
 
@@ -751,6 +755,8 @@ Wheelchair-1.3.79/
 ├── VERSION
 ├── SHA256SUMS
 ├── build.sh
+├── test.sh                           # current release verification entry
+├── TESTING_1_3_79.md
 ├── RELEASE_NOTES_1_3_79.md
 ├── WHEELCHAIR_CHARTER_1_3_78.md
 ├── PURE_ASSEMBLY_RELEASE_PROOF_1_3_78.md
@@ -773,13 +779,32 @@ The Git repository itself stays comparatively small; complete release trees are 
 
 ---
 
+## Development history
+
+The earliest recovered Wheelchair snapshot in this review is `Wheelchair_Source_Decentralized_20260826.zip`, before semantic version numbering. Its program format was a typed tensor graph in `.wc.json`: scalar values, branches, iteration, records, dictionaries, and causal goals were expressed through tensor axes and contracts. It already compiled unrelated programs and checked them against an independent reference evaluator.
+
+That prototype used a Python frontend and a general C17/GCC backend. Separate, restricted Newton–Jacobian and cascade backends emitted x86-64 ELF directly. Its decentralized runtime still had ring-neighbor work stealing and queue-based resource return. Those mechanisms belong to the historical prototype; the current recipient-blind release model came later.
+
+The 1.0.0 package established the public version baseline and `.wh` source identity while retaining explicit backend limits. The native topology releases then removed evaluator overhead and central fork/join work. WHEX gained structural contracts in 1.1.0; WH recovered the same structure from familiar syntax in 1.2.0. By 1.2.10, the human surfaces and general causal physicalizer had joined the assembly production chain.
+
+The 1.3 series moved more decisions into shared semantic and physical facts: which work must exist, which values can remain resident, which dependencies require another execution context, and which numerical transformations are allowed. Mathematical expansion, parameterized precision, Automatic Grouping, and proof-based convergence extended those same authorities. The recurring design choice is to absorb useful mechanisms into common structure and remove the superseded paths.
+
+### Historical evidence
+
+The pre-version account comes from the recovered archive's `README.md`, `SPECIFICATION.md`, and compiler sources. The 1.0.0 package's `RELEASE.md` identifies the first public version baseline without claiming architecture completion. Early numbered milestones are retained in `RELEASE_NOTES.md` inside [1.2.0](./dist/Wheelchair-1.2.0.zip) and in `worktree/` inside [1.2.8](./dist/Wheelchair-1.2.8.zip). Later notes and proofs are preserved under `devtrash/history/` and `devtrash/release_history/` in the [current archive](./dist/Wheelchair-1.3.79.zip). This is a reconstruction from surviving artifacts; the date in the pre-version filename does not establish the project's creation date.
+
 ## Landmark architecture releases
 
-Wheelchair changes quickly, but the following releases mark major changes in the architecture rather than ordinary feature accumulation.
+These milestones record changes in semantics, execution, and release verification. Historical entries describe the implementation at that point; they do not imply that every old mechanism remains in production.
 
 | Version | Landmark |
 |---|---|
-| **1.2.10** | Human WH/WHEX surface and general causal physicalizer moved into the handwritten native production chain; Python left the production compiler/runtime path. |
+| **Pre-version snapshot** | Typed tensor-graph source, a general Python/C17 chain, decentralized neighbor queues, and restricted direct-ELF experiments established the initial language prototype. |
+| **1.0.0** | Public version baseline and `.wh` identity. Direct native slices used static executor stripes and causal task graphs; the general generated-C backend still existed. |
+| **1.0.9–1.0.15** | Native topology runtime erasure, distributed causal fork/join, recursive operator-span recovery, fused vector episodes, ISA capability recipes, and boundary/interior proofs reduced physical overhead. |
+| **1.1.0** | First-class axes, pure structural functions, records, Region/Effect contracts, and ownership/dependency proofs expanded WHEX with compile-time abstraction erasure. |
+| **1.2.0–1.2.8** | WH structural recovery reached WHEX canonical/native equivalence; periodic-neighborhood proofs and native256 maturity extended the common realization. |
+| **1.2.9–1.2.10** | Completion became recipient-blind (`OWNED -> FREE`). AOT causal-region contraction removed execution boundaries with no parallel width; WH/WHEX and the general physicalizer entered the assembly production chain, removing Python from production. |
 | **1.2.14** | Dense caretaker completion: induction, LICM, unrolling, delayed reductions, lifetime reuse, and related generic dense cleanup. |
 | **1.2.15** | Rank-N coordinate algebra and native neighborhood relations matured. |
 | **1.2.16–1.2.18** | Native Field ABI, Field locality work, and human Field surface became part of the common language path. |
@@ -791,7 +816,7 @@ Wheelchair changes quickly, but the following releases mark major changes in the
 | **1.3.19** | Structural execution theory consolidated around `W`, causal span `S`, and realization overhead `H`. |
 | **1.3.20–1.3.27** | Value transport, predicates, Field load lifetime, and carrier lifetime were progressively sparsified through the same Physical Reality architecture. |
 | **1.3.28–1.3.36** | Native mathematical semantics, structured mathematics, differentiation/integration/root-related groundwork, and broader general-language abstractions expanded. |
-| **1.3.38–1.3.40** | Parameterized wide floating precision matured; one native Fourier multiplication authority replaced named-width multiplication paths. |
+| **1.3.38–1.3.40** | Parameterized `fpP` replaced dedicated width implementations. One Rank-N Fourier multiplication authority then replaced the former multiplication paths and selector. |
 | **1.3.41** | Sparse mathematics fusion merged overlapping mathematical cores instead of accumulating duplicate approximation families. |
 | **1.3.42–1.3.43** | Sparse RootRelation and precision assimilation unified real/complex/wide-precision root work. |
 | **1.3.44** | Matrix and parameterized mathematics generalized beyond historical small fixed shapes. |
@@ -804,8 +829,9 @@ Wheelchair changes quickly, but the following releases mark major changes in the
 | **1.3.71–1.3.73** | Field region proofs persisted across packets; Tensor/Field execution ownership was simplified; launch facts left the hot packet loop. |
 | **1.3.74–1.3.77** | Address and constant residency, live Group carriers, depth-ordered instruction emission, and direct memory operands carried Physical-DAG facts through final ISA realization. |
 | **1.3.78** | WH repair, convergence, source locations, and final-error presentation joined one shared human-feedback authority. |
+| **1.3.79** | One current test entry, explicit regression admission, and external native coverage closed release verification. The eight production compiler binaries remained byte-identical to 1.3.78. |
 
-The version numbers are retained here because they identify architectural turning points. Ordinary future releases do not require this table to be rewritten unless they introduce another comparable change in the execution model.
+The table selects turning points rather than listing every patch. Versioned benchmark results above remain observations of their original releases and hosts, not measurements of the current compiler.
 
 ---
 
