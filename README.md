@@ -13,15 +13,15 @@
 
 Wheelchair targets the same broad numerical-computing territory as C and Fortran, but it does not start from a mandatory sequential instruction stream and then try to recover parallelism afterward. Its compiler treats mathematical structure, value identity, causal dependence, precision, locality, and physical realization as first-class compile-time information.
 
-> Current release: **1.3.79**  
+> Current release: **1.3.82**  
 > Target: **Linux x86-64, static ELF64**  
 > Source surfaces: **WH (`.wh`)** and **WHEX (`.whex`)**  
-> [Download Wheelchair 1.3.79](./dist/Wheelchair-1.3.79.zip)
+> [Download Wheelchair 1.3.82](./dist/Wheelchair-1.3.82.zip)
 
 Archive SHA-256:
 
 ```text
-1eb52ff7f99981ddf6a9afebd2fe6f5427cd02bfeeba06847b5fbef9cbd53b02
+950683a792032403d6853c61246aff9026a8fd254ef63ddb097389a539e70250
 ```
 
 ---
@@ -257,8 +257,8 @@ WH is the friendlier surface; WHEX is the more explicit structural surface. Both
 The release archive ships prebuilt static compiler binaries under `bin/`.
 
 ```sh
-unzip Wheelchair-1.3.79.zip
-cd Wheelchair-1.3.79
+unzip Wheelchair-1.3.82.zip
+cd Wheelchair-1.3.82
 
 ./bin/wheelchairc surface/examples/equivalent_en.wh -o demo
 ./demo 4
@@ -791,7 +791,7 @@ The 1.3 series moved more decisions into shared semantic and physical facts: whi
 
 ### Historical evidence
 
-The pre-version account comes from the recovered archive's `README.md`, `SPECIFICATION.md`, and compiler sources. The 1.0.0 package's `RELEASE.md` identifies the first public version baseline without claiming architecture completion. Early numbered milestones are retained in `RELEASE_NOTES.md` inside [1.2.0](./dist/Wheelchair-1.2.0.zip) and in `worktree/` inside [1.2.8](./dist/Wheelchair-1.2.8.zip). Later notes and proofs are preserved under `devtrash/history/` and `devtrash/release_history/` in the [current archive](./dist/Wheelchair-1.3.79.zip). This is a reconstruction from surviving artifacts; the date in the pre-version filename does not establish the project's creation date.
+The pre-version account comes from the recovered archive's `README.md`, `SPECIFICATION.md`, and compiler sources. The 1.0.0 package's `RELEASE.md` identifies the first public version baseline without claiming architecture completion. Early numbered milestones are retained in `RELEASE_NOTES.md` inside [1.2.0](./dist/Wheelchair-1.2.0.zip) and in `worktree/` inside [1.2.8](./dist/Wheelchair-1.2.8.zip). Later notes and proofs are preserved under `devtrash/history/` and `devtrash/release_history/` in the [current archive](./dist/Wheelchair-1.3.82.zip). This is a reconstruction from surviving artifacts; the date in the pre-version filename does not establish the project's creation date.
 
 ## Landmark architecture releases
 
