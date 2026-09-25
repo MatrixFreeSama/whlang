@@ -1,0 +1,194 @@
+name: Performance / Correctness Report
+description: Report a reproducible performance or correctness problem in Wheelchair.
+title: "[Report] "
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This tracker accepts reproducible performance and correctness reports only.
+
+        Accepted reference implementations:
+        - C
+        - Fortran
+        - Julia
+        - Assembly
+        - AVX / AVX2 / AVX-512 intrinsics
+
+        Improvement proposals, optimization suggestions, architectural suggestions,
+        feature requests, patches, and implementation advice are not accepted.
+
+        Reports describe observations, not solutions.
+
+        Describe the problem and provide evidence.
+        Do not propose how Wheelchair should be changed.
+
+  - type: dropdown
+    id: report_type
+    attributes:
+      label: Report type
+      description: Select the observed problem.
+      options:
+        - Performance problem
+        - Correctness problem
+    validations:
+      required: true
+
+  - type: textarea
+    id: mathematical_problem
+    attributes:
+      label: Mathematical or computational problem
+      description: |
+        Describe the problem being computed.
+        Include equations, domain, parameters, initial conditions,
+        boundary conditions, termination conditions, or other information
+        required to reproduce the workload.
+      placeholder: |
+        Problem:
+        Equations:
+        Domain:
+        Parameters:
+        Initial conditions:
+        Boundary conditions:
+        Termination condition:
+    validations:
+      required: true
+
+  - type: textarea
+    id: wheelchair_source
+    attributes:
+      label: Wheelchair source
+      description: |
+        Provide the complete minimal Wheelchair program that reproduces the problem.
+        Use a fenced code block.
+      placeholder: Paste the complete reproducer here.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: reference_language
+    attributes:
+      label: Reference implementation
+      description: Select every reference implementation included in this report.
+      multiple: true
+      options:
+        - C
+        - Fortran
+        - Julia
+        - Assembly
+        - AVX intrinsics
+        - AVX2 intrinsics
+        - AVX-512 intrinsics
+    validations:
+      required: false
+
+  - type: textarea
+    id: reference_source
+    attributes:
+      label: Reference source
+      description: |
+        If this report compares Wheelchair with another implementation,
+        provide the complete source used for comparison.
+        Use separate fenced code blocks when multiple implementations are included.
+      placeholder: Paste the complete reference implementation or implementations here.
+    validations:
+      required: false
+
+  - type: textarea
+    id: build
+    attributes:
+      label: Build and execution
+      description: |
+        Provide exact commands and relevant toolchain information.
+      placeholder: |
+        Wheelchair version:
+        Reference compiler/runtime:
+        Compiler/runtime version:
+        Build command:
+        Compiler flags:
+        Execution command:
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Hardware and environment
+      placeholder: |
+        CPU:
+        ISA:
+        Memory:
+        Operating system:
+        Thread count:
+    validations:
+      required: true
+
+  - type: textarea
+    id: workload
+    attributes:
+      label: Workload
+      description: |
+        Specify the exact input, problem size, precision,
+        iteration count, and other parameters.
+      placeholder: |
+        Problem size:
+        Precision:
+        Iterations:
+        Input:
+        Other parameters:
+    validations:
+      required: true
+
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed result
+      description: |
+        Report what Wheelchair actually produced.
+
+        For performance reports, include raw timing measurements.
+        For correctness reports, include the numerical result,
+        residual, error, or other observable failure.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+      description: |
+        State the expected result and explain how it was established.
+        A reference implementation or mathematical result may be used.
+    validations:
+      required: true
+
+  - type: textarea
+    id: measurements
+    attributes:
+      label: Measurement details
+      description: |
+        For performance reports, provide enough raw information
+        to reproduce the measurement.
+      placeholder: |
+        Warm-up:
+        Number of runs:
+        Individual timings:
+        Median:
+        Minimum:
+        Verification method:
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: requirements
+    attributes:
+      label: Report requirements
+      options:
+        - label: I provided a minimal and reproducible case.
+          required: true
+        - label: The compared implementations solve the same mathematical problem with the same workload and numerical requirements.
+          required: true
+        - label: Any reference implementation is written only in C, Fortran, Julia, Assembly, or AVX-family intrinsics.
+          required: true
+        - label: This report describes an observed performance or correctness problem and does not contain an improvement proposal, optimization suggestion, feature request, patch, or architectural recommendation.
+          required: true
