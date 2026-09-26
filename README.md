@@ -13,15 +13,15 @@
 
 Wheelchair targets the same broad numerical-computing territory as C and Fortran, but it does not start from a mandatory sequential instruction stream and then try to recover parallelism afterward. Its compiler treats mathematical structure, value identity, causal dependence, precision, locality, and physical realization as first-class compile-time information.
 
-> Current release: **1.3.82**  
+> Current release: **1.3.97**  
 > Target: **Linux x86-64, static ELF64**  
 > Source surfaces: **WH (`.wh`)** and **WHEX (`.whex`)**  
-> [Download Wheelchair 1.3.82](./dist/Wheelchair-1.3.82.zip)
+> [Download Wheelchair 1.3.97](./dist/Wheelchair-1.3.97.zip)
 
 Archive SHA-256:
 
 ```text
-950683a792032403d6853c61246aff9026a8fd254ef63ddb097389a539e70250
+d43d463a3ca613eaf44eb0e5ec57fb41ca8477b914546ae3fdcee4078465625e
 ```
 
 ---
@@ -257,8 +257,8 @@ WH is the friendlier surface; WHEX is the more explicit structural surface. Both
 The release archive ships prebuilt static compiler binaries under `bin/`.
 
 ```sh
-unzip Wheelchair-1.3.82.zip
-cd Wheelchair-1.3.82
+unzip Wheelchair-1.3.97.zip
+cd Wheelchair-1.3.97
 
 ./bin/wheelchairc surface/examples/equivalent_en.wh -o demo
 ./demo 4
@@ -458,6 +458,45 @@ Strict reduction order remains authoritative. Generic layouts and boundary paths
 
 Wheelchair's benchmark history is intentionally mixed. The project keeps negative controls because the execution model has a real domain of advantage rather than a universal speed multiplier.
 
+### Current matched snapshot
+
+The current snapshot uses the same visible AMD EPYC 9V74 execution set and matched native C/GFortran controls. Tensor and Field numbers were first recorded with 1.3.95; their generated benchmark code remained unchanged through 1.3.97. General uses the 1.3.97 whole-generation authority path. Times are medians in milliseconds and remain host-specific observations.
+
+#### Strict
+
+Wheelchair Strict preserves the declared floating-point order. C controls use `-O3 -march=native -fno-fast-math -ffp-contract=off`; GFortran uses the corresponding strict flags plus protected parentheses.
+
+| Workload | Wheelchair | GCC C | GFortran |
+|---|---:|---:|---:|
+| FSI, 100M | 66.746 | **59.843** | 69.045 |
+| lightweight Tensor reduction, 100M | 7.334 | **6.458** | 10.699 |
+| dense Rank-3 contraction | 30.709 | **15.189** | 18.550 |
+| miniAMR 7-point | **6.918** | 10.938 | 12.947 |
+| miniAMR 27-point | **22.367** | 38.439 | 51.526 |
+| miniFE heat21 | **18.839** | 27.844 | 61.092 |
+| CloverLeaf x-acceleration | 18.029 | **17.752** | 36.657 |
+| General mass3, 20M | 119.852 | 111.893 | **110.962** |
+| General chem6, 20M | 124.106 | **117.507** | 118.969 |
+| General rigid7, 20M | 187.415 | 180.487 | **179.273** |
+
+For the current three General probes, Wheelchair is **1.055× C time** by geometric mean. The individual gaps are about 7.1%, 5.6%, and 3.8%. This is a substantially narrower scalar gap than the historical 1.3.18 and 1.3.44 controls, but C/Fortran still win all three deep-causal probes.
+
+#### Tolerant / aggressive arithmetic
+
+These measurements keep the tolerant Wheelchair surface separate from aggressive native controls. C/GFortran use `-Ofast -march=native`. The General probes above have no separate tolerant source path, so they are not duplicated here.
+
+| Workload | Wheelchair tolerant | GCC C aggressive | GFortran aggressive |
+|---|---:|---:|---:|
+| FSI, 100M | 56.266 | **40.958** | 46.034 |
+| lightweight Tensor reduction, 100M | 7.337 | **6.428** | 10.688 |
+| dense Rank-3 contraction | **12.319** | 17.238 | 20.328 |
+| miniAMR 7-point | **8.004** | 10.821 | 12.938 |
+| miniAMR 27-point | 22.179 | **21.893** | 43.614 |
+| miniFE heat21 | **18.764** | 24.819 | 61.582 |
+| CloverLeaf x-acceleration | 18.865 | **15.377** | 38.144 |
+
+The strict/tolerant split matters. Dense Rank-3, for example, moves from 30.709 ms in Strict to 12.319 ms under the tolerant contract, while several Field probes change little. Arithmetic freedom and structural execution are therefore treated as separate axes rather than silently merged into one headline number.
+
 ### Measured advantage region
 
 Structural execution has shown its strongest results when the workload has **high intrinsic causal parallelism** and enough useful work to amortize realization cost, especially when the compiler can also eliminate transport, repeated address work, or redundant materialization.
@@ -477,7 +516,7 @@ A landmark 1.3.18 same-host rematch measured:
 | lightweight Tensor reduction, 100M | **7.773 ms** | 20.659 ms | 20.677 ms | Wheelchair ≈ **2.66× C throughput** |
 | FSI, 100M | **46.626 ms** | 70.313 ms | 63.084 ms | Wheelchair ≈ **1.51× C throughput**, **1.35× Fortran** |
 
-These were interleaved same-host measurements using GCC/GFortran 14.2-class native optimization. The lightweight reduction was bit-identical across languages; the FSI reduction used its declared tolerant numerical contract.
+These remain historical measurements of that release and host rather than claims about the current rematch. The current snapshot above deliberately keeps later cases where the native controls recovered the lead.
 
 ### Measured disadvantage region
 
@@ -491,7 +530,7 @@ Wheelchair has historically been weaker in regions such as:
 - workloads where constant realization, scalar scheduling, or register scheduling remains a larger cost than structural overhead;
 - small arbitrary-precision products where the fixed cost of the single common Fourier multiplication authority dominates.
 
-The same 1.3.18 rematch deliberately retained a negative control:
+The 1.3.18 rematch deliberately retained a negative control:
 
 | Workload | Wheelchair 1.3.18 | GCC C | GFortran | Result |
 |---|---:|---:|---:|---|
@@ -499,7 +538,7 @@ The same 1.3.18 rematch deliberately retained a negative control:
 
 Likewise, the 1.3.12 500M two-state recurrence measured 427.384 ms for Wheelchair versus 177.460 ms for C and 178.169 ms for Fortran. That release improved Wheelchair's own previous implementation by 4.783×, but it still remained about 2.4× slower than the mature scalar controls.
 
-This is a historical scalar-execution result. Since 1.3.67, that affine recurrence class can use Rank-N transition power. The old timings do not measure the current path; non-affine causal workloads still need their own performance evaluation.
+These are historical scalar-execution results. Since 1.3.67, that affine recurrence class can use Rank-N transition power, and 1.3.96–1.3.97 further reduced the remaining non-affine General gap by exposing the wide scalar register file and removing proved whole-generation state transport. The current 20M `mass3 / chem6 / rigid7` rematch above is the relevant scalar snapshot for 1.3.97.
 
 The intended boundary is therefore:
 
@@ -529,6 +568,8 @@ The table below keeps a small set of benchmark landmarks rather than turning the
 | **1.3.26** | miniAMR 27-point, 256³ | Wheelchair 24.636 ms vs C 17.750 ms vs Fortran 31.001 ms | Wider stencil remained behind C while still ahead of the measured Fortran control. |
 | **1.3.40** | 262k–4M-bit multiplication | Wheelchair stayed within roughly ±20% of GMP `mpf_mul`; several measured sizes were faster | One common native Fourier multiplication authority reached the range of a mature arbitrary-precision library without a size-based algorithm tree. |
 | **1.3.44** | mass3 / chem6 / rigid7 scalar recurrence set | geometric mean Wheelchair = 1.0978× C time; Fortran = 0.9783× C time | Native mathematics generalized while the remaining mature-scalar-codegen gap stayed visible. |
+| **1.3.95** | Strict Field rematch | miniAMR7 6.918 ms vs C 10.938; miniAMR27 22.367 vs C 38.439; miniFE 18.839 vs C 27.844; Clover 18.029 vs C 17.752 | Current Region/ValueFact realization moved three of four matched Field probes ahead of C while keeping Clover essentially tied. |
+| **1.3.97** | mass3 / chem6 / rigid7 Strict, 20M | geometric mean Wheelchair = **1.055× C time**; chem6 124.106 ms vs C 117.507 ms vs Fortran 118.969 ms | Wide scalar carrier use and proved whole-generation authority brought the deep-causal General set back close to mature native scalar controls without a workload-specific backend. |
 
 All numbers above are **host- and workload-specific measurements**, not universal language rankings. Absolute results depend on CPU, virtualization, affinity, compiler version, frequency behavior, memory system, and problem shape. Raw benchmark and validation material is retained inside the versioned release archives under `devtrash/`.
 
@@ -536,13 +577,13 @@ All numbers above are **host- and workload-specific measurements**, not universa
 
 ## Real sparse simulation probes
 
-Wheelchair also keeps non-synthetic simulation kernels based on established miniapps. The 1.3.26 release archive contains matched C/Fortran/Wheelchair probes derived from:
+Wheelchair also keeps non-synthetic simulation kernels based on established miniapps. The matched probes are derived from:
 
 - Mantevo miniAMR 7-point and 27-point stencil modes;
 - Mantevo miniFE Hex8 steady heat-conduction interior assembly;
 - CloverLeaf x-velocity acceleration pressure/viscosity-gradient kernel.
 
-On the 1.3.26 validation host:
+The historical 1.3.26 validation host measured:
 
 | Kernel | C | Fortran | Wheelchair 1.3.26 |
 |---|---:|---:|---:|
@@ -551,7 +592,16 @@ On the 1.3.26 validation host:
 | miniFE Hex8 heat, 21 numeric neighbors | **17.358 ms** | 50.167 ms | 25.817 ms |
 | CloverLeaf x-acceleration | **15.635 ms** | 31.704 ms | 24.371 ms |
 
-These measurements describe the 1.3.26 implementation: the narrow regular neighborhood slightly exceeded the measured C kernel, while the wider probes remained behind C. Later Region and ISA work changes physical realization, but a new matched run is required to quantify the current performance boundary.
+A later matched Strict rematch on the AMD EPYC 9V74 host measured the current Field realization used by 1.3.95 and unchanged through 1.3.97:
+
+| Kernel | C Strict | Fortran Strict | Wheelchair Strict |
+|---|---:|---:|---:|
+| miniAMR 7-point | 10.938 ms | 12.947 ms | **6.918 ms** |
+| miniAMR 27-point | 38.439 ms | 51.526 ms | **22.367 ms** |
+| miniFE Hex8 heat, 21 numeric neighbors | 27.844 ms | 61.092 ms | **18.839 ms** |
+| CloverLeaf x-acceleration | **17.752 ms** | 36.657 ms | 18.029 ms |
+
+The newer run changes the known Field boundary: the 7-point, 27-point, and miniFE probes beat the matched C control, while CloverLeaf is close to parity. These are still measurements of one host and one admitted workload set, not a universal sparse-kernel ranking.
 
 ---
 
@@ -791,7 +841,7 @@ The 1.3 series moved more decisions into shared semantic and physical facts: whi
 
 ### Historical evidence
 
-The pre-version account comes from the recovered archive's `README.md`, `SPECIFICATION.md`, and compiler sources. The 1.0.0 package's `RELEASE.md` identifies the first public version baseline without claiming architecture completion. Early numbered milestones are retained in `RELEASE_NOTES.md` inside [1.2.0](./dist/Wheelchair-1.2.0.zip) and in `worktree/` inside [1.2.8](./dist/Wheelchair-1.2.8.zip). Later notes and proofs are preserved under `devtrash/history/` and `devtrash/release_history/` in the [current archive](./dist/Wheelchair-1.3.82.zip). This is a reconstruction from surviving artifacts; the date in the pre-version filename does not establish the project's creation date.
+The pre-version account comes from the recovered archive's `README.md`, `SPECIFICATION.md`, and compiler sources. The 1.0.0 package's `RELEASE.md` identifies the first public version baseline without claiming architecture completion. Early numbered milestones are retained in `RELEASE_NOTES.md` inside [1.2.0](./dist/Wheelchair-1.2.0.zip) and in `worktree/` inside [1.2.8](./dist/Wheelchair-1.2.8.zip). Later notes and proofs are preserved under `devtrash/history/` and `devtrash/release_history/` in the [current archive](./dist/Wheelchair-1.3.97.zip). This is a reconstruction from surviving artifacts; the date in the pre-version filename does not establish the project's creation date.
 
 ## Landmark architecture releases
 
@@ -830,8 +880,9 @@ These milestones record changes in semantics, execution, and release verificatio
 | **1.3.74–1.3.77** | Address and constant residency, live Group carriers, depth-ordered instruction emission, and direct memory operands carried Physical-DAG facts through final ISA realization. |
 | **1.3.78** | WH repair, convergence, source locations, and final-error presentation joined one shared human-feedback authority. |
 | **1.3.79** | One current test entry, explicit regression admission, and external native coverage closed release verification. The eight production compiler binaries remained byte-identical to 1.3.78. |
+| **1.3.96–1.3.97** | General scalar Physical Reality absorbed the wide scalar register file, removed fixed candidate/resident cliffs, and then erased proved whole-generation next-to-old state transport without adding workload-specific scheduling. |
 
-The table selects turning points rather than listing every patch. Versioned benchmark results above remain observations of their original releases and hosts, not measurements of the current compiler.
+The table selects turning points rather than listing every patch. Versioned benchmark results above remain observations of their original releases and hosts, not measurements of the current compiler unless explicitly labeled as the current snapshot.
 
 ---
 
@@ -911,5 +962,5 @@ Wheelchair 是一個面向 **HPC、數值計算與模擬** 的通用型 AOT 程�
 - 目前的生產工具鏈是 **手寫 x86-64 組合語言編譯器 + AOT + 靜態 ELF**，不以 C、LLVM 或 JIT 作為生產後端；
 - 結構執行在大型獨立 Tensor、Field 與 FSI 工作負載中，實測曾超過 GCC C 與 GFortran；
 - 在強因果純量遞推、寬稀疏記憶體存取，以及成熟的純量排程區域中，C／Fortran 仍然可能更快；
-- README 的效能表同時保留勝局與敗局，不以單一 benchmark 作為整個語言的排名依據；
+- README 的效能表同時保留勝局和敗局，不以單一 benchmark 作為整個語言的排名依據；
 - 未來的一般版本升級原則上只需更新頂部的目前版本，README 主體只有在執行架構或已知效能邊界真正改變時才需要修改。
