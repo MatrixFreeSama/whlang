@@ -37,15 +37,9 @@ jobs:
               continue
             fi
 
-            if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-              echo "reuse existing tag $tag"
-            else
-              commit="$(git log --diff-filter=A --format='%H' -- "$zip" | tail -n 1)"
-              if [[ -z "$commit" ]]; then
-                commit="$GITHUB_SHA"
-              fi
-              git tag "$tag" "$commit"
-              git push origin "refs/tags/$tag"
+            commit="$(git log --diff-filter=A --format='%H' -- "$zip" | tail -n 1)"
+            if [[ -z "$commit" ]]; then
+              commit="$GITHUB_SHA"
             fi
 
             assets=("$zip")
@@ -54,6 +48,7 @@ jobs:
             fi
 
             gh release create "$tag" "${assets[@]}" \
+              --target "$commit" \
               --title "Wheelchair ${version}" \
               --notes "Wheelchair ${version}. Release assets are mirrored from the repository dist directory."
           done
