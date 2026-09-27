@@ -647,6 +647,7 @@ compile_tensor_source:
     mov dword ptr [rip+vec_dense_licm_twoacc],0
     mov dword ptr [rip+vec_induct_count],0
     mov dword ptr [rip+vec_dense_count],0
+    mov dword ptr [rip+vec_mixed_count],0
     mov dword ptr [rip+vec_dense_scaled_count],0
     mov dword ptr [rip+vec_const_count],0
     mov dword ptr [rip+vec_fixup_count],0
@@ -3657,6 +3658,81 @@ vec_vpaddq_mem_const:
     pop rbx
     ret
 
+# EVEX vpmuludq zmm dst,src1,QWORD BCST [rip+const].
+# AVX-512F unsigned low-dword multiply widened to qword.  This is the native
+# exact primitive for proven-u32 constant division: values are already known
+# to have zero high dwords, so no lane conversion or floating reciprocal exists.
+# edi=dst, esi=src1, edx=constant-pool index -> eax=0/1.
+vec_vpmuludq_mem_const:
+    push rbx
+    push r12
+    push r13
+    mov ebx,edi
+    mov r12d,esi
+    mov r13d,edx
+    mov rax,[rip+vec_emit_ptr]
+    lea rcx,[rax+10]
+    cmp rcx,[rip+vec_emit_end]
+    jbe .vpmudqmc_space_ok
+    mov dword ptr [rip+tensor_code_overflow],1
+    jmp .vpmudqmc_fail
+.vpmudqmc_space_ok:
+    mov eax,dword ptr [rip+vec_fixup_count]
+    cmp eax,dword ptr [rip+tensor_fixup_capacity]
+    jb .vpmudqmc_fixup_ok
+    mov dword ptr [rip+tensor_code_overflow],1
+    jmp .vpmudqmc_fail
+.vpmudqmc_fixup_ok:
+    push rax
+    inc eax
+    mov dword ptr [rip+vec_fixup_count],eax
+    mov edi,0x62; call vec_emit_u8
+    # P0: dst R/R', memory X/B=1, map=0F(1).
+    xor eax,eax
+    mov ecx,ebx; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,7; or eax,ecx
+    or eax,0x60
+    mov ecx,ebx; shr ecx,4; and ecx,1; xor ecx,1; shl ecx,4; or eax,ecx
+    or eax,1
+    mov edi,eax; call vec_emit_u8
+    # P1: W=1, ~src1.vvvv, pp=66h. P2: 512-bit + qword broadcast.
+    mov eax,r12d; not eax; and eax,0xF; shl eax,3; or eax,0x85
+    mov edi,eax; call vec_emit_u8
+    mov eax,r12d; shr eax,4; and eax,1; xor eax,1; shl eax,3
+    or eax,0x50
+    mov edi,eax; call vec_emit_u8
+    mov edi,0xF4; call vec_emit_u8
+    mov eax,ebx; and eax,7; shl eax,3; or eax,5
+    mov edi,eax; call vec_emit_u8
+    pop rax
+    mov r8,qword ptr [rip+tensor_fixup_ptr_base]
+    mov rcx,[rip+vec_emit_ptr]
+    mov qword ptr [r8+rax*8],rcx
+    mov r8,qword ptr [rip+tensor_fixup_const_base]
+    mov dword ptr [r8+rax*4],r13d
+    lea r8,[rcx+4]
+    cmp r8,[rip+vec_emit_end]
+    jbe .vpmudqmc_disp_ok
+    mov dword ptr [rip+tensor_code_overflow],1
+    jmp .vpmudqmc_fail_nostack
+.vpmudqmc_disp_ok:
+    mov dword ptr [rcx],0
+    mov [rip+vec_emit_ptr],r8
+    inc dword ptr [rip+schedule_counts+4*5]
+    inc dword ptr [rip+schedule_counts+4*7]
+    inc dword ptr [rip+schedule_counts+4*8]
+    xor eax,eax
+    jmp .vpmudqmc_done
+.vpmudqmc_fail:
+    mov eax,1
+    jmp .vpmudqmc_done
+.vpmudqmc_fail_nostack:
+    mov eax,1
+.vpmudqmc_done:
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
 # EVEX vpandq zmm dst,src1,QWORD BCST [rip+const].
 # Generic immutable-mask realization used by canonical modulo keys when the
 # resident constant bank is full. edi=dst, esi=src1, edx=pool index.
@@ -5568,6 +5644,201 @@ expr_dense_rank_coord_key:
     pop rbx
     ret
 
+# Generic static mixed-radix coordinate key.  This complements the legacy
+# shift/mask recognizer with the same canonical coordinate relation expressed
+# without assuming power-of-two radices:
+#     floor(root / stride) mod extent
+# extent=0 denotes the unbounded leading coordinate.  Only literal structural
+# radices are admitted; no workload/name/size heuristic participates.
+# Return rax=stride, rdx=extent, ecx=1 on success.
+expr_dense_mixed_coord_key:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r12,rdi
+    mov r14,1                     # stride
+    xor r15d,r15d                 # extent=0
+
+    # Optional outer modulo.
+    mov rdi,r12; lea rsi,[rip+k_op]; mov edx,k_op_end-k_op; call obj_get
+    test rax,rax; jz .edmck_base
+    mov r13,rax
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_mod]; mov ecx,v_mod_end-v_mod; call span_eq
+    test eax,eax; jz .edmck_base
+    mov rdi,r12; lea rsi,[rip+k_args]; mov edx,k_args_end-k_args; call obj_get
+    test rax,rax; jz .edmck_fail
+    mov r13,[rax+24]; test r13,r13; jz .edmck_fail
+    mov rbx,[r13+32]; test rbx,rbx; jz .edmck_fail
+    cmp qword ptr [rbx+32],0; jne .edmck_fail
+    mov rdi,rbx; call expr_literal_u64
+    test edx,edx; jnz .edmck_fail
+    test rax,rax; jz .edmck_fail
+    mov r15,rax
+    mov r12,r13
+
+.edmck_base:
+    # Direct root axis means stride=1.
+    mov rdi,r12; lea rsi,[rip+k_axis]; mov edx,k_axis_end-k_axis; call obj_get
+    test rax,rax; jnz .edmck_accept
+
+    # Otherwise require div(axis,literal) or ushr(axis,literal).
+    mov rdi,r12; lea rsi,[rip+k_op]; mov edx,k_op_end-k_op; call obj_get
+    test rax,rax; jz .edmck_fail
+    mov r13,rax
+    mov rdi,r12; lea rsi,[rip+k_args]; mov edx,k_args_end-k_args; call obj_get
+    test rax,rax; jz .edmck_fail
+    mov r12,[rax+24]; test r12,r12; jz .edmck_fail
+    mov rbx,[r12+32]; test rbx,rbx; jz .edmck_fail
+    cmp qword ptr [rbx+32],0; jne .edmck_fail
+    mov rdi,r12; lea rsi,[rip+k_axis]; mov edx,k_axis_end-k_axis; call obj_get
+    test rax,rax; jz .edmck_fail
+    mov rdi,rbx; call expr_literal_u64
+    test edx,edx; jnz .edmck_fail
+    mov r14,rax
+
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_div]; mov ecx,v_div_end-v_div; call span_eq
+    test eax,eax; jnz .edmck_div
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_ushr]; mov ecx,v_ushr_end-v_ushr; call span_eq
+    test eax,eax; jz .edmck_fail
+    cmp r14,63; ja .edmck_fail
+    mov ecx,r14d
+    mov r14,1
+    shl r14,cl
+    jmp .edmck_accept
+.edmck_div:
+    test r14,r14; jz .edmck_fail
+
+.edmck_accept:
+    # Power-of-two coordinates are already owned by the older shift/mask
+    # carrier.  Reject exact duplicates so there remains one authority.
+    mov rax,r14
+    lea rcx,[rax-1]
+    test rax,rcx
+    jnz .edmck_yes
+    test r15,r15
+    jz .edmck_fail                 # plain power-of-two divide/shift
+    mov rax,r15
+    lea rcx,[rax-1]
+    test rax,rcx
+    jz .edmck_fail                 # complete power-of-two coordinate
+.edmck_yes:
+    mov rax,r14
+    mov rdx,r15
+    mov ecx,1
+    jmp .edmck_done
+.edmck_fail:
+    xor eax,eax
+    xor edx,edx
+    xor ecx,ecx
+.edmck_done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+# Persistent mixed-radix coordinate ownership.  The value is initialized and
+# refreshed from the already-resident physical root.  This turns repeated
+# coordinate reconstruction in one tensor expression into one shared fact.
+# get_reg(rdi=stride,rsi=extent) -> eax=ZMM16..25 or -1.
+vec_mixed_coord_get_reg:
+    push rbx
+    push r12
+    push r13
+    mov rbx,rdi
+    mov r12,rsi
+    test rbx,rbx; jz .vmcgr_fail
+    mov ecx,dword ptr [rip+vec_mixed_count]
+    xor r13d,r13d
+.vmcgr_find:
+    cmp r13d,ecx; jae .vmcgr_add
+    lea rax,[rip+vec_mixed_stride]
+    cmp qword ptr [rax+r13*8],rbx; jne .vmcgr_next
+    lea rax,[rip+vec_mixed_extent]
+    cmp qword ptr [rax+r13*8],r12; je .vmcgr_found
+.vmcgr_next:
+    inc r13d; jmp .vmcgr_find
+.vmcgr_add:
+    cmp ecx,6; jae .vmcgr_fail
+    call vec_cache_reg_alloc
+    cmp eax,-1; je .vmcgr_fail
+    mov edx,eax
+    lea rax,[rip+vec_mixed_stride]; mov qword ptr [rax+r13*8],rbx
+    lea rax,[rip+vec_mixed_extent]; mov qword ptr [rax+r13*8],r12
+    lea rax,[rip+vec_mixed_reg]; mov dword ptr [rax+r13*4],edx
+    lea eax,[r13+1]; mov dword ptr [rip+vec_mixed_count],eax
+.vmcgr_found:
+    lea rax,[rip+vec_mixed_reg]; mov eax,dword ptr [rax+r13*4]
+    jmp .vmcgr_done
+.vmcgr_fail:
+    mov eax,-1
+.vmcgr_done:
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+# Materialize floor(root/stride) mod extent into one persistent register.
+# The general literal div/mod emitter chooses exact physical strength reduction
+# from proven domain facts; this helper adds no runtime selector.
+vec_mixed_emit_one:
+    push rbx
+    push r12
+    push r13
+    mov ebx,edi
+    mov r12,rsi
+    mov r13,rdx
+    mov edi,ebx; mov esi,6; call vec_mov_ext
+    test eax,eax; jnz .vmeo_fail
+    cmp r12,1; je .vmeo_extent
+    mov edi,ebx; mov esi,ebx; mov rdx,r12; xor ecx,ecx
+    call vec_udivmod_literal_exact
+    test eax,eax; jnz .vmeo_fail
+.vmeo_extent:
+    test r13,r13; jz .vmeo_ok
+    mov edi,ebx; mov esi,ebx; mov rdx,r13; mov ecx,1
+    call vec_udivmod_literal_exact
+    test eax,eax; jnz .vmeo_fail
+.vmeo_ok:
+    xor eax,eax; jmp .vmeo_done
+.vmeo_fail:
+    mov eax,1
+.vmeo_done:
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+# Refresh all mixed-radix coordinate facts from current ZMM6.
+vec_mixed_emit_all:
+    push rbx
+    push r12
+    push r13
+    push r14
+    xor ebx,ebx
+.vmea_loop:
+    cmp ebx,dword ptr [rip+vec_mixed_count]; jae .vmea_ok
+    lea rax,[rip+vec_mixed_reg]; mov r12d,dword ptr [rax+rbx*4]
+    lea rax,[rip+vec_mixed_stride]; mov r13,qword ptr [rax+rbx*8]
+    lea rax,[rip+vec_mixed_extent]; mov r14,qword ptr [rax+rbx*8]
+    mov edi,r12d; mov rsi,r13; mov rdx,r14
+    call vec_mixed_emit_one
+    test eax,eax; jnz .vmea_fail
+    inc ebx; jmp .vmea_loop
+.vmea_ok:
+    xor eax,eax; jmp .vmea_done
+.vmea_fail:
+    mov eax,1
+.vmea_done:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
 # Dense coordinate induction carriers are separate from body-local CSE.
 # get_reg(rdi=shift,rsi=mask) -> eax=ZMM16..25 or -1.
 # Carriers are admitted only when their recurrence masks fit a single imm32;
@@ -5663,6 +5934,8 @@ vec_dense_emit_init:
     inc r12d
     jmp .vdei_loop
 .vdei_ok:
+    call vec_mixed_emit_all
+    test eax,eax; jnz .vdei_fail
     # 1.2.14 derived-affine carriers are initialized once from their owning
     # dense coordinate.  Hot packets then maintain them by the same exact
     # coordinate delta, replacing repeated integer vector multiplication.
@@ -5676,8 +5949,16 @@ vec_dense_emit_init:
     mov r14,qword ptr [rax+r12*8]
     lea rax,[rip+vec_dense_scaled_reg]
     mov r15d,dword ptr [rax+r12*4]
+    cmp r13d,6
+    jb .vdei_scaled_owner_old
+    sub r13d,6
+    lea rax,[rip+vec_mixed_reg]
+    mov esi,dword ptr [rax+r13*4]
+    jmp .vdei_scaled_owner_ready
+.vdei_scaled_owner_old:
     lea rax,[rip+vec_dense_reg]
     mov esi,dword ptr [rax+r13*4]
+.vdei_scaled_owner_ready:
     mov edi,r15d
     mov rdx,r14
     call vec_mul_const_strength
@@ -5687,8 +5968,20 @@ vec_dense_emit_init:
     call vec_const_intern
     cmp eax,-1; je .vdei_fail
     mov edx,eax; mov edi,r15d
+    # vec_mul_const_strength may take the fallback after mixed-owner decoding;
+    # recover the canonical owner id instead of reusing the temporary slot id.
+    lea rax,[rip+vec_dense_scaled_slot]
+    mov r13d,dword ptr [rax+r12*4]
+    cmp r13d,6
+    jb .vdei_scaled_mul_old
+    sub r13d,6
+    lea rax,[rip+vec_mixed_reg]
+    mov esi,dword ptr [rax+r13*4]
+    jmp .vdei_scaled_mul_ready
+.vdei_scaled_mul_old:
     lea rax,[rip+vec_dense_reg]
     mov esi,dword ptr [rax+r13*4]
+.vdei_scaled_mul_ready:
     call vec_vpmullq_mem_const
     test eax,eax; jnz .vdei_fail
 .vdei_scaled_next:
@@ -5722,6 +6015,14 @@ expr_dense_scaled_preflight:
     jbe .edsp_done
     cmp qword ptr [r12],J_OBJECT
     jne .edsp_done
+    # The same caretaker pass reserves non-power-of-two mixed-radix coordinates.
+    # They share the persistent ownership pool with all other structural facts.
+    mov rdi,r12
+    call expr_dense_mixed_coord_key
+    test ecx,ecx; jz .edsp_mixed_done
+    mov rdi,rax; mov rsi,rdx
+    call vec_mixed_coord_get_reg
+.edsp_mixed_done:
     mov rdi,r12; lea rsi,[rip+k_op]; mov edx,k_op_end-k_op; call obj_get
     test rax,rax; jz .edsp_recurse_fields
     mov r13,rax
@@ -5782,78 +6083,81 @@ vec_dense_scaled_get_reg:
     push r15
     mov rbx,rdi
     mov r12,rsi
-    # 1.2.15: dense-coordinate induction carriers belong only to the root
-    # Cartesian episode.  An indexed Rank-N map load temporarily replaces the
-    # current axis with its transformed neighborhood coordinate; reusing a root
-    # carrier there would silently erase the index transform.
+    # Coordinate-derived state belongs only to the root Cartesian episode.
     cmp dword ptr [rip+vec_axis_reg],6
     jne .vdsg_fail
     cmp qword ptr [rip+tensor_shape_static_product],1
     jbe .vdsg_fail
-    # Zero/one/power-of-two are already cheaper through the normal strength
-    # reducer and do not justify persistent ownership.
+    # Cheap constants remain ordinary strength reductions.
     cmp r12,1
     jbe .vdsg_fail
     lea rax,[r12-1]
     test rax,r12
     jz .vdsg_fail
+
+    # One owner namespace: 0..5 legacy power-of-two CoordinateFacts,
+    # 6..11 generic mixed-radix CoordinateFacts.
     mov rdi,rbx
     call expr_dense_rank_coord_key
     test ecx,ecx
-    jz .vdsg_fail
-    mov r13,rax                    # shift
-    mov r14,rdx                    # mask
-    mov rdi,r13
-    mov rsi,r14
+    jz .vdsg_try_mixed
+    mov r13,rax
+    mov r14,rdx
+    mov rdi,r13; mov rsi,r14
     call vec_dense_coord_get_reg
-    cmp eax,-1
-    je .vdsg_fail
-    mov r15d,eax                   # coordinate register
-    # Recover stable dense slot identity from shift+mask.
+    cmp eax,-1; je .vdsg_fail
     xor ebx,ebx
-.vdsg_slot_find:
-    cmp ebx,dword ptr [rip+vec_dense_count]
-    jae .vdsg_fail
+.vdsg_old_slot_find:
+    cmp ebx,dword ptr [rip+vec_dense_count]; jae .vdsg_fail
     lea rax,[rip+vec_dense_shift]
-    cmp qword ptr [rax+rbx*8],r13
-    jne .vdsg_slot_next
+    cmp qword ptr [rax+rbx*8],r13; jne .vdsg_old_slot_next
     lea rax,[rip+vec_dense_mask]
-    cmp qword ptr [rax+rbx*8],r14
-    je .vdsg_slot_ready
-.vdsg_slot_next:
-    inc ebx
-    jmp .vdsg_slot_find
-.vdsg_slot_ready:
+    cmp qword ptr [rax+rbx*8],r14; je .vdsg_owner_ready
+.vdsg_old_slot_next:
+    inc ebx; jmp .vdsg_old_slot_find
+
+.vdsg_try_mixed:
+    mov rdi,rbx
+    call expr_dense_mixed_coord_key
+    test ecx,ecx; jz .vdsg_fail
+    mov r13,rax
+    mov r14,rdx
+    mov rdi,r13; mov rsi,r14
+    call vec_mixed_coord_get_reg
+    cmp eax,-1; je .vdsg_fail
+    xor ebx,ebx
+.vdsg_mixed_slot_find:
+    cmp ebx,dword ptr [rip+vec_mixed_count]; jae .vdsg_fail
+    lea rax,[rip+vec_mixed_stride]
+    cmp qword ptr [rax+rbx*8],r13; jne .vdsg_mixed_slot_next
+    lea rax,[rip+vec_mixed_extent]
+    cmp qword ptr [rax+rbx*8],r14; je .vdsg_mixed_owner
+.vdsg_mixed_slot_next:
+    inc ebx; jmp .vdsg_mixed_slot_find
+.vdsg_mixed_owner:
+    add ebx,6
+
+.vdsg_owner_ready:
     mov ecx,dword ptr [rip+vec_dense_scaled_count]
     xor r13d,r13d
 .vdsg_find:
-    cmp r13d,ecx
-    jae .vdsg_add
+    cmp r13d,ecx; jae .vdsg_add
     lea rax,[rip+vec_dense_scaled_slot]
-    cmp dword ptr [rax+r13*4],ebx
-    jne .vdsg_next
+    cmp dword ptr [rax+r13*4],ebx; jne .vdsg_next
     lea rax,[rip+vec_dense_scaled_coeff]
-    cmp qword ptr [rax+r13*8],r12
-    je .vdsg_found
+    cmp qword ptr [rax+r13*8],r12; je .vdsg_found
 .vdsg_next:
-    inc r13d
-    jmp .vdsg_find
+    inc r13d; jmp .vdsg_find
 .vdsg_add:
-    cmp ecx,6
-    jae .vdsg_fail
+    cmp ecx,6; jae .vdsg_fail
     call vec_cache_reg_alloc
-    cmp eax,-1
-    je .vdsg_fail
+    cmp eax,-1; je .vdsg_fail
     mov r15d,eax
     mov r13d,ecx
-    lea rax,[rip+vec_dense_scaled_slot]
-    mov dword ptr [rax+r13*4],ebx
-    lea rax,[rip+vec_dense_scaled_coeff]
-    mov qword ptr [rax+r13*8],r12
-    lea rax,[rip+vec_dense_scaled_reg]
-    mov dword ptr [rax+r13*4],r15d
-    inc ecx
-    mov dword ptr [rip+vec_dense_scaled_count],ecx
+    lea rax,[rip+vec_dense_scaled_slot]; mov dword ptr [rax+r13*4],ebx
+    lea rax,[rip+vec_dense_scaled_coeff]; mov qword ptr [rax+r13*8],r12
+    lea rax,[rip+vec_dense_scaled_reg]; mov dword ptr [rax+r13*4],r15d
+    inc ecx; mov dword ptr [rip+vec_dense_scaled_count],ecx
 .vdsg_found:
     lea rax,[rip+vec_dense_scaled_reg]
     mov eax,dword ptr [rax+r13*4]
@@ -5861,6 +6165,51 @@ vec_dense_scaled_get_reg:
 .vdsg_fail:
     mov eax,-1
 .vdsg_done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+# Refresh scaled carriers whose owner is a mixed-radix CoordinateFact.
+# Legacy power-of-two owners retain their cheaper delta recurrence; mixed owners
+# are recomputed from the refreshed base fact, sharing the same ownership table.
+vec_mixed_scaled_refresh:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    xor ebx,ebx
+.vmsr_loop:
+    cmp ebx,dword ptr [rip+vec_dense_scaled_count]; jae .vmsr_ok
+    lea rax,[rip+vec_dense_scaled_slot]
+    mov r12d,dword ptr [rax+rbx*4]
+    cmp r12d,6; jb .vmsr_next
+    sub r12d,6
+    cmp r12d,dword ptr [rip+vec_mixed_count]; jae .vmsr_fail
+    lea rax,[rip+vec_dense_scaled_coeff]
+    mov r13,qword ptr [rax+rbx*8]
+    lea rax,[rip+vec_dense_scaled_reg]
+    mov r14d,dword ptr [rax+rbx*4]
+    lea rax,[rip+vec_mixed_reg]
+    mov r15d,dword ptr [rax+r12*4]
+    mov edi,r14d; mov esi,r15d; mov rdx,r13
+    call vec_mul_const_strength
+    test eax,eax; jz .vmsr_next
+    mov rsi,r13; call vec_const_intern
+    cmp eax,-1; je .vmsr_fail
+    mov edx,eax; mov edi,r14d; mov esi,r15d
+    call vec_vpmullq_mem_const
+    test eax,eax; jnz .vmsr_fail
+.vmsr_next:
+    inc ebx; jmp .vmsr_loop
+.vmsr_ok:
+    xor eax,eax; jmp .vmsr_done
+.vmsr_fail:
+    mov eax,1
+.vmsr_done:
     pop r15
     pop r14
     pop r13
@@ -6640,7 +6989,14 @@ vec_dense_emit_inner_step_nocarry:
     push rbx
     xor edi,edi
     call vec_dense_find_shift
-    cmp eax,-1; je .vdeis_fail
+    cmp eax,-1; jne .vdeis_have_dense
+    # A group may contain only generic mixed-radix facts. Root has already
+    # advanced, so direct refresh is the exact no-carry realization.
+    call vec_mixed_emit_all
+    test eax,eax; jnz .vdeis_fail
+    call vec_mixed_scaled_refresh
+    jmp .vdeis_done_direct
+.vdeis_have_dense:
     mov ebx,eax
     lea rax,[rip+vec_dense_reg]
     mov edi,dword ptr [rax+rbx*4]
@@ -6652,6 +7008,11 @@ vec_dense_emit_inner_step_nocarry:
     test eax,eax; jnz .vdeis_fail
     mov edi,ebx; mov rsi,8
     call vec_dense_scaled_emit_delta
+    test eax,eax; jnz .vdeis_fail
+    call vec_mixed_emit_all
+    test eax,eax; jnz .vdeis_fail
+    call vec_mixed_scaled_refresh
+.vdeis_done_direct:
     test eax,eax; jnz .vdeis_fail
     xor eax,eax
     pop rbx
@@ -7059,6 +7420,10 @@ vec_dense_emit_step:
     inc r12d
     jmp .vdes_loop
 .vdes_ok:
+    call vec_mixed_emit_all
+    test eax,eax; jnz .vdes_fail
+    call vec_mixed_scaled_refresh
+    test eax,eax; jnz .vdes_fail
     xor eax,eax
     jmp .vdes_done
 .vdes_fail:
@@ -7133,10 +7498,19 @@ vec_try_int_source:
     mov rdi,rbx
     call expr_dense_rank_coord_key
     test ecx,ecx
-    jz .vtis_no_final
+    jz .vtis_try_mixed
     mov rdi,rax
     mov rsi,rdx
     call vec_dense_coord_get_reg
+    jmp .vtis_done
+.vtis_try_mixed:
+    mov rdi,rbx
+    call expr_dense_mixed_coord_key
+    test ecx,ecx
+    jz .vtis_no_final
+    mov rdi,rax
+    mov rsi,rdx
+    call vec_mixed_coord_get_reg
     jmp .vtis_done
 .vtis_no_final:
     mov eax,-1
@@ -7233,10 +7607,24 @@ emit_vec_int:
     mov rdi,r12
     call expr_dense_rank_coord_key
     test ecx,ecx
-    jz .evi_op_regular_nocache
+    jz .evi_try_mixed_coord
     mov rdi,rax
     mov rsi,rdx
     call vec_dense_coord_get_reg
+    cmp eax,-1
+    je .evi_try_mixed_coord
+    mov edi,r13d
+    mov esi,eax
+    call vec_mov_ext
+    jmp .evi_ok
+.evi_try_mixed_coord:
+    mov rdi,r12
+    call expr_dense_mixed_coord_key
+    test ecx,ecx
+    jz .evi_op_regular_nocache
+    mov rdi,rax
+    mov rsi,rdx
+    call vec_mixed_coord_get_reg
     cmp eax,-1
     je .evi_op_regular_nocache
     mov edi,r13d
@@ -7589,7 +7977,24 @@ vec_udivmod_literal_exact:
     push rbx; push r12; push r13; push r14; push r15
     mov ebx,edi; mov r12d,esi; mov r13,rdx; mov r14d,ecx
     test r13,r13; jz .vudm_fail
+    # A proven-u32 physical domain admits an exact integer reciprocal relation:
+    #   m=floor(2^32/d), q0=high32(x*m), q=q0+[r>=d], r=x-q0*d.
+    # q0 is never more than one low for x<2^32.  The correction is therefore
+    # one add/shift, with no int<->fp conversion and no runtime selector.
     mov rax,[rip+tensor_domain_max]
+    mov rcx,0x100000000
+    cmp rax,rcx
+    jae .vudm_wide_domain
+    mov rax,r13
+    shr rax,32
+    jnz .vudm_wide_domain
+    mov edi,ebx
+    mov esi,r12d
+    mov rdx,r13
+    mov ecx,r14d
+    call vec_udivmod_literal_u32_exact
+    jmp .vudm_done
+.vudm_wide_domain:
     mov rcx,0x0001000000000000
     cmp rax,rcx; jae .vudm_fail
     mov rax,r13; call recip_u64_down_f64_bits
@@ -7671,6 +8076,153 @@ vec_udivmod_literal_exact:
 .vudm_fail: mov eax,1
 .vudm_done:
     pop r15; pop r14; pop r13; pop r12; pop rbx
+    ret
+
+# Exact constant div/mod for a compile-time-proven u32 value domain.
+# edi=dst, esi=src, rdx=1..2^32-1 divisor, ecx=0 quotient / 1 remainder.
+# This is one algebraic realization, not a workload path: every literal radix
+# in the proven domain shares the same relation.
+vec_udivmod_literal_u32_exact:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov ebx,edi
+    mov r12d,esi
+    mov r13,rdx
+    mov r14d,ecx
+
+    # Intern m=floor(2^32/d), d, -d, and correction bias 2^32-d.
+    mov rax,0x100000000
+    xor edx,edx
+    div r13
+    mov rsi,rax
+    call vec_const_intern
+    cmp eax,-1; je .vud32_fail
+    mov r15d,eax                    # reciprocal-multiply pool
+    mov rsi,r13
+    call vec_const_intern
+    cmp eax,-1; je .vud32_fail
+    push rax                        # divisor pool
+    mov rax,r13
+    neg rax
+    mov rsi,rax
+    call vec_const_intern
+    cmp eax,-1; je .vud32_fail_pop1
+    push rax                        # -divisor pool
+    mov rax,0x100000000
+    sub rax,r13
+    mov rsi,rax
+    call vec_const_intern
+    cmp eax,-1; je .vud32_fail_pop2
+    push rax                        # correction-bias pool
+
+    # Two compiler-owned physical temporaries: q0 and product/correction.
+    sub rsp,16
+    mov qword ptr [rsp],-1
+    mov qword ptr [rsp+8],-1
+    call vec_alloc
+    cmp eax,-1; je .vud32_cleanup_fail
+    mov dword ptr [rsp],eax
+    call vec_alloc
+    cmp eax,-1; je .vud32_cleanup_fail
+    mov dword ptr [rsp+8],eax
+
+    # q0 = high32(low32(x) * floor(2^32/d)).  x is proven <2^32.
+    mov edi,dword ptr [rsp]
+    mov esi,r12d
+    call vec_mov_ext
+    mov edi,dword ptr [rsp]
+    mov esi,dword ptr [rsp]
+    mov edx,r15d
+    call vec_vpmuludq_mem_const
+    test eax,eax; jnz .vud32_cleanup_fail
+    mov edi,dword ptr [rsp]
+    mov esi,dword ptr [rsp]
+    mov edx,32
+    call vec_vpsrlq_imm
+
+    # product=q0*d; r=x-product in destination.
+    mov edi,dword ptr [rsp+8]
+    mov esi,dword ptr [rsp]
+    call vec_mov_ext
+    mov edx,dword ptr [rsp+32]      # divisor pool
+    mov edi,dword ptr [rsp+8]
+    mov esi,dword ptr [rsp+8]
+    call vec_vpmuludq_mem_const
+    test eax,eax; jnz .vud32_cleanup_fail
+    mov edi,0xFB
+    mov esi,ebx
+    mov edx,r12d
+    mov ecx,dword ptr [rsp+8]
+    mov r8d,1
+    call vec_vex2_rrr               # dst = x - product
+
+    test r14d,r14d
+    jz .vud32_quotient
+
+    # Exact remainder: q0 is exact or one low, so r<2d. min(r,r-d) corrects it.
+    mov edi,dword ptr [rsp+8]
+    mov esi,ebx
+    call vec_mov_ext
+    mov edx,dword ptr [rsp+24]      # -divisor pool
+    mov edi,dword ptr [rsp+8]
+    mov esi,dword ptr [rsp+8]
+    call vec_vpaddq_mem_const
+    test eax,eax; jnz .vud32_cleanup_fail
+    mov edi,ebx
+    mov esi,ebx
+    mov edx,ebx
+    mov ecx,dword ptr [rsp+8]
+    call vec_vpminuq
+    jmp .vud32_cleanup_success
+
+.vud32_quotient:
+    # carry = high32(r + 2^32-d): 0 exactly when r<d, otherwise 1.
+    mov edi,dword ptr [rsp+8]
+    mov esi,ebx
+    call vec_mov_ext
+    mov edx,dword ptr [rsp+16]      # correction-bias pool
+    mov edi,dword ptr [rsp+8]
+    mov esi,dword ptr [rsp+8]
+    call vec_vpaddq_mem_const
+    test eax,eax; jnz .vud32_cleanup_fail
+    mov edi,dword ptr [rsp+8]
+    mov esi,dword ptr [rsp+8]
+    mov edx,32
+    call vec_vpsrlq_imm
+    mov edi,0xD4
+    mov esi,ebx
+    mov edx,dword ptr [rsp]
+    mov ecx,dword ptr [rsp+8]
+    mov r8d,1
+    call vec_vex2_rrr               # dst = q0 + carry
+
+.vud32_cleanup_success:
+    mov edi,dword ptr [rsp+8]; call vec_free
+    mov edi,dword ptr [rsp]; call vec_free
+    add rsp,40
+    xor eax,eax
+    jmp .vud32_done
+.vud32_cleanup_fail:
+    mov eax,dword ptr [rsp+8]; cmp eax,-1; je 1f; mov edi,eax; call vec_free
+1:  mov eax,dword ptr [rsp]; cmp eax,-1; je 2f; mov edi,eax; call vec_free
+2:  add rsp,40
+    mov eax,1
+    jmp .vud32_done
+.vud32_fail_pop2:
+    add rsp,8
+.vud32_fail_pop1:
+    add rsp,8
+.vud32_fail:
+    mov eax,1
+.vud32_done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
     ret
 
 # vec_emit_periodic_key(edi=dst,rsi=c,rdx=d,rcx=modtoken) -> eax=0/1.
@@ -8333,6 +8885,7 @@ vec_linear_txn_begin:
     mov eax,dword ptr [rip+vec_axis_reg]; mov dword ptr [rip+vec_txn_axis_reg],eax
     mov eax,dword ptr [rip+vec_induct_count]; mov dword ptr [rip+vec_txn_induct_count],eax
     mov eax,dword ptr [rip+vec_dense_count]; mov dword ptr [rip+vec_txn_dense_count],eax
+    mov eax,dword ptr [rip+vec_mixed_count]; mov dword ptr [rip+vec_txn_mixed_count],eax
     mov eax,dword ptr [rip+vec_dense_scaled_count]; mov dword ptr [rip+vec_txn_dense_scaled_count],eax
     mov rax,qword ptr [rip+vec_induct_coeff]; mov qword ptr [rip+vec_txn_induct_coeff],rax
     mov rax,qword ptr [rip+vec_induct_coeff+8]; mov qword ptr [rip+vec_txn_induct_coeff+8],rax
@@ -8361,6 +8914,7 @@ vec_linear_txn_rollback:
     mov eax,dword ptr [rip+vec_txn_axis_reg]; mov dword ptr [rip+vec_axis_reg],eax
     mov eax,dword ptr [rip+vec_txn_induct_count]; mov dword ptr [rip+vec_induct_count],eax
     mov eax,dword ptr [rip+vec_txn_dense_count]; mov dword ptr [rip+vec_dense_count],eax
+    mov eax,dword ptr [rip+vec_txn_mixed_count]; mov dword ptr [rip+vec_mixed_count],eax
     mov eax,dword ptr [rip+vec_txn_dense_scaled_count]; mov dword ptr [rip+vec_dense_scaled_count],eax
     mov rax,qword ptr [rip+vec_txn_induct_coeff]; mov qword ptr [rip+vec_induct_coeff],rax
     mov rax,qword ptr [rip+vec_txn_induct_coeff+8]; mov qword ptr [rip+vec_induct_coeff+8],rax
@@ -10355,6 +10909,11 @@ vec_dense_count:.skip 4
 vec_dense_shift:.skip 6*8
 vec_dense_mask:.skip 6*8
 vec_dense_reg:.skip 6*4
+vec_mixed_count:.skip 4
+.p2align 3
+vec_mixed_stride:.skip 6*8
+vec_mixed_extent:.skip 6*8
+vec_mixed_reg:.skip 6*4
 vec_dense_scaled_count:.skip 4
 .p2align 3
 vec_dense_scaled_slot:.skip 6*4
@@ -10431,6 +10990,7 @@ vec_txn_axis_valid:.skip 4
 vec_txn_axis_reg:.skip 4
 vec_txn_induct_count:.skip 4
 vec_txn_dense_count:.skip 4
+vec_txn_mixed_count:.skip 4
 vec_txn_dense_scaled_count:.skip 4
 .p2align 3
 vec_txn_induct_coeff:.skip 2*8

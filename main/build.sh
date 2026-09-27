@@ -1274,3 +1274,17 @@ echo 'GENERAL_CONST_MOD_POWER_OF_TWO_BRANCH=0'
 echo 'GENERAL_CONST_MOD_WORKLOAD_MATCHER=0'
 echo 'GENERAL_CONST_MOD_SECOND_BACKEND=0'
 echo 'WHEELCHAIR_1_3_98_BUILD=PASS'
+
+# 1.3.99 static mixed-radix CoordinateFact convergence. This is a structural
+# extension of the existing Tensor Physical Reality, not a workload route.
+grep -q '^vec_vpmuludq_mem_const:' compiler/tensor_derived_frontend_x86_64.S
+grep -q '^expr_dense_mixed_coord_key:' compiler/tensor_derived_frontend_x86_64.S
+grep -q '^vec_mixed_scaled_refresh:' compiler/tensor_derived_frontend_x86_64.S
+if grep -q 'dense_irregular_allpairs127' compiler/tensor_derived_frontend_x86_64.S; then
+  echo 'DENSE_MIXED_WORKLOAD_MATCHER=1' >&2
+  exit 1
+fi
+echo 'MIXED_RADIX_COORDINATEFACT_1_3_99=PASS'
+echo 'DENSE_MIXED_WORKLOAD_MATCHER=0'
+echo 'SECOND_TENSOR_IR_1_3_99=0'
+echo 'WHEELCHAIR_1_3_99_BUILD=PASS'
