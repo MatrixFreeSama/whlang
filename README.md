@@ -13,15 +13,15 @@
 
 Wheelchair targets the same broad numerical-computing territory as C and Fortran, but it does not start from a mandatory sequential instruction stream and then try to recover parallelism afterward. Its compiler treats mathematical structure, value identity, causal dependence, precision, locality, and physical realization as first-class compile-time information.
 
-> Current release: **1.3.97**  
+> Current release: **1.3.98**  
 > Target: **Linux x86-64, static ELF64**  
 > Source surfaces: **WH (`.wh`)** and **WHEX (`.whex`)**  
-> [Download Wheelchair 1.3.97](./dist/Wheelchair-1.3.97.zip)
+> [Download Wheelchair 1.3.98](./dist/Wheelchair-1.3.98.zip)
 
 Archive SHA-256:
 
 ```text
-d43d463a3ca613eaf44eb0e5ec57fb41ca8477b914546ae3fdcee4078465625e
+9943448a486c4dd52733ea7a18a7149fd28259005d05d79c0448a40e44b72cd0
 ```
 
 ---
@@ -257,8 +257,8 @@ WH is the friendlier surface; WHEX is the more explicit structural surface. Both
 The release archive ships prebuilt static compiler binaries under `bin/`.
 
 ```sh
-unzip Wheelchair-1.3.97.zip
-cd Wheelchair-1.3.97
+unzip Wheelchair-1.3.98.zip
+cd Wheelchair-1.3.98
 
 ./bin/wheelchairc surface/examples/equivalent_en.wh -o demo
 ./demo 4
@@ -883,6 +883,46 @@ These milestones record changes in semantics, execution, and release verificatio
 | **1.3.96–1.3.97** | General scalar Physical Reality absorbed the wide scalar register file, removed fixed candidate/resident cliffs, and then erased proved whole-generation next-to-old state transport without adding workload-specific scheduling. |
 
 The table selects turning points rather than listing every patch. Versioned benchmark results above remain observations of their original releases and hosts, not measurements of the current compiler unless explicitly labeled as the current snapshot.
+
+---
+
+## Representative benchmark: ragged-tail idle conversion
+
+Wheelchair 1.3.98 was tested against GCC C and GFortran on a same-host workload designed to expose **unequal lifetimes and tail collapse** rather than reward raw occupancy.
+
+The benchmark contains four independent integer state chains. Every case performs the same **200 million useful recurrences**; only the distribution of work changes. Short chains are allowed to finish naturally while the longest chain continues. This makes idle hardware increasingly unavoidable without changing the mathematical work.
+
+Test conditions:
+
+- host: GitHub Actions, AMD EPYC 7763, Linux x86-64;
+- visible execution set: 4 logical CPUs, pinned to CPUs 0-3;
+- Wheelchair: 1.3.98 native AOT output;
+- C: GCC `-O3 -march=native -fopenmp`;
+- Fortran: GFortran `-O3 -march=native -fopenmp`;
+- two warm-up runs, then nine measured rounds per implementation and case;
+- launch order rotated across measured rounds;
+- all three implementations produced identical checksums for every case.
+
+| Work distribution | Implementation | Wall time | Process CPU time | 4-CPU occupancy | Useful Miter / CPU-s |
+|---|---|---:|---:|---:|---:|
+| 50 / 50 / 50 / 50 M | **Wheelchair 1.3.98** | **221.2 ms** | **0.8759 s** | 99.0% | **228.3** |
+| | C | 254.6 ms | 1.0079 s | 99.0% | 198.4 |
+| | Fortran | 242.9 ms | 0.9606 s | 98.9% | 208.2 |
+| 100 / 50 / 30 / 20 M | **Wheelchair 1.3.98** | **438.0 ms** | **0.8747 s** | 49.9% | **228.6** |
+| | C | 501.5 ms | 1.0248 s | 51.1% | 195.2 |
+| | Fortran | 475.5 ms | 0.9732 s | 51.2% | 205.5 |
+| 150 / 25 / 15 / 10 M | **Wheelchair 1.3.98** | **655.4 ms** | **0.8734 s** | 33.3% | **229.0** |
+| | C | 752.3 ms | 1.0292 s | 34.2% | 194.3 |
+| | Fortran | 703.7 ms | 0.9626 s | 34.2% | 207.8 |
+| 180 / 10 / 5 / 5 M | **Wheelchair 1.3.98** | **785.9 ms** | **0.8729 s** | 27.8% | **229.1** |
+| | C | 899.9 ms | 1.0264 s | 28.5% | 194.9 |
+| | Fortran | 844.1 ms | 0.9654 s | 28.6% | 207.2 |
+
+The important result is not that occupancy stays high. It does not. As the workload collapses toward one long causal tail, Wheelchair's observed occupancy falls from 99.0% to 27.8%, while its process CPU time remains approximately constant at 0.873-0.876 s and useful work per CPU-second remains approximately 228-229 Miter/s.
+
+In the most uneven `180 / 10 / 5 / 5 M` case, Wheelchair records 12.7% lower wall time and 15.0% lower process CPU time than C, and 6.9% lower wall time and 9.6% lower process CPU time than Fortran. The remaining wall-time increase is expected: the longest causal chain grows from 50 M to 180 M recurrences, so genuine serial tail depth cannot be removed by scheduling.
+
+`Useful Miter / CPU-s` is a workload-specific conversion metric for this benchmark, not a claim about peak FLOP utilization or a universal language ranking. The result is retained as a representative example of the project rule: **idle silicon is acceptable when additional materialization cannot reduce the remaining necessary work; occupied compute should continue to perform useful work.**
 
 ---
 
