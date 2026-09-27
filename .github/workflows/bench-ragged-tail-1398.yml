@@ -1,0 +1,132 @@
+name: Ragged tail 1.3.98 benchmark
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/bench-ragged-tail-1398.yml
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Benchmark Wheelchair 1.3.98 vs C and Fortran
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd main
+          chmod +x bin/wheelchairc
+          mkdir -p /tmp/ragged1398
+          cd /tmp/ragged1398
+
+          cat > runbench.py <<'PY'
+          import os, re, resource, statistics, subprocess, time
+
+          cases = [
+              ('balanced', (50_000_000,50_000_000,50_000_000,50_000_000)),
+              ('mild',     (100_000_000,50_000_000,30_000_000,20_000_000)),
+              ('strong',   (150_000_000,25_000_000,15_000_000,10_000_000)),
+              ('extreme',  (180_000_000,10_000_000,5_000_000,5_000_000)),
+          ]
+          seeds=(17,29,43,71)
+          total_work=200_000_000
+          repo=os.environ['GITHUB_WORKSPACE']
+          whc=os.path.join(repo,'main','bin','wheelchairc')
+          cpus=list(range(min(4, os.cpu_count() or 1)))
+          affinity=','.join(map(str,cpus))
+          threads=len(cpus)
+          print(f'MACHINE cpus={os.cpu_count()} bench_cpus={threads} affinity={affinity}')
+          subprocess.run(['lscpu'],check=False)
+
+          def wh_source(ns):
+              parts=['program ragged_tail','contract integer_overflow = wrap','']
+              for k,(n,seed) in enumerate(zip(ns,seeds)):
+                  parts += [
+                    f'iterate lane{k} limit {n} {{',
+                    f'    state x: u64 = {seed}',
+                    '    state i: u64 = 0',
+                    f'    while i < {n}',
+                    '    update x = (x * x + 144269) % 1000003',
+                    '    update i = i + 1',
+                    '    result x',
+                    '}', ''
+                  ]
+              parts += ['let checksum: u64 = lane0 + lane1 + lane2 + lane3','publish checksum','']
+              return '\n'.join(parts)
+
+          def c_source(ns):
+              n0,n1,n2,n3=ns
+              return f'''#include <stdint.h>\n#include <stdio.h>\n#include <omp.h>\nstatic inline uint64_t run(uint64_t x, uint64_t n){{for(uint64_t i=0;i<n;i++) x=(x*x+144269ULL)%1000003ULL; return x;}}\nint main(void){{uint64_t a=0,b=0,c=0,d=0;\n#pragma omp parallel sections num_threads(4)\n{{\n#pragma omp section\n a=run(17,{n0}ULL);\n#pragma omp section\n b=run(29,{n1}ULL);\n#pragma omp section\n c=run(43,{n2}ULL);\n#pragma omp section\n d=run(71,{n3}ULL);\n}}\nprintf("%llu\\n",(unsigned long long)(a+b+c+d)); return 0;}}\n'''
+
+          def f_source(ns):
+              n0,n1,n2,n3=ns
+              return f'''program ragged_tail\nuse iso_fortran_env, only: int64\nuse omp_lib\nimplicit none\ninteger(int64) :: a,b,c,d\n!$omp parallel sections num_threads(4)\n!$omp section\na=run(17_int64,{n0}_int64)\n!$omp section\nb=run(29_int64,{n1}_int64)\n!$omp section\nc=run(43_int64,{n2}_int64)\n!$omp section\nd=run(71_int64,{n3}_int64)\n!$omp end parallel sections\nwrite(*,'(I0)') a+b+c+d\ncontains\nfunction run(x0,n) result(x)\ninteger(int64), intent(in) :: x0,n\ninteger(int64) :: x,i\nx=x0\ndo i=1_int64,n\n  x=mod(x*x+144269_int64,1000003_int64)\nend do\nend function run\nend program ragged_tail\n'''
+
+          env=os.environ.copy()
+          env.update({'OMP_NUM_THREADS':str(threads),'OMP_DYNAMIC':'FALSE','OMP_PROC_BIND':'close','OMP_PLACES':'cores'})
+
+          def invoke(exe):
+              before=resource.getrusage(resource.RUSAGE_CHILDREN)
+              t0=time.perf_counter_ns()
+              p=subprocess.run(['taskset','-c',affinity,exe],text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,check=True)
+              t1=time.perf_counter_ns()
+              after=resource.getrusage(resource.RUSAGE_CHILDREN)
+              cpu=(after.ru_utime+after.ru_stime)-(before.ru_utime+before.ru_stime)
+              wall=(t1-t0)/1e9
+              ints=re.findall(r'(?<![A-Za-z0-9])([0-9]+)(?![A-Za-z0-9])',p.stdout)
+              checksum=int(ints[-1]) if ints else None
+              return wall,cpu,checksum,p.stdout.strip()
+
+          rows=[]
+          for name,ns in cases:
+              open(f'{name}.wh','w').write(wh_source(ns))
+              open(f'{name}.c','w').write(c_source(ns))
+              open(f'{name}.f90','w').write(f_source(ns))
+              subprocess.run([whc,f'{name}.wh','-o',f'{name}.wh.exe'],check=True)
+              subprocess.run(['gcc','-O3','-march=native','-fopenmp',f'{name}.c','-o',f'{name}.c.exe'],check=True)
+              subprocess.run(['gfortran','-O3','-march=native','-fopenmp',f'{name}.f90','-o',f'{name}.f.exe'],check=True)
+              exes=[('WH98',os.path.abspath(f'{name}.wh.exe')),('C',os.path.abspath(f'{name}.c.exe')),('Fortran',os.path.abspath(f'{name}.f.exe'))]
+              # warmups
+              for lang,exe in exes:
+                  invoke(exe); invoke(exe)
+              measurements={lang:[] for lang,_ in exes}
+              for r in range(9):
+                  # rotate launch order to reduce host drift
+                  order=exes[r%3:]+exes[:r%3]
+                  for lang,exe in order:
+                      measurements[lang].append(invoke(exe))
+              checks={}
+              for lang,_ in exes:
+                  vals=[x[2] for x in measurements[lang]]
+                  checks[lang]=vals[0]
+                  assert all(v==vals[0] for v in vals), (name,lang,vals)
+              assert len(set(checks.values()))==1, (name,checks,{lang:measurements[lang][0][3] for lang,_ in exes})
+              for lang,_ in exes:
+                  walls=[x[0] for x in measurements[lang]]
+                  cpusec=[x[1] for x in measurements[lang]]
+                  mwall=statistics.median(walls)
+                  mcpu=statistics.median(cpusec)
+                  occupancy=mcpu/(mwall*threads)
+                  throughput=total_work/mcpu/1e6
+                  rows.append((name,lang,mwall,mcpu,occupancy,throughput,checks[lang]))
+
+          print('RESULT_HEADER case lang wall_s cpu_s occupancy useful_Miter_per_cpu_s checksum')
+          for row in rows:
+              print('RESULT',row[0],row[1],*(f'{x:.9f}' if isinstance(x,float) else x for x in row[2:]))
+
+          # normalize useful conversion to each language's balanced case
+          base={lang:thr for case,lang,wall,cpu,occ,thr,chk in rows if case=='balanced'}
+          print('NORMALIZED_HEADER case lang wall_speed_vs_own_balanced occupied_conversion_vs_own_balanced net_conversion_vs_own_balanced')
+          basewall={lang:wall for case,lang,wall,cpu,occ,thr,chk in rows if case=='balanced'}
+          baseocc={lang:occ for case,lang,wall,cpu,occ,thr,chk in rows if case=='balanced'}
+          for case,lang,wall,cpu,occ,thr,chk in rows:
+              occconv=thr/base[lang]
+              net=(occ*occconv)/(baseocc[lang])
+              print('NORMALIZED',case,lang,f'{basewall[lang]/wall:.6f}',f'{occconv:.6f}',f'{net:.6f}')
+          PY
+
+          python3 runbench.py
