@@ -1,4 +1,4 @@
-name: Inspect main materialize
+name: Materialize production main
 
 on:
   push:
@@ -7,26 +7,52 @@ on:
       - .github/workflows/inspect-main-materialize.yml
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  inspect:
+  materialize:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Inspect latest release archive
+        with:
+          fetch-depth: 1
+
+      - name: Materialize versionless production tree
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf /tmp/wh98 /tmp/wh98.zip
-          gh release download v1.3.98 -p 'Wheelchair-1.3.98.zip' -O /tmp/wh98.zip
-          mkdir -p /tmp/wh98
-          unzip -q /tmp/wh98.zip -d /tmp/wh98
-          echo '=== TOP ==='
-          find /tmp/wh98 -mindepth 1 -maxdepth 2 -printf '%y %P\n' | sort | head -n 400
-          echo '=== DEPTH4 ==='
-          find /tmp/wh98 -mindepth 1 -maxdepth 4 -printf '%y %P\n' | sort | head -n 800
-          echo '=== SIZES ==='
-          du -ah /tmp/wh98 | sort -h | tail -n 80
+
+          archive=/tmp/Wheelchair-1.3.98.zip
+          unpack=/tmp/wheelchair-release
+          src="$unpack/Wheelchair-1.3.98"
+
+          rm -rf "$unpack" "$archive"
+          gh release download v1.3.98 -p 'Wheelchair-1.3.98.zip' -O "$archive"
+          mkdir -p "$unpack"
+          unzip -q "$archive" -d "$unpack"
+
+          mkdir -p main
+          staging="$(mktemp -d)"
+          mkdir -p "$staging/main"
+
+          cp -a "$src/bin" "$staging/main/"
+          cp -a "$src/compiler" "$staging/main/"
+          cp -a "$src/runtime" "$staging/main/"
+          cp -a "$src/surface" "$staging/main/"
+          cp -a "$src/tools" "$staging/main/"
+          cp -a "$src/build.sh" "$staging/main/"
+          cp -a "$src/README.md" "$staging/main/"
+
+          rsync -a --delete "$staging/main/" main/
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A main
+          if git diff --cached --quiet; then
+            echo 'main/ already matches production tree'
+            exit 0
+          fi
+          git commit -m 'main: materialize versionless production tree from 1.3.98'
+          git push origin HEAD:main
