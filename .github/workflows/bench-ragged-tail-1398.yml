@@ -77,8 +77,12 @@ jobs:
               after=resource.getrusage(resource.RUSAGE_CHILDREN)
               cpu=(after.ru_utime+after.ru_stime)-(before.ru_utime+before.ru_stime)
               wall=(t1-t0)/1e9
-              ints=re.findall(r'(?<![A-Za-z0-9])([0-9]+)(?![A-Za-z0-9])',p.stdout)
-              checksum=int(ints[-1]) if ints else None
+              hexes=re.findall(r'0x([0-9a-fA-F]+)',p.stdout)
+              if hexes:
+                  checksum=int(hexes[-1],16)
+              else:
+                  ints=re.findall(r'(?<![A-Za-z0-9])([0-9]+)(?![A-Za-z0-9])',p.stdout)
+                  checksum=int(ints[-1]) if ints else None
               return wall,cpu,checksum,p.stdout.strip()
 
           rows=[]
@@ -90,12 +94,10 @@ jobs:
               subprocess.run(['gcc','-O3','-march=native','-fopenmp',f'{name}.c','-o',f'{name}.c.exe'],check=True)
               subprocess.run(['gfortran','-O3','-march=native','-fopenmp',f'{name}.f90','-o',f'{name}.f.exe'],check=True)
               exes=[('WH98',os.path.abspath(f'{name}.wh.exe')),('C',os.path.abspath(f'{name}.c.exe')),('Fortran',os.path.abspath(f'{name}.f.exe'))]
-              # warmups
               for lang,exe in exes:
                   invoke(exe); invoke(exe)
               measurements={lang:[] for lang,_ in exes}
               for r in range(9):
-                  # rotate launch order to reduce host drift
                   order=exes[r%3:]+exes[:r%3]
                   for lang,exe in order:
                       measurements[lang].append(invoke(exe))
@@ -118,7 +120,6 @@ jobs:
           for row in rows:
               print('RESULT',row[0],row[1],*(f'{x:.9f}' if isinstance(x,float) else x for x in row[2:]))
 
-          # normalize useful conversion to each language's balanced case
           base={lang:thr for case,lang,wall,cpu,occ,thr,chk in rows if case=='balanced'}
           print('NORMALIZED_HEADER case lang wall_speed_vs_own_balanced occupied_conversion_vs_own_balanced net_conversion_vs_own_balanced')
           basewall={lang:wall for case,lang,wall,cpu,occ,thr,chk in rows if case=='balanced'}
