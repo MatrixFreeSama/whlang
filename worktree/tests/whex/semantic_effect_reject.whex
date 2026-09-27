@@ -1,0 +1,8 @@
+program semantic_effect_reject
+strict
+input n: u64 range 4..16
+region external_io effect io parallel {
+    sum total[i in n]: f64 = 1.0
+}
+output total
+test (4) => { total = 4.0 }

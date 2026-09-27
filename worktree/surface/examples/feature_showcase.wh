@@ -1,0 +1,59 @@
+program 🧪实验
+
+let 123: u64 = 7
+let 🐭: u64 = `123` + 5
+
+tensor branched[i: 10]: u64 = select(i % 2 == 0, i * i, i + 1)
+reduce branch_sum[j: 10]: u64 = sum branched[j]
+
+iterate gcd limit 256 {
+    state x: u64 = 1071
+    state y: u64 = 462
+    while y != 0
+    update x = y
+    update y = x % y
+    result x
+}
+
+record configuration {
+    base = 2.5
+    offset = 1.0
+}
+
+dictionary weights: string -> f64 {
+    "red" = 1.0,
+    "green" = 2.0
+}
+lookup weight = weights["green"] default 0.5
+let field_result = configuration.base * weight + configuration.offset
+
+nested groups: u64 = [[1, 2, 3], [], [4, 5]]
+nested_reduce nested_sum: u64 = sum groups
+
+cascade 级联结果 executors 2 chunk 2 axis 工作单元 events true {
+    goal A work 4 = 工作单元 + 1
+    goal B work 3 = 工作单元 + 2
+    goal C work 2 = goal_result(A) + 工作单元
+    goal D work 1 = 7
+    relation A -> C
+}
+
+publish 🐭
+output branch_sum = branch_sum
+output gcd = gcd
+output field_result = field_result
+output nested_sum = nested_sum
+output A = 级联结果.A
+output C = 级联结果.C
+output completed = 级联结果.完成目标数
+
+ test () => {
+    🐭 = 12,
+    branch_sum = 150,
+    gcd = 21,
+    field_result = 6.0,
+    nested_sum = 15,
+    A = 10,
+    C = 21,
+    completed = 4
+ }

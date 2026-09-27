@@ -1,0 +1,5 @@
+program absmin
+input x: i64
+let y = abs(x)
+output y = y
+test () => { y = 0 }

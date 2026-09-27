@@ -1,0 +1,8 @@
+program operator_subspace_strict
+strict
+input n: u64 range 1024..16777216
+field p[i in n]: f64 = (0.25 + (cast(f64, (((i * 17) + 3) % 1024)) / 1024.0))
+field q[i in n]: f64 = (((2.0 * p[i]) - p[i]) + (((0.5 * p[periodic((i + 1), n)]) - (0.5 * p[periodic((i + 1), n)])) + p[periodic((i + 2), n)]))
+sum checksum[i in n]: f64 = q[i]
+output checksum
+test (1024) => { checksum = 1535.0 }

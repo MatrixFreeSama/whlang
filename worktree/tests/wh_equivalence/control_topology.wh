@@ -1,0 +1,13 @@
+program semantic_control_topology
+strict
+input n: u64 range 4..16
+region compute effect pure parallel {
+    for i in 0..n {
+        let x[i]: f64 = if i == 0 { 2.0 } else { 1.0 }
+    }
+    for i in 0..n {
+        total += x[i]
+    }
+}
+output total
+test (4) => { total = 5.0 }

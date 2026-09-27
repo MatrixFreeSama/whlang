@@ -1,0 +1,11 @@
+program surface_shell_equivalence
+
+input 123🔥输入: u64 range 1..1000
+let 123: u64 = 7
+let 9️⃣平方: u64 = 123🔥输入 * 123🔥输入 + `123`
+tensor 📦[0️⃣轴: 123🔥输入]: u64 = 9️⃣平方 + 0️⃣轴
+reduce Σ总和[0️⃣轴: 123🔥输入]: u64 = sum 📦[0️⃣轴]
+publish 结果🚀 = Σ总和
+
+test (1) => { 结果🚀 = 8 }
+test (4) => { 结果🚀 = 98 }

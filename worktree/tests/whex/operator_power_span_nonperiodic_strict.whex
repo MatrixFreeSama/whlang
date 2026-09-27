@@ -1,0 +1,12 @@
+program operator_power_span_nonperiodic
+
+strict
+input n: u64 range 1024..1024
+field p[i in n]: f64 = (0.25 + (cast(f64, (((i * 17) + 3) % 1024)) / 1024.0))
+field q1[i in n]: f64 = (p[i] + (0.5 * p[(i + 1)]))
+field q2[i in n]: f64 = (q1[i] + (0.5 * q1[(i + 1)]))
+field q3[i in n]: f64 = (q2[i] + (0.5 * q2[(i + 1)]))
+field q4[i in n]: f64 = (q3[i] + (0.5 * q3[(i + 1)]))
+sum checksum[i in n]: f64 = q4[i]
+output checksum
+test (1024) => { checksum = 3885.46875 }

@@ -1,0 +1,9 @@
+program synthetic_same_structure_124
+tolerance 1e-10
+input n: u64 range 4..100000000
+field a[i in n]: f64 = -0.5 + cast(f64, (i * 29 + 7) % 1024) / 1024.0
+field b[i in n]: f64 = 1.0 + cast(f64, (i * 17 + 3) % 256) / 1024.0
+field c[i in n]: f64 = (b[i] + b[periodic(i + 1, n)]) * a[i] - b[i] * a[periodic(i + n - 1, n)] - b[periodic(i + 1, n)] * a[periodic(i + 1, n)]
+sum checksum[i in n]: f64 = c[i] * c[i]
+output checksum
+test (4) => { checksum = 0.02624587072568829 }

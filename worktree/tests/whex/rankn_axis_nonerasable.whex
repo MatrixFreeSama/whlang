@@ -1,0 +1,8 @@
+program rankn_axis_nonerasable
+strict
+input n: u64 range 4..1024
+axis i in n
+axis j in 4
+sum total[i in n, j in 4]: f64 = cast(f64, i) + cast(f64, j)
+output total
+test (4) => { total = 48.0 }

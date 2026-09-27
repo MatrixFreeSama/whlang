@@ -1,0 +1,6 @@
+program rank2_reduce_native_122
+tolerance 1e-12
+input n: u64 range 4..1000000
+sum checksum[i in n, j in 4]: f64 = cast(f64, i * 4 + j)
+output checksum
+test (4) => { checksum = 120.0 }

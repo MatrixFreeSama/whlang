@@ -1,0 +1,10 @@
+program while_reject
+strict
+input n: u64 range 4..16
+region compute effect pure parallel {
+    while n > 0 {
+        x = n
+    }
+}
+output n
+test (4) => { n = 4 }

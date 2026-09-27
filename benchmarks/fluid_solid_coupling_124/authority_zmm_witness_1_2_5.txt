@@ -1,0 +1,41 @@
+Wheelchair 1.2.5 vs Zig explicit-vector FSI authority witness
+
+Workflow run: 33964046337
+Qualified rerun job: authority (1)
+Host: AMD EPYC 9V74 80-Core Processor
+CPU vendor: AuthenticAMD
+AVX-512F: usable
+
+Zig source:
+benchmarks/fluid_solid_coupling_124/Fluid_Solid_zig_avx512.zig
+SHA-256:
+df403fa190fb572830b4988e8ca29fc57b65ea27f504d08d3ef6011395aad70f
+
+ZIG_ZMM_GATE=PASS
+
+Representative ZMM instructions observed in the final Zig executable:
+101b8af: vmovups %zmm0,0x6f3b7(%rip)
+101ba05: vpternlogd $0xff,%zmm0,%zmm0,%zmm0
+101ba6e: vmovdqu64 %zmm0,-0x560(%rbp)
+101baeb: vmovups -0x7715(%rip),%zmm0
+
+Formal authority medians:
+N=10000000  Q=1  Wheelchair=18.462558 ms  C=13.649007 ms  Zig=17.578665 ms  W/C=1.3527x  W/Zig=1.0503x  Zig/C=1.2879x
+N=10000000  Q=2  Wheelchair=18.514616 ms  C=13.483697 ms  Zig=17.180594 ms  W/C=1.3731x  W/Zig=1.0776x  Zig/C=1.2742x
+N=10000000  Q=4  Wheelchair=9.821304 ms   C=7.368484 ms   Zig=9.501512 ms   W/C=1.3329x  W/Zig=1.0337x  Zig/C=1.2895x
+N=100000000 Q=1  Wheelchair=175.164501 ms C=124.083488 ms Zig=163.733585 ms W/C=1.4117x  W/Zig=1.0698x  Zig/C=1.3195x
+N=100000000 Q=2  Wheelchair=175.596709 ms C=122.211453 ms Zig=158.038500 ms W/C=1.4368x  W/Zig=1.1111x  Zig/C=1.2932x
+N=100000000 Q=4  Wheelchair=88.633059 ms  C=61.975390 ms  Zig=80.102151 ms  W/C=1.4301x  W/Zig=1.1065x  Zig/C=1.2925x
+
+Geometric means:
+Wheelchair / C   = 1.3890x
+Wheelchair / Zig = 1.0745x
+Zig / C          = 1.2927x
+
+ZIG_KIND=explicit_vector_8xf64
+ZIG_WHEELCHAIR_125_NUMERIC_GATE=PASS
+ZIG_WHEELCHAIR_125_AUTHORITY_HOST=PASS
+WHEELCHAIR_ZIG_FSI_1_2_5_HOST=PASS
+
+Scope note:
+The ZMM gate proves that ZMM instructions are present in the final Zig executable. It is deliberately not described as proof that every instruction in the hot kernel is 512-bit SIMD.

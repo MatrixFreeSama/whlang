@@ -1,0 +1,11 @@
+program strength_probe
+
+tolerance 1e-10
+
+input n: u64 range 4..1000000
+
+sum checksum[i in n]: f64 = cast(f64, (((i * 64) + 1) % 1024))
+
+output checksum
+
+test (4) => { checksum = 388.0 }
