@@ -1,4 +1,5 @@
 .intel_syntax noprefix
+.include "runtime/execution_admission_refresh_x86_64.inc"
 
 # Wheelchair 1.3.17 external-silicon causal-region fabric.
 #
@@ -28,6 +29,7 @@
 .equ ST_NODE_BYTES, 64
 .equ ST_NODE_ARRIVED, 0
 .equ ST_NODE_DONE, 4
+.equ ST_NODE_LOCAL_NEXT, 8
 # Every causal node owns one cache line. The state arena is sized from
 # gr_node_count at invocation time; trailing invocation metadata holds stack
 # base/size plus one shared x86 execution-admission count. The count is not a
@@ -56,18 +58,10 @@ gr_release_base:
     je .gr_fail_no_state
 .gr_fabric_admission_done:
 
-    # 1.3.87 static silicon placement is inherited by every causal execution.
-    # It is one AOT physical-domain constraint, not a runtime scheduler.
-    cmp dword ptr [rip+gr_static_placement_required],0
-    je .gr_static_placement_done
-    mov esi,dword ptr [rip+gr_static_placement_mask_bytes]
-    test esi,esi
-    jz .gr_static_placement_done
-    mov eax,SYS_sched_setaffinity
-    xor edi,edi
-    lea rdx,[rip+gr_static_placement_mask]
-    syscall
-.gr_static_placement_done:
+    # Static silicon placement is locality proof, never authority to escape the
+    # invocation domain.  Intersect it with the caller's current affinity just
+    # like Tensor/Field, then let invocation admission observe the narrowed set.
+    CONSTRAIN_STATIC_PLACEMENT_WITHIN_INVOCATION gr_static_placement_required, gr_static_placement_mask_bytes, gr_static_placement_mask
 
     mov eax,dword ptr [rip+gr_node_count]
     test eax,eax
@@ -129,6 +123,7 @@ gr_release_base:
     xor ebx,ebx
     xor r14d,r14d
     mov dword ptr [rsp+24],-1             # root executed by invocation context
+    mov dword ptr [rsp+16],-1             # completion-local root continuation chain
     call gr_meta_indegree_ptr
     mov qword ptr [rsp+32],rax
 .gr_root_scan:
@@ -162,11 +157,14 @@ gr_release_base:
     test eax,eax
     jz .gr_root_next
 .gr_root_execute_local:
-    mov edi,ebx
-    mov esi,CLONE_VM_FILES_FS_SIGCHLD
-    call gr_node_task
-    test eax,eax
-    jnz .gr_runtime_fail
+    # Expose every causally-ready root before spending the invocation context on
+    # a local continuation. The chain lives only in the already-owned node state;
+    # it is not a global ready queue and is dead after this root scan.
+    mov rax,rbx
+    shl rax,6
+    mov edx,dword ptr [rsp+16]
+    mov dword ptr [r15+rax+ST_NODE_LOCAL_NEXT],edx
+    mov dword ptr [rsp+16],ebx
     jmp .gr_root_next
 .gr_root_fabric:
     mov edi,ebx
@@ -187,6 +185,20 @@ gr_release_base:
     call gr_node_task
     test eax,eax
     jnz .gr_runtime_fail
+.gr_root_local_drain:
+    mov edi,dword ptr [rsp+16]
+    cmp edi,-1
+    je .gr_root_locals_done
+    mov rax,rdi
+    shl rax,6
+    mov edx,dword ptr [r15+rax+ST_NODE_LOCAL_NEXT]
+    mov dword ptr [rsp+16],edx
+    mov esi,CLONE_VM_FILES_FS_SIGCHLD
+    call gr_node_task
+    test eax,eax
+    jnz .gr_runtime_fail
+    jmp .gr_root_local_drain
+.gr_root_locals_done:
 
     # The invocation context has finished every local continuation. It no longer
     # consumes one execution-admission slot while blocked in wait4, so descendants
@@ -392,17 +404,60 @@ gr_init_state:
     mov qword ptr [rax],0
     mov qword ptr [rax+8],0
     mov dword ptr [rax+16],1       # invocation root is the first live x86 context
+    push rax
+    call gr_read_invocation_admission
+    mov ecx,eax
+    pop rax
+    mov dword ptr [rax+20],ecx     # invocation-only multiplicity fact
     xor eax,eax
     ret
 
-# Acquire one native x86 execution slot from the AOT external-admission bound.
+# gr_read_invocation_admission() -> eax=count.
+# Read current allowed affinity once per invocation. The immutable mask is thrown
+# away immediately; no CPU identity, load or idle state survives into execution.
+gr_read_invocation_admission:
+    sub rsp,RUNTIME_AFFINITY_MASK_BYTES
+    mov eax,204
+    xor edi,edi
+    mov esi,RUNTIME_AFFINITY_MASK_BYTES
+    mov rdx,rsp
+    syscall
+    test rax,rax
+    js .gria_fallback
+    mov r8,rax
+    xor r9d,r9d
+    xor ecx,ecx
+.gria_byte:
+    cmp r9,r8
+    jae .gria_done_count
+    movzx r10d,byte ptr [rsp+r9]
+    mov r11d,8
+.gria_bit:
+    shr r10b,1
+    adc ecx,0
+    dec r11d
+    jnz .gria_bit
+    inc r9
+    jmp .gria_byte
+.gria_done_count:
+    test ecx,ecx
+    jnz .gria_return
+.gria_fallback:
+    # Failure may not resurrect compile-host width as runtime authority.
+    mov ecx,1
+.gria_return:
+    mov eax,ecx
+    add rsp,RUNTIME_AFFINITY_MASK_BYTES
+    ret
+
+# Acquire one native x86 execution slot from the invocation external-admission bound.
 # This is a multiplicity guard only: no CPU identity, load, idle state, recipient,
 # ready queue or worker object exists. eax=0 acquired, eax=1 keep work local.
 gr_try_acquire_x86_slot:
-    mov ecx,dword ptr [rip+gr_execution_admission_capacity]
+    call gr_state_meta_ptr
+    mov ecx,dword ptr [rax+20]
     cmp ecx,1
     jbe .gtaxs_fail
-    call gr_state_meta_ptr
     lea r8,[rax+16]
 .gtaxs_retry:
     mov eax,dword ptr [r8]
@@ -514,8 +569,10 @@ gr_publish_completion:
     push r12
     push r13
     push r14
+    push rbp
     mov ebx,edi
     mov r13d,esi
+    mov ebp,-1                         # ready siblings that remain local
     cmp ebx,dword ptr [rip+gr_node_count]
     jae .gpc_fail
 
@@ -527,7 +584,7 @@ gr_publish_completion:
     mov r14d,dword ptr [rax+rbx*4]
 .gpc_edges:
     cmp r14d,-1
-    je .gpc_ok
+    je .gpc_ready_exposed
     cmp r14d,dword ptr [rip+gr_edge_count]
     jae .gpc_fail
     call gr_meta_edge_v_ptr
@@ -569,18 +626,33 @@ gr_publish_completion:
     test eax,eax
     jz .gpc_next
 .gpc_continue_local:
-    # Either Physical Reality kept the Region local or the external OS refused
-    # the x86 realization. No Wheelchair resource pool is created.
-    mov edi,r12d
-    mov esi,r13d
-    call gr_node_task
-    test eax,eax
-    jnz .gpc_fail
+    # Do not let one local continuation hide later ready siblings. Link it into
+    # this completion's node-local continuation chain, finish exposing the whole
+    # ready frontier, then consume the chain with the already-live context.
+    # No persistent queue, worker, recipient or work transfer exists.
+    mov rax,r12
+    shl rax,6
+    mov dword ptr [r15+rax+ST_NODE_LOCAL_NEXT],ebp
+    mov ebp,r12d
 
 .gpc_next:
     call gr_meta_next_edge_ptr
     mov r14d,dword ptr [rax+r14*4]
     jmp .gpc_edges
+
+.gpc_ready_exposed:
+    cmp ebp,-1
+    je .gpc_ok
+    mov r12d,ebp
+    mov rax,r12
+    shl rax,6
+    mov ebp,dword ptr [r15+rax+ST_NODE_LOCAL_NEXT]
+    mov edi,r12d
+    mov esi,r13d
+    call gr_node_task
+    test eax,eax
+    jnz .gpc_fail
+    jmp .gpc_ready_exposed
 
 .gpc_ok:
     xor eax,eax
@@ -588,6 +660,7 @@ gr_publish_completion:
 .gpc_fail:
     mov eax,1
 .gpc_done:
+    pop rbp
     pop r14
     pop r13
     pop r12

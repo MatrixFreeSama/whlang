@@ -7089,6 +7089,17 @@ emit_tensor_image:
     cmp rax,4
     jne .eti_close_fail
 
+    # Reduction semantics are an AOT contract fact.  Runtime admission may change
+    # ownership multiplicity, never this strict/tolerant mathematical authority.
+    mov eax,SYS_pwrite64
+    mov rdi,rbx
+    lea rsi,[rip+tensor_tolerant_fp]
+    mov edx,4
+    mov r10d,RUNTIME_REDUCTION_TOLERANT_OFF
+    syscall
+    cmp rax,4
+    jne .eti_close_fail
+
     # Burn the exact compile-time silicon-domain placement witness into the
     # executable. Runtime only applies this inherited mask once; it never
     # discovers, scores, or reallocates silicon.

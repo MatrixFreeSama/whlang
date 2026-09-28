@@ -1288,3 +1288,60 @@ echo 'MIXED_RADIX_COORDINATEFACT_1_3_99=PASS'
 echo 'DENSE_MIXED_WORKLOAD_MATCHER=0'
 echo 'SECOND_TENSOR_IR_1_3_99=0'
 echo 'WHEELCHAIR_1_3_99_BUILD=PASS'
+
+# 1.3.102 retains the converged Tensor Fact path. Mixed-radix carry recurrence remains the one
+# coordinate authority; scaled CoordinateFact logical identity is no longer
+# aliased with physical-register allocation, and tolerant literal division
+# consumes one explicit reciprocal relation. Strict rounding authority is unchanged.
+grep -q '^vec_mixed_chain_preflight:$' compiler/tensor_derived_frontend_x86_64.S
+grep -q '^vec_mixed_emit_step_chain:$' compiler/tensor_derived_frontend_x86_64.S
+grep -q '^vec_mixed_find_direct_residue:$' compiler/tensor_derived_frontend_x86_64.S
+grep -q '^vec_mixed_emit_step:$' compiler/tensor_derived_frontend_x86_64.S
+grep -q 'mov r13d,ecx.*logical scaled-fact slot survives physical-reg allocation' compiler/tensor_derived_frontend_x86_64.S
+grep -q '^recip_tolerant_f64_bits:$' compiler/tensor_derived_frontend_x86_64.S
+! grep -Eq 'dense_irregular_allpairs127|waitslow|mass3|chem6|rigid7' compiler/tensor_derived_frontend_x86_64.S
+echo 'MIXED_RADIX_CARRY_RECURRENCE_1_3_102=PASS'
+echo 'SCALED_FACT_LOGICAL_PHYSICAL_ALIAS=0'
+echo 'TOLERANT_LITERAL_DIV_RECIPROCAL_1_3_102=PASS'
+echo 'RUNTIME_RADIX_SELECTOR_1_3_102=0'
+echo 'DENSE_MIXED_WORKLOAD_MATCHER=0'
+echo 'SECOND_TENSOR_IR_1_3_102=0'
+echo 'WHEELCHAIR_TENSOR_FACT_AGING_1_3_102_BUILD=PASS'
+
+# 1.3.102 execution-realization aging. Invocation affinity is a launch fact, not
+# a compiler-host lifetime fact. Tensor/Field expose arbitrary cardinality with
+# balanced ownership intervals; General exposes ready siblings before consuming
+# local continuation work. No scheduler, worker pool or workload route is added.
+grep -q '^.equ PR_INVOCATION_AFFINITY_REFRESHES_EXECUTION_ADMISSION,1$' compiler/physical_reality.inc
+grep -q '^.equ PR_COMPILE_HOST_WIDTH_IS_IMAGE_AUTHORITY,0$' compiler/physical_reality.inc
+grep -q '^.equ PR_ADMISSION_FAILURE_USES_COMPILE_HOST_WIDTH,0$' compiler/physical_reality.inc
+grep -q '^.equ PR_STATIC_PLACEMENT_INTERSECTS_INVOCATION_AFFINITY,1$' compiler/physical_reality.inc
+grep -q '^.equ PR_STATIC_PLACEMENT_MAY_EXPAND_INVOCATION_AFFINITY,0$' compiler/physical_reality.inc
+grep -q '^.equ PR_STRICT_REDUCTION_INVARIANT_TO_EXECUTION_CARDINALITY,1$' compiler/physical_reality.inc
+grep -q '^.equ PR_ARBITRARY_CARDINALITY_LAUNCH_FRONTIER,1$' compiler/physical_reality.inc
+grep -q '^.equ PR_POWER_OF_TWO_LAUNCH_FRONTIER,0$' compiler/physical_reality.inc
+grep -q '^.equ PR_COMPLETION_LOCAL_SIBLING_EXPOSURE,1$' compiler/physical_reality.inc
+grep -q '^.macro CONSTRAIN_STATIC_PLACEMENT_WITHIN_INVOCATION required, mask_bytes, mask$' runtime/execution_admission_refresh_x86_64.inc
+grep -q '^.macro REFRESH_EXECUTION_ADMISSION target$' runtime/execution_admission_refresh_x86_64.inc
+for S in runtime/tensor_runtime_x86_64.S runtime/field_runtime_512_x86_64.S runtime/field_runtime_256_x86_64.S; do
+  grep -q 'CONSTRAIN_STATIC_PLACEMENT_WITHIN_INVOCATION static_placement_required_patch, static_placement_mask_bytes_patch, static_placement_mask_patch' "$S"
+  grep -q 'REFRESH_EXECUTION_ADMISSION execution_admission_patch' "$S"
+  sed -n '/^run_region_frontier:/,/^# reduce_region_results/p' "$S" > "$BUILD/frontier_13102.tmp"
+  ! grep -Eq '[[:space:]]bsr[[:space:]]' "$BUILD/frontier_13102.tmp"
+done
+rm -f "$BUILD/frontier_13102.tmp"
+grep -q 'sub rsp,REDUCE_LEVELS\*8+16' runtime/tensor_runtime_x86_64.S
+grep -q 'mov r15,rax.*callee-saved descriptor identity' runtime/tensor_runtime_x86_64.S
+! grep -q '\[rsp+16\].*descriptor' runtime/tensor_runtime_x86_64.S
+grep -q '^gr_read_invocation_admission:$' runtime/general_parallel_release_x86_64.S
+grep -q '^.gpc_ready_exposed:$' runtime/general_parallel_release_x86_64.S
+! grep -q 'cmp dword ptr \[rip+execution_admission_capacity\],1' compiler/general_frontend_x86_64.S
+! grep -RqsE 'runtime_(ready_queue|work_steal)|g_(ready_queue|work_steal)|worker_pool|cross_axis|high_entropy_sparse_perm' compiler runtime surface tools
+echo 'INVOCATION_BOUND_EXECUTION_ADMISSION_1_3_102=PASS'
+echo 'STATIC_PLACEMENT_INVOCATION_INTERSECTION_1_3_102=PASS'
+echo 'STRICT_REDUCTION_EXECUTION_CARDINALITY_INVARIANT_1_3_102=PASS'
+echo 'POWER_OF_TWO_LAUNCH_FRONTIER_1_3_102=0'
+echo 'COMPLETION_LOCAL_SIBLING_EXPOSURE_1_3_102=PASS'
+echo 'RUNTIME_READY_QUEUE_1_3_102=0'
+echo 'WORK_STEALING_1_3_102=0'
+echo 'WHEELCHAIR_1_3_102_BUILD=PASS'

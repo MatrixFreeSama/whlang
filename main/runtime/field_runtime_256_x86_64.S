@@ -1,4 +1,5 @@
 .intel_syntax noprefix
+.include "runtime/execution_admission_refresh_x86_64.inc"
 .include "compiler/field_runtime_capacity.inc"
 .include "compiler/native256_physical_profile.inc"
 
@@ -86,16 +87,9 @@ _start:
 .fabric_admission_done:
     # 1.3.87 one-shot AOT silicon placement. Outward executions inherit this
     # exact admitted LLC-domain mask; no runtime work/resource matching exists.
-    cmp dword ptr [rip+static_placement_required_patch],0
-    je .static_placement_done
-    mov esi,dword ptr [rip+static_placement_mask_bytes_patch]
-    test esi,esi
-    jz .static_placement_done
-    mov eax,SYS_sched_setaffinity
-    xor edi,edi
-    lea rdx,[rip+static_placement_mask_patch]
-    syscall
-.static_placement_done:
+    # AOT locality may narrow, but never expand, the external invocation domain.
+    CONSTRAIN_STATIC_PLACEMENT_WITHIN_INVOCATION static_placement_required_patch, static_placement_mask_bytes_patch, static_placement_mask_patch
+    REFRESH_EXECUTION_ADMISSION execution_admission_patch
     mov r15,rsp
     mov rax,[r15]
     mov ecx,dword ptr [rip+field_count_patch]
@@ -1564,19 +1558,11 @@ run_region_frontier:
     cmp rax,1
     jbe .frf_leaf
 
-    # Same canonical power-of-two split geometry as the old reduction tree, but
-    # only for outward ownership exposure.  Profitability was already collapsed
-    # into field_chunk_elements_patch by field_derive_launch_leaf_geometry.
-    mov r15,rax
-    bsr rcx,r15
-    mov r8,1
-    shl r8,cl
-    cmp r8,r15
-    jne .frf_split_ready
+    # Profitability was already collapsed into field_chunk_elements_patch.
+    # Expose actual cardinality directly: no inherited binary reduction geometry.
+    mov r8,rax
+    inc r8
     shr r8,1
-.frf_split_ready:
-    test r8,r8
-    jz .bad_args
     lea rbx,[r13+r8]              # right ownership region begins here
 
     # The right-subtree start is unique and becomes the permanent result/stack

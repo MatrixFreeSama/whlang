@@ -2255,6 +2255,31 @@ recip_pow2_f64_bits:
     mov edx,1
     ret
 
+# Tolerant reciprocal of one finite normal f64 literal.  This is a compile-time
+# relation only: tolerant mode has already authorized the single-rounding
+# reciprocal scale, while strict mode never calls this helper.
+# rax=literal bits -> rax=round(1.0/literal) bits, edx=0 success.
+recip_tolerant_f64_bits:
+    mov rcx,rax
+    mov rdx,rcx
+    shr rdx,52
+    and edx,0x7ff
+    test edx,edx
+    jz .rtf_no                     # zero/subnormal stays on semantic div path
+    cmp edx,0x7ff
+    je .rtf_no                     # inf/NaN stays on semantic div path
+    movq xmm0,rcx
+    mov rdx,0x3ff0000000000000
+    movq xmm1,rdx
+    divsd xmm1,xmm0
+    movq rax,xmm1
+    xor edx,edx
+    ret
+.rtf_no:
+    xor eax,eax
+    mov edx,1
+    ret
+
 # recip_u64_down_f64_bits(rax=positive u64 <2^48) -> reciprocal bits, edx=0.
 # One ulp is deliberately subtracted so the estimate cannot overshoot floor(x/d).
 recip_u64_down_f64_bits:
@@ -5839,6 +5864,308 @@ vec_mixed_emit_all:
     pop rbx
     ret
 
+# Find one generic mixed-radix CoordinateFact by exact root stride.
+# rdi=stride -> eax=slot or -1.  Duplicate strides naturally fail the complete
+# chain proof below because not every fact can then be consumed exactly once.
+vec_mixed_find_stride:
+    xor ecx,ecx
+.vmfs_loop:
+    cmp ecx,dword ptr [rip+vec_mixed_count]; jae .vmfs_no
+    lea rax,[rip+vec_mixed_stride]
+    cmp qword ptr [rax+rcx*8],rdi; je .vmfs_yes
+    inc ecx
+    jmp .vmfs_loop
+.vmfs_yes:
+    mov eax,ecx
+    ret
+.vmfs_no:
+    mov eax,-1
+    ret
+
+# Prove that all live mixed CoordinateFacts are one contiguous static radix
+# chain rooted at stride one.  This is the exact algebra of a mixed-radix
+# counter, independent of source/workload names.  Finite radices must be at
+# least one physical vector wide so each packet can carry at most once.
+# Find the direct finite residue root % extent among mixed CoordinateFacts.
+# rdi=extent -> eax=slot or -1.  This relates an unbounded quotient root/extent
+# to an already-owned phase fact without introducing a second coordinate IR.
+vec_mixed_find_direct_residue:
+    xor ecx,ecx
+.vmfdr_loop:
+    cmp ecx,dword ptr [rip+vec_mixed_count]; jae .vmfdr_no
+    lea rax,[rip+vec_mixed_stride]
+    cmp qword ptr [rax+rcx*8],1; jne .vmfdr_next
+    lea rax,[rip+vec_mixed_extent]
+    cmp qword ptr [rax+rcx*8],rdi; je .vmfdr_yes
+.vmfdr_next:
+    inc ecx
+    jmp .vmfdr_loop
+.vmfdr_yes:
+    mov eax,ecx
+    ret
+.vmfdr_no:
+    mov eax,-1
+    ret
+
+vec_mixed_chain_preflight:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    cmp dword ptr [rip+vec_mixed_count],0
+    je .vmcp_no
+    mov r12,1                     # expected stride
+    xor r13d,r13d                 # radix depth
+    xor r15d,r15d                 # participating slot mask
+.vmcp_loop:
+    mov rdi,r12
+    call vec_mixed_find_stride
+    cmp eax,-1; je .vmcp_finish
+    mov r14d,eax
+    bts r15d,r14d
+    lea rax,[rip+vec_mixed_extent]
+    mov rcx,qword ptr [rax+r14*8]
+    test rcx,rcx; jz .vmcp_finish
+    test r13d,r13d
+    jnz .vmcp_outer_extent
+    cmp rcx,TENSOR_PHYSICAL_LANES
+    jb .vmcp_no                   # inner digit could carry more than once
+    jmp .vmcp_extent_ok
+.vmcp_outer_extent:
+    cmp rcx,2
+    jb .vmcp_no
+.vmcp_extent_ok:
+    mov rax,r12
+    mul rcx
+    test rdx,rdx; jnz .vmcp_finish
+    mov r12,rax
+    inc r13d
+    jmp .vmcp_loop
+.vmcp_finish:
+    mov eax,r15d
+    jmp .vmcp_done
+.vmcp_no:
+    xor eax,eax
+.vmcp_done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+# Emit one packet step for a proven complete mixed-radix chain.  The lowest
+# digit receives +lanes.  For each finite digit, (digit-extent)>>63 is exactly
+# one when no carry occurred and zero when it wrapped; the next digit therefore
+# advances by 1-no_carry.  One short-lived vector carries that proof through the
+# chain.  No division, reciprocal, radix table, runtime selector, or alternate
+# IR exists in the generated hot loop.
+vec_mixed_emit_step_chain:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    push rdi                       # participating slot mask
+    call vec_alloc
+    cmp eax,-1; je .vmesc_fail
+    mov r15d,eax                  # per-lane no-carry proof
+    mov r12,1                     # expected stride
+    xor r13d,r13d
+.vmesc_loop:
+    mov rdi,r12
+    call vec_mixed_find_stride
+    cmp eax,-1; je .vmesc_ok
+    mov ebx,eax
+    mov eax,dword ptr [rsp]
+    bt eax,ebx
+    jnc .vmesc_ok
+    lea rax,[rip+vec_mixed_reg]
+    mov r14d,dword ptr [rax+rbx*4]
+
+    test r13d,r13d
+    jnz .vmesc_outer
+    mov rsi,TENSOR_PHYSICAL_LANES
+    call vec_const_intern
+    cmp eax,-1; je .vmesc_free_fail
+    mov edx,eax; mov edi,r14d; mov esi,r14d
+    call vec_vpaddq_mem_const
+    test eax,eax; jnz .vmesc_free_fail
+    jmp .vmesc_after_advance
+
+.vmesc_outer:
+    # digit += 1 - previous_no_carry
+    mov rsi,1
+    call vec_const_intern
+    cmp eax,-1; je .vmesc_free_fail
+    mov edx,eax; mov edi,r14d; mov esi,r14d
+    call vec_vpaddq_mem_const
+    test eax,eax; jnz .vmesc_free_fail
+    mov edi,0xFB; mov esi,r14d; mov edx,r14d; mov ecx,r15d; mov r8d,1
+    call vec_vex2_rrr
+
+.vmesc_after_advance:
+    lea rax,[rip+vec_mixed_extent]
+    mov rcx,qword ptr [rax+rbx*8]
+    test rcx,rcx; jz .vmesc_ok
+    mov rax,rcx
+    neg rax
+    mov rsi,rax
+    call vec_const_intern
+    cmp eax,-1; je .vmesc_free_fail
+    mov edx,eax; mov edi,r15d; mov esi,r14d
+    call vec_vpaddq_mem_const      # temp = digit - extent
+    test eax,eax; jnz .vmesc_free_fail
+    mov edi,r14d; mov esi,r14d; mov edx,r14d; mov ecx,r15d
+    call vec_vpminuq               # exact wrapped digit
+    mov edi,r15d; mov esi,r15d; mov edx,63
+    call vec_vpsrlq_imm            # 1=no carry, 0=carry
+    test eax,eax; jnz .vmesc_free_fail
+    mov rax,r12
+    lea rcx,[rip+vec_mixed_extent]
+    mov rcx,qword ptr [rcx+rbx*8]
+    mul rcx
+    test rdx,rdx; jnz .vmesc_ok
+    mov r12,rax
+    inc r13d
+    jmp .vmesc_loop
+
+.vmesc_ok:
+    mov edi,r15d; call vec_free
+    xor eax,eax
+    jmp .vmesc_done
+.vmesc_free_fail:
+    mov edi,r15d; call vec_free
+.vmesc_fail:
+    mov eax,1
+.vmesc_done:
+    add rsp,8
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+# Advance persistent mixed-radix facts from their previous packet when the
+# coordinate is the direct finite residue root % extent.  The physical root
+# advances by exactly TENSOR_PHYSICAL_LANES, so this fact has one exact ring
+# recurrence: next=(current+delta) mod extent, delta=lanes mod extent.  General
+# strided mixed coordinates retain the mature exact decode below; no workload,
+# radix table, or runtime selector participates.
+vec_mixed_emit_step:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    call vec_mixed_chain_preflight
+    push rax                       # slots already advanced by chain recurrence
+    test eax,eax; jz .vmes_fallback
+    mov edi,eax
+    call vec_mixed_emit_step_chain
+    test eax,eax; jnz .vmes_fail
+.vmes_fallback:
+    xor ebx,ebx
+.vmes_loop:
+    cmp ebx,dword ptr [rip+vec_mixed_count]; jae .vmes_ok
+    mov eax,dword ptr [rsp]
+    bt eax,ebx
+    jc .vmes_next
+    lea rax,[rip+vec_mixed_reg]; mov r12d,dword ptr [rax+rbx*4]
+    lea rax,[rip+vec_mixed_stride]; mov r13,qword ptr [rax+rbx*8]
+    lea rax,[rip+vec_mixed_extent]; mov r14,qword ptr [rax+rbx*8]
+
+    # An unbounded quotient floor(root/stride) is not independent of a live
+    # direct residue root%stride.  After the chain has advanced that residue by
+    # one packet, residue<lanes is exactly the per-lane quotient carry.
+    test r14,r14; jnz .vmes_not_unbounded
+    cmp r13,TENSOR_PHYSICAL_LANES; jb .vmes_decode
+    mov rdi,r13
+    call vec_mixed_find_direct_residue
+    cmp eax,-1; je .vmes_decode
+    mov ecx,dword ptr [rsp]
+    bt ecx,eax
+    jnc .vmes_decode               # residue must already be chain-advanced
+    mov r15d,eax
+    lea rax,[rip+vec_mixed_reg]
+    mov r15d,dword ptr [rax+r15*4]
+    call vec_alloc
+    cmp eax,-1; je .vmes_fail
+    mov r14d,eax
+    mov rsi,-TENSOR_PHYSICAL_LANES
+    call vec_const_intern
+    cmp eax,-1; je .vmes_quot_free_fail
+    mov edx,eax; mov edi,r14d; mov esi,r15d
+    call vec_vpaddq_mem_const      # new residue - lanes
+    test eax,eax; jnz .vmes_quot_free_fail
+    mov edi,r14d; mov esi,r14d; mov edx,63
+    call vec_vpsrlq_imm            # 1 exactly on wrapped lanes
+    test eax,eax; jnz .vmes_quot_free_fail
+    mov edi,0xD4; mov esi,r12d; mov edx,r12d; mov ecx,r14d; mov r8d,1
+    call vec_vex2_rrr              # quotient += carry
+    mov edi,r14d; call vec_free
+    jmp .vmes_next
+.vmes_quot_free_fail:
+    mov edi,r14d; call vec_free
+    jmp .vmes_fail
+.vmes_not_unbounded:
+    cmp r13,1; jne .vmes_decode
+    test r14,r14; jz .vmes_decode
+
+    # delta = physical lanes mod extent.  Because current<extent and
+    # delta<extent, one unsigned min against current+delta-extent performs the
+    # complete exact wrap for every lane.
+    mov rax,TENSOR_PHYSICAL_LANES
+    xor edx,edx
+    div r14
+    test rdx,rdx; jz .vmes_next
+    mov r15,rdx
+    mov rsi,r15; call vec_const_intern
+    cmp eax,-1; je .vmes_fail
+    mov edx,eax; mov edi,r12d; mov esi,r12d
+    call vec_vpaddq_mem_const
+    test eax,eax; jnz .vmes_fail
+
+    call vec_alloc
+    cmp eax,-1; je .vmes_fail
+    mov r15d,eax
+    mov rax,r14
+    neg rax
+    mov rsi,rax; call vec_const_intern
+    cmp eax,-1; je .vmes_free_fail
+    mov edx,eax; mov edi,r15d; mov esi,r12d
+    call vec_vpaddq_mem_const
+    test eax,eax; jnz .vmes_free_fail
+    mov edi,r12d; mov esi,r12d; mov edx,r12d; mov ecx,r15d
+    call vec_vpminuq
+    mov edi,r15d; call vec_free
+    jmp .vmes_next
+
+.vmes_decode:
+    mov edi,r12d; mov rsi,r13; mov rdx,r14
+    call vec_mixed_emit_one
+    test eax,eax; jnz .vmes_fail
+.vmes_next:
+    inc ebx
+    jmp .vmes_loop
+.vmes_free_fail:
+    mov edi,r15d; call vec_free
+.vmes_fail:
+    mov eax,1
+    jmp .vmes_done
+.vmes_ok:
+    xor eax,eax
+.vmes_done:
+    add rsp,8
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
 # Dense coordinate induction carriers are separate from body-local CSE.
 # get_reg(rdi=shift,rsi=mask) -> eax=ZMM16..25 or -1.
 # Carriers are admitted only when their recurrence masks fit a single imm32;
@@ -6150,14 +6477,14 @@ vec_dense_scaled_get_reg:
     inc r13d; jmp .vdsg_find
 .vdsg_add:
     cmp ecx,6; jae .vdsg_fail
+    mov r13d,ecx                 # logical scaled-fact slot survives physical-reg allocation
     call vec_cache_reg_alloc
     cmp eax,-1; je .vdsg_fail
     mov r15d,eax
-    mov r13d,ecx
     lea rax,[rip+vec_dense_scaled_slot]; mov dword ptr [rax+r13*4],ebx
     lea rax,[rip+vec_dense_scaled_coeff]; mov qword ptr [rax+r13*8],r12
     lea rax,[rip+vec_dense_scaled_reg]; mov dword ptr [rax+r13*4],r15d
-    inc ecx; mov dword ptr [rip+vec_dense_scaled_count],ecx
+    lea eax,[r13d+1]; mov dword ptr [rip+vec_dense_scaled_count],eax
 .vdsg_found:
     lea rax,[rip+vec_dense_scaled_reg]
     mov eax,dword ptr [rax+r13*4]
@@ -6198,6 +6525,28 @@ vec_mixed_scaled_refresh:
     mov edi,r14d; mov esi,r15d; mov rdx,r13
     call vec_mul_const_strength
     test eax,eax; jz .vmsr_next
+
+    # CoordinateFact precision propagates into its scaled carrier.  If the
+    # complete finite range proves coefficient*coordinate < 2^32, the existing
+    # AVX-512F widened-u32 multiply is the exact physical operation; paying for
+    # a native i64 multiply would carry bits that the semantics prove absent.
+    lea rax,[rip+vec_mixed_extent]
+    mov rcx,qword ptr [rax+r12*8]
+    test rcx,rcx; jz .vmsr_i64
+    dec rcx
+    mov rax,rcx
+    mul r13
+    test rdx,rdx; jnz .vmsr_i64
+    mov rcx,0x100000000
+    cmp rax,rcx; jae .vmsr_i64
+    mov rsi,r13; call vec_const_intern
+    cmp eax,-1; je .vmsr_fail
+    mov edx,eax; mov edi,r14d; mov esi,r15d
+    call vec_vpmuludq_mem_const
+    test eax,eax; jnz .vmsr_fail
+    jmp .vmsr_next
+
+.vmsr_i64:
     mov rsi,r13; call vec_const_intern
     cmp eax,-1; je .vmsr_fail
     mov edx,eax; mov edi,r14d; mov esi,r15d
@@ -6991,8 +7340,8 @@ vec_dense_emit_inner_step_nocarry:
     call vec_dense_find_shift
     cmp eax,-1; jne .vdeis_have_dense
     # A group may contain only generic mixed-radix facts. Root has already
-    # advanced, so direct refresh is the exact no-carry realization.
-    call vec_mixed_emit_all
+    # advanced; direct residues use their persistent ring recurrence.
+    call vec_mixed_emit_step
     test eax,eax; jnz .vdeis_fail
     call vec_mixed_scaled_refresh
     jmp .vdeis_done_direct
@@ -7009,7 +7358,7 @@ vec_dense_emit_inner_step_nocarry:
     mov edi,ebx; mov rsi,8
     call vec_dense_scaled_emit_delta
     test eax,eax; jnz .vdeis_fail
-    call vec_mixed_emit_all
+    call vec_mixed_emit_step
     test eax,eax; jnz .vdeis_fail
     call vec_mixed_scaled_refresh
 .vdeis_done_direct:
@@ -7420,7 +7769,7 @@ vec_dense_emit_step:
     inc r12d
     jmp .vdes_loop
 .vdes_ok:
-    call vec_mixed_emit_all
+    call vec_mixed_emit_step
     test eax,eax; jnz .vdes_fail
     call vec_mixed_scaled_refresh
     test eax,eax; jnz .vdes_fail
@@ -9384,8 +9733,13 @@ emit_vec_float_accum:
     cmp qword ptr [rbx+32],0; jne .evfa_fallback
     mov rdi,rbx; call expr_literal_f64_bits
     test edx,edx; jnz .evfa_fallback
+    mov r14,rax
     call recip_pow2_f64_bits
+    test edx,edx; jz .evfa_div_scale_ready
+    mov rax,r14
+    call recip_tolerant_f64_bits
     test edx,edx; jnz .evfa_fallback
+.evfa_div_scale_ready:
     mov r14,rax
 .evfa_scaled:
     call vec_alloc
@@ -9702,8 +10056,15 @@ emit_vec_float:
     cmp ebx,0x5E; jne .evf_normal_bin
     mov rdi,r14; call expr_literal_f64_bits
     test edx,edx; jnz .evf_normal_bin
+    mov r12,rax
     call recip_pow2_f64_bits
+    test edx,edx; jz .evf_div_scale_ready
+    cmp dword ptr [rip+tensor_tolerant_fp],0
+    je .evf_normal_bin
+    mov rax,r12
+    call recip_tolerant_f64_bits
     test edx,edx; jnz .evf_normal_bin
+.evf_div_scale_ready:
     mov r12,rax
     mov rdi,r15; mov esi,r13d; call emit_vec_float; test eax,eax; jnz .evf_fail
     mov rsi,r12; call vec_const_get_reg
@@ -10361,6 +10722,17 @@ emit_tensor_image:
     lea rsi,[rip+execution_admission_capacity]
     mov edx,4
     mov r10d,RUNTIME_EXECUTION_ADMISSION_OFF
+    syscall
+    cmp rax,4
+    jne .eti_close_fail
+
+    # Reduction semantics are an AOT contract fact.  Runtime admission may change
+    # ownership multiplicity, never this strict/tolerant mathematical authority.
+    mov eax,SYS_pwrite64
+    mov rdi,rbx
+    lea rsi,[rip+tensor_tolerant_fp]
+    mov edx,4
+    mov r10d,RUNTIME_REDUCTION_TOLERANT_OFF
     syscall
     cmp rax,4
     jne .eti_close_fail

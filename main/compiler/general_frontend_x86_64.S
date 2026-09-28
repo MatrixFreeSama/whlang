@@ -547,17 +547,9 @@ compile_general_source:
     # is defined by its inputs/bindings/outputs; the General backend must not
     # make a nonempty test vector a semantic precondition.
 
-    cmp dword ptr [rip+execution_admission_capacity],1
-    jne .parallel_image
-    xor edi,edi; call g_emit_mov_eax_imm
-    mov edi,0xC3; call g_emit_u8
-    mov rax,[rip+g_code_ptr]
-    mov [rip+g_image_code_ptr],rax
-    mov rcx,[rip+g_emit_ptr]
-    sub rcx,rax
-    mov [rip+g_image_code_len],rcx
-    jmp .write_image
-.parallel_image:
+    # Image form follows the causal graph, never the compiler host's temporary
+    # affinity width. Invocation admission is refreshed by the release itself;
+    # width==1 simply keeps every ready Region local through the same image.
     call g_build_parallel_image
     test eax,eax; jnz .bad
 .write_image:
@@ -9060,11 +9052,9 @@ g_materialize_parallel_code:
     ret
 
 g_build_parallel_image:
-    # Target silicon width is a discovered Physical Reality fact, not a language
-    # cardinality.  Any positive width above the sequential case uses the same
-    # causal image; no historical 256-CPU admission constant survives here.
-    mov eax,dword ptr [rip+execution_admission_capacity]
-    cmp eax,2; jb .gbpi_fail
+    # Causal image identity is independent of compile-host execution width.
+    # Runtime invocation admission decides only how many ready x86 Regions may
+    # be simultaneously materialized; it never selects a second semantic image.
     cmp dword ptr [rip+g_fragment_count],0; je .gbpi_fail
     call g_build_causal_graph
     test eax,eax; jnz .gbpi_fail

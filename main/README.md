@@ -1,6 +1,6 @@
-# Wheelchair 1.3.98
+# Wheelchair 1.3.102
 
-![Build](https://img.shields.io/badge/build-26%2F26%20PASS-brightgreen) ![Release](https://img.shields.io/badge/release-1.3.98-blue)
+![Build](https://img.shields.io/badge/build-27%2F27%20PASS-brightgreen) ![Release](https://img.shields.io/badge/release-1.3.102-blue)
 
 Wheelchair is an HPC- and simulation-first general-purpose AOT language built around Rank-N semantics, matrix-free execution, ValueFacts, StateFacts, AddressFacts, RegionFacts, CoordinateFacts, GroupFact, Physical Reality, Traffic Reality, Silicon Domain Graphs, and Physical DAG execution.
 
@@ -12,6 +12,38 @@ physical work / mathematical-physical lower bound -> 1
 
 Idle silicon is valid whenever another materialization costs more than the remaining necessary work.
 
+
+## 1.3.102: execution admission becomes an invocation fact
+
+Execution expansion no longer treats compiler-host CPU width as permanent image authority. At launch, Wheelchair reads the invocation's admitted affinity domain once; AOT static placement may only intersect that domain, never widen it. Tensor and Field expose arbitrary-cardinality ownership without the old power-of-two launch frontier, while General exposes completion-local ready siblings without adding a global ready queue, worker pool or work stealing.
+
+Strict Tensor arithmetic is now independent of execution cardinality: ownership may change across 1/2/3/4/5 admitted CPUs, but the canonical pairwise reduction tree does not. Tolerance retains its explicit permission to condense arithmetic across ownership regions.
+
+On the Cross-Axis diagnostic, correcting a 5-way compiled admission running inside a 4-CPU invocation raised observed slot occupancy from about **84% to 94%** and cut an intermediate candidate from about **823.7 ms to 751.0 ms** before the final Strict canonical-tree repair. Final Tolerance A/B against 1.3.101 measured about **1.054x** in a five-round paired run. On the low-arithmetic high-entropy permutation probe, a fresh three-round Strict check measured about **71.1 ms** for Wheelchair 1.3.102 versus **181.8 ms C** and **216.9 ms Fortran**, with bit-identical checksums in that run.
+
+No idle-CPU query, workload matcher, source kernel, JIT path, runtime scheduler, worker pool, second Tensor IR, or DSL execution surface is added.
+
+## 1.3.101: fact identity and tolerance realization age into one path
+
+Scaled `CoordinateFact` allocation no longer lets the physical ZMM allocator overwrite the logical fact-table slot. The repair restores the existing ownership pool instead of adding another carrier family. Separately, Tolerance mode now consumes its already-declared permission for division by a finite normal compile-time literal: one reciprocal is formed at AOT time and the existing multiply/FMA path is emitted. Strict never enters this relation and preserves its original rounding boundaries.
+
+On the same 100%-connected `8192 x 127 x 127` Dense Permuted All-Pairs probe, 31 paired four-core Strict rounds show a conservative paired-ratio median of **1.005x** (medians 249.973 -> 243.187 ms). Twenty-five paired Tolerance rounds improve 231.083 -> 221.466 ms with a paired-ratio median of **1.084x**. Single-core medians improve 749.714 -> 740.505 ms in Strict and 757.966 -> 681.198 ms in Tolerance. The Tolerance image's six `vdivpd` instructions fall to zero.
+
+No workload matcher, `fast-math` bundle, source kernel, JIT path, runtime radix selector, worker model, or second Tensor IR is added.
+
+## 1.3.100: mixed-radix CoordinateFacts become packet-persistent
+
+The non-power-of-two coordinate path now keeps a single static mixed-radix carry recurrence across vector packets. Finite digits advance by packet width and exact wrap; outer digits consume the carry fact, and a live quotient reuses the already-owned residue wrap instead of rebuilding division from the physical root. This removes repeated integer reciprocal work without adding a workload matcher, runtime radix selector, alternate tensor IR, or parallel-language mechanism.
+
+On the same 100%-connected `8192 x 127 x 127` Dense Permuted All-Pairs probe, a 21-round four-core Strict A/B improves the median from **267.034 ms** in 1.3.99 to **243.331 ms** in the 1.3.100 candidate (**1.097x**). Fast A/B improves **295.857 ms -> 265.949 ms** (**1.112x**). Generated hot code falls from **5497 B to 5249 B**; static `vpmuludq` count falls **84 -> 75** and ZMM moves **172 -> 153**. Sampled Strict outputs remain bit-identical.
+
+## 1.3.99: mixed-radix CoordinateFacts stop rebuilding coordinates
+
+Tensor/Topology lowering now carries non-power-of-two static coordinates as the same kind of persistent physical fact already used by dense Rank-N execution. Constant `div/mod` in a compile-time-proven `<2^32` domain is realized with exact integer reciprocal-high arithmetic and one correction; the former int-to-float reciprocal round trip disappears from that domain. Literal-scaled coordinates share the existing scaled CoordinateFact ownership table instead of receiving a workload-specific optimizer.
+
+On the dense 100%-connected `8192 x 127 x 127` permuted all-pairs probe, 9 interleaved four-core rounds improve Strict from **641.747 ms** in 1.3.98 to **259.110 ms** in 1.3.99 (**2.477x**, **59.6%** lower wall time), and Fast from **660.481 ms** to **257.937 ms** (**2.561x**, **60.9%** lower wall time). Same-run controls measure 222.339/208.940 ms for C Strict/Fast and 230.461/215.541 ms for Fortran Strict/Fast. The repair changes coordinate materialization, not source semantics; sampled Strict checksums remain bit-identical to 1.3.98.
+
+No benchmark matcher, source kernel, worker model, runtime radix selector, second Tensor IR, or DSL execution surface is added.
 
 ## 1.3.98: constant modulo joins one integer Physical Reality
 
@@ -96,6 +128,6 @@ bin/fieldc INPUT.json -o OUTPUT
 
 ## Release authority
 
-The current release gate contains **26 tests**. Production authority remains under `compiler/`, `runtime/`, `surface/`, `tools/`, `build.sh`, and generated `bin/` executables. `devtrash/` contains regression, benchmark, historical, and archaeological material only.
+The current release gate contains **27 tests**. Production authority remains under `compiler/`, `runtime/`, `surface/`, `tools/`, `build.sh`, and generated `bin/` executables. `devtrash/` contains regression, benchmark, historical, and archaeological material only.
 
-See `ARCHITECTURE_AGING_1_3_98.md`, `PERFORMANCE_1_3_98.md`, `TESTING_1_3_98.md`, `PURE_ASSEMBLY_RELEASE_PROOF_1_3_98.md`, `RELEASE_SURFACE_CONVERGENCE_1_3_98.md`, and `WHEELCHAIR_CHARTER_1_3_98.md`.
+See `ARCHITECTURE_AGING_1_3_102.md`, `PERFORMANCE_1_3_102.md`, `TESTING_1_3_102.md`, `PURE_ASSEMBLY_RELEASE_PROOF_1_3_102.md`, `RELEASE_SURFACE_CONVERGENCE_1_3_102.md`, and `WHEELCHAIR_CHARTER_1_3_102.md`.
