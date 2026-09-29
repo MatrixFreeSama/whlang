@@ -1,0 +1,12 @@
+program high_entropy_sparse_permutation_reduction
+strict
+input n: u64 range 1024..100000000
+field x[i in n]: f64 = -0.5 + cast(f64, (i * 2654435761 + 2246822519) % 8192) / 4096.0
+sum checksum[i in n]: f64 =
+    x[(i * 97 + 17) % n]
+  - 0.5 * x[(i * 193 + 31) % n]
+  + 0.25 * x[(i * 389 + 47) % n]
+  - 0.125 * x[(i * 769 + 71) % n]
+  + 0.0625 * x[(i * 1543 + 101) % n]
+  - 0.03125 * x[(i * 3079 + 131) % n]
+output checksum
