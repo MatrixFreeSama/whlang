@@ -13,15 +13,15 @@
 
 Wheelchair targets the same broad numerical-computing territory as C and Fortran, but it does not start from a mandatory sequential instruction stream and then try to recover parallelism afterward. Its compiler treats mathematical structure, value identity, causal dependence, precision, locality, and physical realization as first-class compile-time information.
 
-> Current release: **1.3.98**  
+> Current release: **1.3.102**  
 > Target: **Linux x86-64, static ELF64**  
 > Source surfaces: **WH (`.wh`)** and **WHEX (`.whex`)**  
-> [Download Wheelchair 1.3.98](./dist/Wheelchair-1.3.98.zip)
+> [Download Wheelchair 1.3.102](./dist/Wheelchair-1.3.102.zip)
 
 Archive SHA-256:
 
 ```text
-9943448a486c4dd52733ea7a18a7149fd28259005d05d79c0448a40e44b72cd0
+e569f0b4c988467658402561f4b993325d9727dc4e59e61322d247591b079bf1
 ```
 
 ---
@@ -179,6 +179,49 @@ The project deliberately accepts local performance imperfections when the altern
 
 ---
 
+## Primary target: physical-work inflation
+
+Wheelchair is primarily aimed at the gap between **necessary work** and **actual physical work**. Dense, regular kernels can already be close to their necessary arithmetic and memory work, leaving relatively little removable overhead. The more characteristic Wheelchair target is the opposite regime: useful arithmetic is thin, while indexing, reconstruction, transport, synchronization, rematerialization, or execution-context work makes the machine perform substantially more work than the mathematical relation itself requires.
+
+The optimization objective is therefore not maximum hardware occupancy. It is to push actual realization toward the necessary relation:
+
+```text
+necessary mathematical / causal work
+            ↓
+     semantic and physical facts
+            ↓
+ remove avoidable physical work
+            ↓
+actual machine work → necessary work
+```
+
+A processor can be highly occupied while spending much of that occupancy on work that does not advance the necessary result. Conversely, lower occupancy can be desirable when the same result is reached earlier with less total CPU time.
+
+### Representative benchmark: high-entropy, low-arithmetic-density reduction
+
+Wheelchair 1.3.102 was tested against native GCC C and GFortran on **High-Entropy Sparse Permutation Reduction**. Each logical element performs only a small amount of useful floating-point arithmetic but evaluates six unrelated long-distance affine permutations modulo runtime `n`. The formal run uses `n = 50,000,000` to stabilize timing; the arithmetic density per logical element remains deliberately low.
+
+The controls are normal compiler-generated native implementations, not hand-written assembly or AVX intrinsics: GCC/GFortran use `-O3 -march=native -fopenmp`; Strict additionally uses `-fno-fast-math -ffp-contract=off`, while the aggressive controls use `-ffast-math`. Runs are pinned to CPUs 0-3 with `OMP_WAIT_POLICY=PASSIVE`. Seven interleaved measured rounds produced identical checksum bits across all six implementations.
+
+The host exposed five logical CPUs, while the benchmark was restricted to four. `Task-Manager equivalent` therefore uses the whole-machine convention where five visible logical CPUs are 100%; the benchmark's display ceiling is 80%.
+
+| Contract / implementation | Wall time | Process-tree CPU time | 4-core slot occupancy | Task-Manager equivalent |
+|---|---:|---:|---:|---:|
+| **Wheelchair Strict** | **53.160 ms** | **120 ms** | 57.9% | **46.3%** |
+| GCC C Strict | 192.998 ms | 700 ms | 90.7% | 72.5% |
+| GFortran Strict | 205.297 ms | 720 ms | 84.0% | 67.2% |
+| **Wheelchair Tolerance** | **30.674 ms** | **80 ms** | 65.2% | **52.2%** |
+| GCC C Fast | 208.127 ms | 730 ms | 87.7% | 70.1% |
+| GFortran Fast | 195.657 ms | 680 ms | 86.9% | 69.5% |
+
+In Strict mode on this host, Wheelchair finishes **3.63× faster than the GCC C control** and **3.86× faster than the GFortran control**, while the C and Fortran controls consume **5.83×** and **6.00×** as much process CPU time respectively. Wheelchair's measured CPU occupancy is lower, so this is not a hardware-saturation win.
+
+This benchmark is a representative witness of **physical-work inflation**, not an absolute proof of a universal theoretical lower bound and not a universal language ranking. The narrower claim is that, for this matched high-entropy/runtime-modulo workload, the conventional native controls consume substantially more physical CPU work for the same result.
+
+[Benchmark sources, controls, raw rounds, and summary](./benchmarks/high_entropy_sparse_permutation_13102/)
+
+---
+
 ## WH and WHEX
 
 Wheelchair currently exposes two source surfaces over the same general architecture.
@@ -257,8 +300,8 @@ WH is the friendlier surface; WHEX is the more explicit structural surface. Both
 The release archive ships prebuilt static compiler binaries under `bin/`.
 
 ```sh
-unzip Wheelchair-1.3.98.zip
-cd Wheelchair-1.3.98
+unzip Wheelchair-1.3.102.zip
+cd Wheelchair-1.3.102
 
 ./bin/wheelchairc surface/examples/equivalent_en.wh -o demo
 ./demo 4
@@ -570,6 +613,7 @@ The table below keeps a small set of benchmark landmarks rather than turning the
 | **1.3.44** | mass3 / chem6 / rigid7 scalar recurrence set | geometric mean Wheelchair = 1.0978× C time; Fortran = 0.9783× C time | Native mathematics generalized while the remaining mature-scalar-codegen gap stayed visible. |
 | **1.3.95** | Strict Field rematch | miniAMR7 6.918 ms vs C 10.938; miniAMR27 22.367 vs C 38.439; miniFE 18.839 vs C 27.844; Clover 18.029 vs C 17.752 | Current Region/ValueFact realization moved three of four matched Field probes ahead of C while keeping Clover essentially tied. |
 | **1.3.97** | mass3 / chem6 / rigid7 Strict, 20M | geometric mean Wheelchair = **1.055× C time**; chem6 124.106 ms vs C 117.507 ms vs Fortran 118.969 ms | Wide scalar carrier use and proved whole-generation authority brought the deep-causal General set back close to mature native scalar controls without a workload-specific backend. |
+| **1.3.102** | High-Entropy Sparse Permutation Reduction, 50M | Strict: Wheelchair 53.160 ms / 120 ms CPU vs C 192.998 ms / 700 ms CPU vs Fortran 205.297 ms / 720 ms CPU | Representative low-arithmetic/high-entropy case: lower occupancy but substantially less physical CPU work for the same checksum. |
 
 All numbers above are **host- and workload-specific measurements**, not universal language rankings. Absolute results depend on CPU, virtualization, affinity, compiler version, frequency behavior, memory system, and problem shape. Raw benchmark and validation material is retained inside the versioned release archives under `devtrash/`.
 
@@ -841,7 +885,7 @@ The 1.3 series moved more decisions into shared semantic and physical facts: whi
 
 ### Historical evidence
 
-The pre-version account comes from the recovered archive's `README.md`, `SPECIFICATION.md`, and compiler sources. The 1.0.0 package's `RELEASE.md` identifies the first public version baseline without claiming architecture completion. Early numbered milestones are retained in `RELEASE_NOTES.md` inside [1.2.0](./dist/Wheelchair-1.2.0.zip) and in `worktree/` inside [1.2.8](./dist/Wheelchair-1.2.8.zip). Later notes and proofs are preserved under `devtrash/history/` and `devtrash/release_history/` in the [current archive](./dist/Wheelchair-1.3.97.zip). This is a reconstruction from surviving artifacts; the date in the pre-version filename does not establish the project's creation date.
+The pre-version account comes from the recovered archive's `README.md`, `SPECIFICATION.md`, and compiler sources. The 1.0.0 package's `RELEASE.md` identifies the first public version baseline without claiming architecture completion. Early numbered milestones are retained in `RELEASE_NOTES.md` inside [1.2.0](./dist/Wheelchair-1.2.0.zip) and in `worktree/` inside [1.2.8](./dist/Wheelchair-1.2.8.zip). Later notes and proofs are preserved under `devtrash/history/` and `devtrash/release_history/` in the [current archive](./dist/Wheelchair-1.3.102.zip). This is a reconstruction from surviving artifacts; the date in the pre-version filename does not establish the project's creation date.
 
 ## Landmark architecture releases
 
