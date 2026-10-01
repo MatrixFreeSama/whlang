@@ -20,8 +20,9 @@
 .equ SYS_getcpu,309
 .equ AT_FDCWD,-100
 .equ O_RDONLY,0
-.equ SD_MASK_BYTES,128
-.equ SD_MASK_BITS,1024
+.equ SD_STATIC_MASK_BYTES,128
+.equ SD_AFFINITY_SEED_BYTES,128
+.equ SD_ERRNO_EINVAL,22
 
 .global silicon_domain_probe
 .global sd_allowed_cpu_count
@@ -239,7 +240,9 @@ sd_record_group:
 .srg_done:
     ret
 .srg_new:
-    cmp r9d,SD_MASK_BITS
+    mov r8,qword ptr [rip+sd_affinity_bytes]
+    shl r8,3
+    cmp r9,r8
     jae .srg_done
     mov dword ptr [rdi+r9*4],eax
     mov dword ptr [rsi+r9*4],1
@@ -268,7 +271,7 @@ sd_choose_preferred_l3_domain:
     mov qword ptr [rip+sd_preferred_l3_mask_bytes],rax
     lea rdi,[rip+sd_preferred_l3_mask]
     xor eax,eax
-    mov ecx,SD_MASK_BYTES/8
+    mov ecx,SD_STATIC_MASK_BYTES/8
     rep stosq
 
     mov r15d,dword ptr [rip+sd_l3_domain_count]
@@ -351,6 +354,55 @@ sd_choose_preferred_l3_domain:
     pop rbx
     ret
 
+# Count external invocation CPUs without imposing the static-placement mask width.
+# The seed grows only when the kernel reports EINVAL for an undersized cpuset.
+# eax=count, with 1 as the conservative syscall-failure fact.
+sd_count_external_affinity:
+    mov r10d,SD_AFFINITY_SEED_BYTES
+.sdcea_probe:
+    sub rsp,r10
+    mov eax,SYS_sched_getaffinity
+    xor edi,edi
+    mov rsi,r10
+    mov rdx,rsp
+    syscall
+    test rax,rax
+    jns .sdcea_have
+    cmp eax,-SD_ERRNO_EINVAL
+    jne .sdcea_fallback_release
+    add rsp,r10
+    shl r10,1
+    jc .sdcea_fallback_noalloc
+    jmp .sdcea_probe
+.sdcea_have:
+    mov r8,rax
+    xor r9d,r9d
+    xor ecx,ecx
+.sdcea_byte:
+    cmp r9,r8
+    jae .sdcea_counted
+    movzx eax,byte ptr [rsp+r9]
+    mov edx,8
+.sdcea_bit:
+    shr al,1
+    adc ecx,0
+    dec edx
+    jnz .sdcea_bit
+    inc r9
+    jmp .sdcea_byte
+.sdcea_counted:
+    test ecx,ecx
+    jnz .sdcea_return_release
+.sdcea_fallback_release:
+    mov ecx,1
+.sdcea_return_release:
+    mov eax,ecx
+    add rsp,r10
+    ret
+.sdcea_fallback_noalloc:
+    mov eax,1
+    ret
+
 # silicon_domain_probe(edi=l1d_share_threads,
 #                      esi=l2_share_threads,
 #                      edx=l3_share_threads)
@@ -388,38 +440,24 @@ silicon_domain_probe:
     mov dword ptr [rip+sd_static_placement_exact],0
     mov dword ptr [rip+sd_static_placement_required],0
 
-    # External admission authority.
+    # External admission authority is unbounded by the static-placement ABI.
+    # A compact baked placement mask remains an optional locality witness only.
+    call sd_count_external_affinity
+    mov r13d,eax
+    mov dword ptr [rip+sd_allowed_cpu_count],r13d
+
     mov eax,SYS_sched_getaffinity
     xor edi,edi
-    mov esi,SD_MASK_BYTES
+    mov esi,SD_STATIC_MASK_BYTES
     lea rdx,[rip+sd_original_mask]
     syscall
     test rax,rax
-    js .sdp_no_affinity
+    js .sdp_topology_mask_unavailable
     mov qword ptr [rip+sd_affinity_bytes],rax
-    mov r12,rax
-    xor r13d,r13d
-    xor r14d,r14d
-    lea r15,[rip+sd_original_mask]
-.sdp_count_byte:
-    cmp r14,r12
-    jae .sdp_count_done
-    movzx ecx,byte ptr [r15+r14]
-    mov edx,8
-.sdp_count_bit:
-    shr cl,1
-    adc r13d,0
-    dec edx
-    jnz .sdp_count_bit
-    inc r14
-    jmp .sdp_count_byte
-.sdp_count_done:
-    test r13d,r13d
-    jnz .sdp_store_allowed
-.sdp_no_affinity:
-    mov r13d,1
-.sdp_store_allowed:
-    mov dword ptr [rip+sd_allowed_cpu_count],r13d
+    jmp .sdp_admission_ready
+.sdp_topology_mask_unavailable:
+    mov qword ptr [rip+sd_affinity_bytes],0
+.sdp_admission_ready:
 
     # Spatial multiplicity and temporal budget are independent. The affinity
     # mask proves the admitted execution-context set. cpu.max is retained in its
@@ -489,9 +527,7 @@ silicon_domain_probe:
     mov dword ptr [rip+sd_probe_failed],0
     xor r12d,r12d                         # Linux CPU id
 .sdp_cpu_loop:
-    cmp r12d,SD_MASK_BITS
-    jae .sdp_restore
-    mov eax,r12d
+        mov eax,r12d
     shr eax,3
     mov r13d,eax                          # byte index
     cmp r13,qword ptr [rip+sd_affinity_bytes]
@@ -511,7 +547,7 @@ silicon_domain_probe:
     mov byte ptr [r11+r13],dl
     mov eax,SYS_sched_setaffinity
     xor edi,edi
-    mov esi,SD_MASK_BYTES
+    mov esi,SD_STATIC_MASK_BYTES
     lea rdx,[rip+sd_probe_mask]
     syscall
     lea r11,[rip+sd_probe_mask]
@@ -566,7 +602,7 @@ silicon_domain_probe:
 .sdp_restore:
     mov eax,SYS_sched_setaffinity
     xor edi,edi
-    mov esi,SD_MASK_BYTES
+    mov esi,SD_STATIC_MASK_BYTES
     lea rdx,[rip+sd_original_mask]
     syscall
     test rax,rax
@@ -611,8 +647,8 @@ sd_cpu_max_path: .asciz "/sys/fs/cgroup/cpu.max"
 .p2align 6
 sd_cpu_max_buf: .skip 64
 .p2align 6
-sd_original_mask: .skip SD_MASK_BYTES
-sd_probe_mask: .skip SD_MASK_BYTES
+sd_original_mask: .skip SD_STATIC_MASK_BYTES
+sd_probe_mask: .skip SD_STATIC_MASK_BYTES
 sd_affinity_bytes: .skip 8
 sd_allowed_cpu_count: .skip 4
 sd_current_cpu: .skip 4
@@ -640,12 +676,12 @@ sd_static_placement_exact: .skip 4
 sd_static_placement_required: .skip 4
 sd_probe_failed: .skip 4
 .p2align 6
-sd_preferred_l3_mask: .skip SD_MASK_BYTES
-sd_cpu_l3_domain_ids: .skip SD_MASK_BITS*4
+sd_preferred_l3_mask: .skip SD_STATIC_MASK_BYTES
+sd_cpu_l3_domain_ids: .skip SD_STATIC_MASK_BYTES*8*4
 .p2align 6
-sd_l1_ids: .skip SD_MASK_BITS*4
-sd_l1_counts: .skip SD_MASK_BITS*4
-sd_l2_ids: .skip SD_MASK_BITS*4
-sd_l2_counts: .skip SD_MASK_BITS*4
-sd_l3_ids: .skip SD_MASK_BITS*4
-sd_l3_counts: .skip SD_MASK_BITS*4
+sd_l1_ids: .skip SD_STATIC_MASK_BYTES*8*4
+sd_l1_counts: .skip SD_STATIC_MASK_BYTES*8*4
+sd_l2_ids: .skip SD_STATIC_MASK_BYTES*8*4
+sd_l2_counts: .skip SD_STATIC_MASK_BYTES*8*4
+sd_l3_ids: .skip SD_STATIC_MASK_BYTES*8*4
+sd_l3_counts: .skip SD_STATIC_MASK_BYTES*8*4

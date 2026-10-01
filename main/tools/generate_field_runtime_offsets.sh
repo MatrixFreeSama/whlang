@@ -25,54 +25,9 @@ va_fabric_entry=$(need field_fabric_activation_entry_patch)
 va_fabric_bridge=$(need field_fabric_activation_bridge_present_patch)
 va_fabric_abi=$(need field_fabric_activation_abi_version_patch)
 va_mask=$(need field_prepare_mask_f32)
-va_pcoords_r1=$(need field_prepare_coords_f32_r1)
-va_offsets_coords_r1=$(need field_compute_offsets_from_coords_f32_r1)
-va_pcoords_r2=$(need field_prepare_coords_f32_r2)
-va_offsets_coords_r2=$(need field_compute_offsets_from_coords_f32_r2)
-va_pcoords_r3=$(need field_prepare_coords_f32_r3)
-va_offsets_coords_r3=$(need field_compute_offsets_from_coords_f32_r3)
-va_pcoords_r4=$(need field_prepare_coords_f32_r4)
-va_offsets_coords_r4=$(need field_compute_offsets_from_coords_f32_r4)
-va_pcoords_r5=$(need field_prepare_coords_f32_r5)
-va_offsets_coords_r5=$(need field_compute_offsets_from_coords_f32_r5)
-va_pcoords_r6=$(need field_prepare_coords_f32_r6)
-va_offsets_coords_r6=$(need field_compute_offsets_from_coords_f32_r6)
-va_pcoords_r7=$(need field_prepare_coords_f32_r7)
-va_offsets_coords_r7=$(need field_compute_offsets_from_coords_f32_r7)
-va_pcoords_r8=$(need field_prepare_coords_f32_r8)
-va_offsets_coords_r8=$(need field_compute_offsets_from_coords_f32_r8)
-va_advance_coords_r1=$(need field_advance_coords_f32_r1)
-va_advance_coords_r2=$(need field_advance_coords_f32_r2)
-va_advance_coords_r3=$(need field_advance_coords_f32_r3)
-va_advance_coords_r4=$(need field_advance_coords_f32_r4)
-va_advance_coords_r5=$(need field_advance_coords_f32_r5)
-va_advance_coords_r6=$(need field_advance_coords_f32_r6)
-va_advance_coords_r7=$(need field_advance_coords_f32_r7)
-va_advance_coords_r8=$(need field_advance_coords_f32_r8)
-va_offsets_r1=$(need field_compute_offsets_f32_r1)
-va_load_r1=$(need field_load_f32_r1)
-va_store_r1=$(need field_store_f32_r1)
-va_offsets_r2=$(need field_compute_offsets_f32_r2)
-va_load_r2=$(need field_load_f32_r2)
-va_store_r2=$(need field_store_f32_r2)
-va_offsets_r3=$(need field_compute_offsets_f32_r3)
-va_load_r3=$(need field_load_f32_r3)
-va_store_r3=$(need field_store_f32_r3)
-va_offsets_r4=$(need field_compute_offsets_f32_r4)
-va_load_r4=$(need field_load_f32_r4)
-va_store_r4=$(need field_store_f32_r4)
-va_offsets_r5=$(need field_compute_offsets_f32_r5)
-va_load_r5=$(need field_load_f32_r5)
-va_store_r5=$(need field_store_f32_r5)
-va_offsets_r6=$(need field_compute_offsets_f32_r6)
-va_load_r6=$(need field_load_f32_r6)
-va_store_r6=$(need field_store_f32_r6)
-va_offsets_r7=$(need field_compute_offsets_f32_r7)
-va_load_r7=$(need field_load_f32_r7)
-va_store_r7=$(need field_store_f32_r7)
-va_offsets_r8=$(need field_compute_offsets_f32_r8)
-va_load_r8=$(need field_load_f32_r8)
-va_store_r8=$(need field_store_f32_r8)
+va_offsets=$(need field_compute_offsets_f32)
+va_load=$(need field_load_f32)
+va_store=$(need field_store_f32)
 va_field_data=$(need g_field_data_ptr)
 va_field_contig=$(need g_field_contig_ptr)
 va_regular_run_end=$(need field_regular_run_end)
@@ -117,54 +72,9 @@ cat > "$OUT" <<EOT
 .equ FIELD_RUNTIME_FABRIC_BRIDGE_PRESENT_OFF, $(to_off "$va_fabric_bridge")
 .equ FIELD_RUNTIME_FABRIC_ACTIVATION_ABI_OFF, $(to_off "$va_fabric_abi")
 .equ FIELD_RUNTIME_MASK_VA, $va_mask
-.equ FIELD_RUNTIME_PREPARE_COORDS_R1_VA, $va_pcoords_r1
-.equ FIELD_RUNTIME_OFFSETS_FROM_COORDS_R1_VA, $va_offsets_coords_r1
-.equ FIELD_RUNTIME_PREPARE_COORDS_R2_VA, $va_pcoords_r2
-.equ FIELD_RUNTIME_OFFSETS_FROM_COORDS_R2_VA, $va_offsets_coords_r2
-.equ FIELD_RUNTIME_PREPARE_COORDS_R3_VA, $va_pcoords_r3
-.equ FIELD_RUNTIME_OFFSETS_FROM_COORDS_R3_VA, $va_offsets_coords_r3
-.equ FIELD_RUNTIME_PREPARE_COORDS_R4_VA, $va_pcoords_r4
-.equ FIELD_RUNTIME_OFFSETS_FROM_COORDS_R4_VA, $va_offsets_coords_r4
-.equ FIELD_RUNTIME_PREPARE_COORDS_R5_VA, $va_pcoords_r5
-.equ FIELD_RUNTIME_OFFSETS_FROM_COORDS_R5_VA, $va_offsets_coords_r5
-.equ FIELD_RUNTIME_PREPARE_COORDS_R6_VA, $va_pcoords_r6
-.equ FIELD_RUNTIME_OFFSETS_FROM_COORDS_R6_VA, $va_offsets_coords_r6
-.equ FIELD_RUNTIME_PREPARE_COORDS_R7_VA, $va_pcoords_r7
-.equ FIELD_RUNTIME_OFFSETS_FROM_COORDS_R7_VA, $va_offsets_coords_r7
-.equ FIELD_RUNTIME_PREPARE_COORDS_R8_VA, $va_pcoords_r8
-.equ FIELD_RUNTIME_OFFSETS_FROM_COORDS_R8_VA, $va_offsets_coords_r8
-.equ FIELD_RUNTIME_ADVANCE_COORDS_R1_VA, $va_advance_coords_r1
-.equ FIELD_RUNTIME_ADVANCE_COORDS_R2_VA, $va_advance_coords_r2
-.equ FIELD_RUNTIME_ADVANCE_COORDS_R3_VA, $va_advance_coords_r3
-.equ FIELD_RUNTIME_ADVANCE_COORDS_R4_VA, $va_advance_coords_r4
-.equ FIELD_RUNTIME_ADVANCE_COORDS_R5_VA, $va_advance_coords_r5
-.equ FIELD_RUNTIME_ADVANCE_COORDS_R6_VA, $va_advance_coords_r6
-.equ FIELD_RUNTIME_ADVANCE_COORDS_R7_VA, $va_advance_coords_r7
-.equ FIELD_RUNTIME_ADVANCE_COORDS_R8_VA, $va_advance_coords_r8
-.equ FIELD_RUNTIME_OFFSETS_R1_VA, $va_offsets_r1
-.equ FIELD_RUNTIME_LOAD_R1_VA, $va_load_r1
-.equ FIELD_RUNTIME_STORE_R1_VA, $va_store_r1
-.equ FIELD_RUNTIME_OFFSETS_R2_VA, $va_offsets_r2
-.equ FIELD_RUNTIME_LOAD_R2_VA, $va_load_r2
-.equ FIELD_RUNTIME_STORE_R2_VA, $va_store_r2
-.equ FIELD_RUNTIME_OFFSETS_R3_VA, $va_offsets_r3
-.equ FIELD_RUNTIME_LOAD_R3_VA, $va_load_r3
-.equ FIELD_RUNTIME_STORE_R3_VA, $va_store_r3
-.equ FIELD_RUNTIME_OFFSETS_R4_VA, $va_offsets_r4
-.equ FIELD_RUNTIME_LOAD_R4_VA, $va_load_r4
-.equ FIELD_RUNTIME_STORE_R4_VA, $va_store_r4
-.equ FIELD_RUNTIME_OFFSETS_R5_VA, $va_offsets_r5
-.equ FIELD_RUNTIME_LOAD_R5_VA, $va_load_r5
-.equ FIELD_RUNTIME_STORE_R5_VA, $va_store_r5
-.equ FIELD_RUNTIME_OFFSETS_R6_VA, $va_offsets_r6
-.equ FIELD_RUNTIME_LOAD_R6_VA, $va_load_r6
-.equ FIELD_RUNTIME_STORE_R6_VA, $va_store_r6
-.equ FIELD_RUNTIME_OFFSETS_R7_VA, $va_offsets_r7
-.equ FIELD_RUNTIME_LOAD_R7_VA, $va_load_r7
-.equ FIELD_RUNTIME_STORE_R7_VA, $va_store_r7
-.equ FIELD_RUNTIME_OFFSETS_R8_VA, $va_offsets_r8
-.equ FIELD_RUNTIME_LOAD_R8_VA, $va_load_r8
-.equ FIELD_RUNTIME_STORE_R8_VA, $va_store_r8
+.equ FIELD_RUNTIME_OFFSETS_VA, $va_offsets
+.equ FIELD_RUNTIME_LOAD_VA, $va_load
+.equ FIELD_RUNTIME_STORE_VA, $va_store
 .equ FIELD_RUNTIME_FIELD_DATA_PTR_VA, $va_field_data
 .equ FIELD_RUNTIME_FIELD_CONTIG_PTR_VA, $va_field_contig
 .equ FIELD_RUNTIME_REGULAR_RUN_END_VA, $va_regular_run_end

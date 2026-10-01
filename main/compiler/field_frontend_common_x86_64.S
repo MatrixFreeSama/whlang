@@ -1,5 +1,4 @@
 .intel_syntax noprefix
-.include "compiler/field_runtime_capacity.inc"
 .include "compiler/physical_reality.inc"
 # Wheelchair 1.2.17 sovereign materialized-field compiler frontend with locality compression.
 # Canonical format: wheelchair.field/1.  The op graph is compile-time only;
@@ -21,7 +20,6 @@
 .equ J_ARRAY,2
 .equ J_STRING,3
 .equ J_NUMBER,4
-.equ MAX_RANK,FIELD_RUNTIME_RANK_CAP
 .equ OP_SIZE,32
 .equ OP_LOAD,1
 .equ OP_CONST,2
@@ -111,6 +109,8 @@ compile_field_source:
     mov dword ptr [rip+ff_reduce_count],0
     mov dword ptr [rip+ff_fp_tolerant],0
     mov dword ptr [rip+ff_arith_fma_fused_count],0
+    mov qword ptr [rip+ff_common_rank],0
+    mov qword ptr [rip+ff_access_delta_stride],0
     mov dword ptr [rip+ff_const_pool_count],0
     mov dword ptr [rip+ff_addr_pool_count],0
     mov rdi,[rip+source_length]
@@ -190,16 +190,26 @@ compile_field_source:
 .ffs_mode_out: mov dl,MODE_OUTPUT
 .ffs_mode_set:
     mov rax,[rip+ff_field_mode_ptr]; mov [rax+rbx],dl
-    # rank
+    # rank is one invocation-wide RankFact.  There is no language rank cap:
+    # the parsed machine-word cardinality determines all axis metadata geometry.
     mov rdi,r13; lea rsi,[rip+k_rank]; mov edx,k_rank_end-k_rank; call obj_get
     call node_parse_u64; test edx,edx; jnz .ffs_bad
     test rax,rax; jz .ffs_bad
-    cmp rax,MAX_RANK; ja .ffs_bad
-    mov rdx,[rip+ff_field_rank_ptr]; mov [rdx+rbx],al
+    mov rcx,[rip+ff_common_rank]
+    test rcx,rcx
+    jz .ffs_rank_first
+    cmp rcx,rax
+    jne .ffs_bad
+    jmp .ffs_rank_ready
+.ffs_rank_first:
+    mov [rip+ff_common_rank],rax
+.ffs_rank_ready:
     inc dword ptr [rip+ff_field_count]
     mov r13,[r13+32]; jmp .ffs_field_loop
 .ffs_fields_done:
     cmp dword ptr [rip+ff_field_count],0; je .ffs_bad
+    call ff_prepare_axis_arena
+    test eax,eax; jnz .ffs_bad
 
     # accesses. access 0 is required to be identity because output stores use it.
     mov rdi,r12; lea rsi,[rip+k_accesses]; mov edx,k_accesses_end-k_accesses; call obj_get
@@ -220,8 +230,7 @@ compile_field_source:
     test rax,rax; jz .ffs_bad
     cmp qword ptr [rax],J_ARRAY; jne .ffs_bad
     mov r14,[rax+24]
-    mov rdx,[rip+ff_access_field_ptr]; movzx eax,byte ptr [rdx+rbx]
-    mov rdx,[rip+ff_field_rank_ptr]; movzx r15d,byte ptr [rdx+rax]
+    mov r15,[rip+ff_common_rank]
     xor r11d,r11d
 .ffs_delta_loop:
     cmp r11d,r15d; jae .ffs_delta_end
@@ -229,7 +238,9 @@ compile_field_source:
     mov rdi,r14; call ff_parse_i32_node
     test edx,edx; jnz .ffs_bad
     mov rdx,[rip+ff_access_delta_ptr]
-    mov rcx,rbx; shl rcx,5; lea rcx,[rcx+r11*4]
+    mov rcx,rbx
+    imul rcx,qword ptr [rip+ff_access_delta_stride]
+    lea rcx,[rcx+r11*4]
     mov [rdx+rcx],eax
     test ebx,ebx; jnz .ffs_delta_next
     test eax,eax; jnz .ffs_bad
@@ -1135,11 +1146,11 @@ ff_build_global_physical_reality:
     movzx eax,byte ptr [rax+r13]
     cmp eax,edx
     jne .fgr_addr_next
-    mov r14,rbx; shl r14,5
-    mov r15,r13; shl r15,5
+    mov r14,rbx; imul r14,qword ptr [rip+ff_access_delta_stride]
+    mov r15,r13; imul r15,qword ptr [rip+ff_access_delta_stride]
     xor ecx,ecx
 .fgr_addr_delta:
-    cmp ecx,MAX_RANK
+    cmp rcx,qword ptr [rip+ff_common_rank]
     jae .fgr_addr_reuse
     mov rax,[rip+ff_access_delta_ptr]
     lea r10,[rax+r14]
@@ -2077,10 +2088,8 @@ ff_prepare_graph_arena:
     pop rbx
     ret
 
-# Field/access compiler metadata follows the parsed instance size.  Field count
-# and access count are semantic graph cardinalities, not fixed compiler tables.
-# Rank remains the external WHFLD216 descriptor width and is intentionally not
-# changed by this arena.
+# Field/access fixed compiler metadata follows parsed instance cardinality.
+# Rank-N axis metadata is allocated separately after the common RankFact is known.
 ff_prepare_instance_arena:
     push rbx
     mov rbx,rdi
@@ -2098,12 +2107,9 @@ ff_prepare_instance_arena:
     mov eax,SYS_munmap
     syscall
 .ffpia_size:
+    # Fixed per-instance facts only. Axis deltas are not embedded here.
     mov rax,rbx
-    # 1.3.74 burn-level MachineFact carriers add one compiler-only dword
-    # per instance for AddressFact -> GPR ownership.  The old 80-byte factor
-    # also under-described the final four-byte fact lane; 88 keeps the arena
-    # truthful and aligned without any runtime table.
-    imul rax,rax,88
+    imul rax,rax,56
     jo .ffpia_fail
     add rax,63
     jc .ffpia_fail
@@ -2122,10 +2128,7 @@ ff_prepare_instance_arena:
     mov [rip+ff_instance_arena_ptr],rax
     mov dword ptr [rip+ff_instance_capacity],ebx
     mov [rip+ff_field_mode_ptr],rax; add rax,rbx
-    mov [rip+ff_field_rank_ptr],rax; add rax,rbx
     mov [rip+ff_access_field_ptr],rax; add rax,rbx
-    mov rcx,rbx; shl rcx,5
-    mov [rip+ff_access_delta_ptr],rax; add rax,rcx
     mov rcx,rbx; shl rcx,2
     mov [rip+ff_access_cache_slot_ptr],rax; add rax,rcx
     mov [rip+ff_cache_owner_ptr],rax; add rax,rcx
@@ -2138,12 +2141,50 @@ ff_prepare_instance_arena:
     mov [rip+ff_address_fact_owner_ptr],rax; add rax,rcx
     mov [rip+ff_field_version_fact_ptr],rax; add rax,rcx
     mov [rip+ff_physical_mem_depth_ptr],rax; add rax,rcx
-    mov [rip+ff_field_written_fact_ptr],rax; add rax,rcx
+    mov [rip+ff_field_written_fact_ptr],rax; add rax,rbx
     mov [rip+ff_address_fact_gpr_ptr],rax
     xor eax,eax
     pop rbx
     ret
 .ffpia_fail:
+    mov eax,1
+    pop rbx
+    ret
+
+# RankFact-derived axis metadata. One exact stride serves every AddressFact.
+ff_prepare_axis_arena:
+    push rbx
+    mov rbx,[rip+ff_common_rank]
+    test rbx,rbx
+    jz .ffpaa_fail
+    mov rax,rbx
+    shl rax,2
+    jc .ffpaa_fail
+    mov [rip+ff_access_delta_stride],rax
+    mov rcx,rax
+    mov eax,dword ptr [rip+ff_instance_capacity]
+    imul rax,rcx
+    jo .ffpaa_fail
+    add rax,63
+    jc .ffpaa_fail
+    and rax,-64
+    mov [rip+ff_axis_arena_bytes],rax
+    mov rsi,rax
+    mov eax,SYS_mmap
+    xor edi,edi
+    mov edx,PROT_READ_WRITE
+    mov r10d,MAP_PRIVATE_ANON
+    mov r8,-1
+    xor r9d,r9d
+    syscall
+    test rax,rax
+    js .ffpaa_fail
+    mov [rip+ff_axis_arena_ptr],rax
+    mov [rip+ff_access_delta_ptr],rax
+    xor eax,eax
+    pop rbx
+    ret
+.ffpaa_fail:
     mov eax,1
     pop rbx
     ret
@@ -2696,14 +2737,13 @@ ff_build_access_cache:
     movzx eax,byte ptr [rax+r13]
     cmp eax,r12d
     jne .fbac_search_next
-    # Access delta records are zero-filled to MAX_RANK at source admission, so
-    # comparing the complete record also canonicalizes structurally duplicate
-    # coordinate spellings without workload names or fixed-rank assumptions.
-    mov r14,rbx; shl r14,5
-    mov r15,r13; shl r15,5
+    # Access delta records have exactly RankFact axes, so comparing the complete
+    # span canonicalizes structurally duplicate coordinate spellings.
+    mov r14,rbx; imul r14,qword ptr [rip+ff_access_delta_stride]
+    mov r15,r13; imul r15,qword ptr [rip+ff_access_delta_stride]
     xor ecx,ecx
 .fbac_delta_cmp:
-    cmp ecx,MAX_RANK
+    cmp rcx,qword ptr [rip+ff_common_rank]
     jae .fbac_reuse
     mov rax,[rip+ff_access_delta_ptr]
     lea r10,[rax+r14]
@@ -2780,11 +2820,11 @@ ff_build_coord_cache:
     mov rax,[rip+ff_access_coord_slot_ptr]
     cmp dword ptr [rax+r13*4],FF_CACHE_NONE
     je .fbcc_search_next
-    mov r14,rbx; shl r14,5
-    mov r15,r13; shl r15,5
+    mov r14,rbx; imul r14,qword ptr [rip+ff_access_delta_stride]
+    mov r15,r13; imul r15,qword ptr [rip+ff_access_delta_stride]
     xor ecx,ecx
 .fbcc_delta_cmp:
-    cmp ecx,MAX_RANK
+    cmp rcx,qword ptr [rip+ff_common_rank]
     jae .fbcc_reuse
     mov rax,[rip+ff_access_delta_ptr]
     lea r10,[rax+r14]
@@ -6078,42 +6118,29 @@ ff_emit_reduce:
 .endif
     ret
 
-# 1.3.1 compile-time rank dispatch.  Runtime does not re-ask a rank that the
-# canonical field descriptor already proved. edi is access or field id.
+# Rank is one canonical invocation fact.  Every admitted rank consumes the same
+# native Rank-N address authority; the compiler never selects r1..r8 entry points.
 ff_runtime_offsets_va_for_access:
     cmp edi,dword ptr [rip+ff_access_count]
     jae .ffrvo_bad
-    mov rax,[rip+ff_access_field_ptr]
-    movzx edi,byte ptr [rax+rdi]
-    jmp ff_runtime_offsets_va_for_field
+    mov rax,FIELD_RUNTIME_OFFSETS_VA
+    ret
 ff_runtime_offsets_va_for_field:
     cmp edi,dword ptr [rip+ff_field_count]
     jae .ffrvo_bad
-    mov rax,[rip+ff_field_rank_ptr]
-    movzx ecx,byte ptr [rax+rdi]
-    test ecx,ecx; jz .ffrvo_bad
-    cmp ecx,MAX_RANK; ja .ffrvo_bad
-    dec ecx
-    lea rax,[rip+ff_runtime_offsets_rank_table]
-    mov rax,[rax+rcx*8]
+    mov rax,FIELD_RUNTIME_OFFSETS_VA
     ret
 .ffrvo_bad:
     xor eax,eax
     ret
 
-# 1.3.82 one canonical Rank-N CoordinateFact parent per generic packet.
-# The field descriptor launch proof already established one logical rank/shape;
-# rank dispatch therefore remains AOT and no runtime axis loop is introduced.
+# CoordinateFact preparation is now only packet-mask materialization.  Axis
+# coordinates are local facts inside the one Rank-N offset relation rather than
+# persistent ZMM24..31 semantic state.
 ff_runtime_prepare_coords_va_for_field:
     cmp edi,dword ptr [rip+ff_field_count]
     jae .ffrpc_bad
-    mov rax,[rip+ff_field_rank_ptr]
-    movzx ecx,byte ptr [rax+rdi]
-    test ecx,ecx; jz .ffrpc_bad
-    cmp ecx,MAX_RANK; ja .ffrpc_bad
-    dec ecx
-    lea rax,[rip+ff_runtime_prepare_coords_rank_table]
-    mov rax,[rax+rcx*8]
+    mov rax,FIELD_RUNTIME_MASK_VA
     ret
 .ffrpc_bad:
     xor eax,eax
@@ -6122,17 +6149,7 @@ ff_runtime_prepare_coords_va_for_field:
 ff_runtime_offsets_from_coords_va_for_access:
     cmp edi,dword ptr [rip+ff_access_count]
     jae .ffrofc_bad
-    mov rax,[rip+ff_access_field_ptr]
-    movzx edi,byte ptr [rax+rdi]
-    cmp edi,dword ptr [rip+ff_field_count]
-    jae .ffrofc_bad
-    mov rax,[rip+ff_field_rank_ptr]
-    movzx ecx,byte ptr [rax+rdi]
-    test ecx,ecx; jz .ffrofc_bad
-    cmp ecx,MAX_RANK; ja .ffrofc_bad
-    dec ecx
-    lea rax,[rip+ff_runtime_offsets_from_coords_rank_table]
-    mov rax,[rax+rcx*8]
+    mov rax,FIELD_RUNTIME_OFFSETS_VA
     ret
 .ffrofc_bad:
     xor eax,eax
@@ -6141,13 +6158,7 @@ ff_runtime_offsets_from_coords_va_for_access:
 ff_runtime_advance_coords_va_for_field:
     cmp edi,dword ptr [rip+ff_field_count]
     jae .ffrac_bad
-    mov rax,[rip+ff_field_rank_ptr]
-    movzx ecx,byte ptr [rax+rdi]
-    test ecx,ecx; jz .ffrac_bad
-    cmp ecx,MAX_RANK; ja .ffrac_bad
-    dec ecx
-    lea rax,[rip+ff_runtime_advance_coords_rank_table]
-    mov rax,[rax+rcx*8]
+    mov rax,FIELD_RUNTIME_MASK_VA
     ret
 .ffrac_bad:
     xor eax,eax
@@ -6156,17 +6167,7 @@ ff_runtime_advance_coords_va_for_field:
 ff_runtime_load_va_for_access:
     cmp edi,dword ptr [rip+ff_access_count]
     jae .ffrvl_bad
-    mov rax,[rip+ff_access_field_ptr]
-    movzx edi,byte ptr [rax+rdi]
-    cmp edi,dword ptr [rip+ff_field_count]
-    jae .ffrvl_bad
-    mov rax,[rip+ff_field_rank_ptr]
-    movzx ecx,byte ptr [rax+rdi]
-    test ecx,ecx; jz .ffrvl_bad
-    cmp ecx,MAX_RANK; ja .ffrvl_bad
-    dec ecx
-    lea rax,[rip+ff_runtime_load_rank_table]
-    mov rax,[rax+rcx*8]
+    mov rax,FIELD_RUNTIME_LOAD_VA
     ret
 .ffrvl_bad:
     xor eax,eax
@@ -6175,13 +6176,7 @@ ff_runtime_load_va_for_access:
 ff_runtime_store_va_for_field:
     cmp edi,dword ptr [rip+ff_field_count]
     jae .ffrvs_bad
-    mov rax,[rip+ff_field_rank_ptr]
-    movzx ecx,byte ptr [rax+rdi]
-    test ecx,ecx; jz .ffrvs_bad
-    cmp ecx,MAX_RANK; ja .ffrvs_bad
-    dec ecx
-    lea rax,[rip+ff_runtime_store_rank_table]
-    mov rax,[rax+rcx*8]
+    mov rax,FIELD_RUNTIME_STORE_VA
     ret
 .ffrvs_bad:
     xor eax,eax
@@ -6254,8 +6249,7 @@ ff_derive_transport_facts:
     cmp eax,r13d
     jne .fdtf_j_next
     # Same field: compare every axis except the innermost one.
-    mov rax,[rip+ff_field_rank_ptr]
-    movzx r15d,byte ptr [rax+r13]
+    mov r15,[rip+ff_common_rank]
     test r15d,r15d
     jz .fdtf_fail
     dec r15d                                   # number of outer axes
@@ -6265,11 +6259,11 @@ ff_derive_transport_facts:
     jae .fdtf_duplicate_stream
     mov rdx,[rip+ff_access_delta_ptr]
     mov rax,rbx
-    shl rax,5
+    imul rax,qword ptr [rip+ff_access_delta_stride]
     lea r8,[rax+rcx*4]
     mov eax,dword ptr [rdx+r8]
     mov r8,r14
-    shl r8,5
+    imul r8,qword ptr [rip+ff_access_delta_stride]
     lea r8,[r8+rcx*4]
     cmp eax,dword ptr [rdx+r8]
     jne .fdtf_j_next
@@ -6530,24 +6524,24 @@ ff_emit_image:
     mov r13d,dword ptr [rip+ff_field_count]
     mov r10,FIELD_RUNTIME_GENERATED_FILE_OFF
     add r10,r12
+    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_common_rank]; mov edx,8; syscall; cmp rax,8; jne .fei_close_fail
+    add r10,8
     mov eax,SYS_pwrite64; mov rdi,rbx; mov rsi,[rip+ff_field_mode_ptr]; mov edx,r13d; syscall; cmp rax,r13; jne .fei_close_fail
     add r10,r13
-    mov eax,SYS_pwrite64; mov rdi,rbx; mov rsi,[rip+ff_field_rank_ptr]; mov edx,r13d; syscall; cmp rax,r13; jne .fei_close_fail
-    add r10,r13
-    mov eax,dword ptr [rip+ff_access_count]
-    imul eax,eax,MAX_RANK*4
-    mov dword ptr [rip+ff_metadata_delta_bytes],eax
-    mov edx,eax
+    mov rax,[rip+ff_access_delta_stride]
+    mov edx,dword ptr [rip+ff_access_count]
+    imul rax,rdx
+    jo .fei_close_fail
+    mov [rip+ff_metadata_delta_bytes],rax
+    mov rdx,rax
     mov eax,SYS_pwrite64; mov rdi,rbx; mov rsi,[rip+ff_access_delta_ptr]; syscall
-    mov edx,dword ptr [rip+ff_metadata_delta_bytes]
-    cmp rax,rdx; jne .fei_close_fail
+    cmp rax,qword ptr [rip+ff_metadata_delta_bytes]; jne .fei_close_fail
 
     mov rax,r12
+    add rax,8
     mov edx,r13d
     add rax,rdx
-    add rax,rdx
-    mov edx,dword ptr [rip+ff_metadata_delta_bytes]
-    add rax,rdx
+    add rax,qword ptr [rip+ff_metadata_delta_bytes]
     mov [rip+ff_generated_len],rax
 
     # Descriptor follows ordinary Field metadata and is outside the runtime's
@@ -6758,24 +6752,6 @@ v_imod_const:.ascii "imod_const"; v_imod_const_end:
 v_itof32:.ascii "itof32"; v_itof32_end:
 
 .p2align 3
-ff_runtime_offsets_rank_table:
-.quad FIELD_RUNTIME_OFFSETS_R1_VA,FIELD_RUNTIME_OFFSETS_R2_VA,FIELD_RUNTIME_OFFSETS_R3_VA,FIELD_RUNTIME_OFFSETS_R4_VA
-.quad FIELD_RUNTIME_OFFSETS_R5_VA,FIELD_RUNTIME_OFFSETS_R6_VA,FIELD_RUNTIME_OFFSETS_R7_VA,FIELD_RUNTIME_OFFSETS_R8_VA
-ff_runtime_prepare_coords_rank_table:
-.quad FIELD_RUNTIME_PREPARE_COORDS_R1_VA,FIELD_RUNTIME_PREPARE_COORDS_R2_VA,FIELD_RUNTIME_PREPARE_COORDS_R3_VA,FIELD_RUNTIME_PREPARE_COORDS_R4_VA
-.quad FIELD_RUNTIME_PREPARE_COORDS_R5_VA,FIELD_RUNTIME_PREPARE_COORDS_R6_VA,FIELD_RUNTIME_PREPARE_COORDS_R7_VA,FIELD_RUNTIME_PREPARE_COORDS_R8_VA
-ff_runtime_offsets_from_coords_rank_table:
-.quad FIELD_RUNTIME_OFFSETS_FROM_COORDS_R1_VA,FIELD_RUNTIME_OFFSETS_FROM_COORDS_R2_VA,FIELD_RUNTIME_OFFSETS_FROM_COORDS_R3_VA,FIELD_RUNTIME_OFFSETS_FROM_COORDS_R4_VA
-.quad FIELD_RUNTIME_OFFSETS_FROM_COORDS_R5_VA,FIELD_RUNTIME_OFFSETS_FROM_COORDS_R6_VA,FIELD_RUNTIME_OFFSETS_FROM_COORDS_R7_VA,FIELD_RUNTIME_OFFSETS_FROM_COORDS_R8_VA
-ff_runtime_advance_coords_rank_table:
-.quad FIELD_RUNTIME_ADVANCE_COORDS_R1_VA,FIELD_RUNTIME_ADVANCE_COORDS_R2_VA,FIELD_RUNTIME_ADVANCE_COORDS_R3_VA,FIELD_RUNTIME_ADVANCE_COORDS_R4_VA
-.quad FIELD_RUNTIME_ADVANCE_COORDS_R5_VA,FIELD_RUNTIME_ADVANCE_COORDS_R6_VA,FIELD_RUNTIME_ADVANCE_COORDS_R7_VA,FIELD_RUNTIME_ADVANCE_COORDS_R8_VA
-ff_runtime_load_rank_table:
-.quad FIELD_RUNTIME_LOAD_R1_VA,FIELD_RUNTIME_LOAD_R2_VA,FIELD_RUNTIME_LOAD_R3_VA,FIELD_RUNTIME_LOAD_R4_VA
-.quad FIELD_RUNTIME_LOAD_R5_VA,FIELD_RUNTIME_LOAD_R6_VA,FIELD_RUNTIME_LOAD_R7_VA,FIELD_RUNTIME_LOAD_R8_VA
-ff_runtime_store_rank_table:
-.quad FIELD_RUNTIME_STORE_R1_VA,FIELD_RUNTIME_STORE_R2_VA,FIELD_RUNTIME_STORE_R3_VA,FIELD_RUNTIME_STORE_R4_VA
-.quad FIELD_RUNTIME_STORE_R5_VA,FIELD_RUNTIME_STORE_R6_VA,FIELD_RUNTIME_STORE_R7_VA,FIELD_RUNTIME_STORE_R8_VA
 
 .section .bss
 .p2align 6
@@ -6821,9 +6797,12 @@ ff_instance_arena_ptr:.skip 8
 ff_instance_arena_bytes:.skip 8
 ff_instance_capacity:.skip 4
 ff_field_mode_ptr:.skip 8
-ff_field_rank_ptr:.skip 8
 ff_access_field_ptr:.skip 8
 ff_access_delta_ptr:.skip 8
+ff_axis_arena_ptr:.skip 8
+ff_axis_arena_bytes:.skip 8
+ff_common_rank:.skip 8
+ff_access_delta_stride:.skip 8
 ff_access_cache_slot_ptr:.skip 8
 ff_cache_owner_ptr:.skip 8
 ff_access_coord_slot_ptr:.skip 8
@@ -6952,7 +6931,7 @@ ff_store_nt_slow_disp_ptr:.skip 8
 ff_store_done_disp_ptr:.skip 8
 ff_generated_len:.skip 8
 ff_metadata_va:.skip 8
-ff_metadata_delta_bytes:.skip 4
+ff_metadata_delta_bytes:.skip 8
 .p2align 3
 ff_fabric_datapath_va:.skip 8
 ff_fabric_datapath_bytes:.skip 8

@@ -416,38 +416,49 @@ gr_init_state:
 # Read current allowed affinity once per invocation. The immutable mask is thrown
 # away immediately; no CPU identity, load or idle state survives into execution.
 gr_read_invocation_admission:
-    sub rsp,RUNTIME_AFFINITY_MASK_BYTES
+    mov r10d,RUNTIME_AFFINITY_SEED_BYTES
+.gria_probe:
+    sub rsp,r10
     mov eax,204
     xor edi,edi
-    mov esi,RUNTIME_AFFINITY_MASK_BYTES
+    mov rsi,r10
     mov rdx,rsp
     syscall
     test rax,rax
-    js .gria_fallback
+    jns .gria_have_affinity
+    cmp eax,-ERRNO_EINVAL
+    jne .gria_fallback_release
+    add rsp,r10
+    shl r10,1
+    jc .gria_fallback_noalloc
+    jmp .gria_probe
+.gria_have_affinity:
     mov r8,rax
     xor r9d,r9d
     xor ecx,ecx
 .gria_byte:
     cmp r9,r8
     jae .gria_done_count
-    movzx r10d,byte ptr [rsp+r9]
-    mov r11d,8
+    movzx eax,byte ptr [rsp+r9]
+    mov edx,8
 .gria_bit:
-    shr r10b,1
+    shr al,1
     adc ecx,0
-    dec r11d
+    dec edx
     jnz .gria_bit
     inc r9
     jmp .gria_byte
 .gria_done_count:
     test ecx,ecx
-    jnz .gria_return
-.gria_fallback:
-    # Failure may not resurrect compile-host width as runtime authority.
+    jnz .gria_return_release
+.gria_fallback_release:
     mov ecx,1
-.gria_return:
+.gria_return_release:
     mov eax,ecx
-    add rsp,RUNTIME_AFFINITY_MASK_BYTES
+    add rsp,r10
+    ret
+.gria_fallback_noalloc:
+    mov eax,1
     ret
 
 # Acquire one native x86 execution slot from the invocation external-admission bound.

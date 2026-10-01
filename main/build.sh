@@ -72,7 +72,7 @@ as --64 compiler/runtime_blob_x86_64.S -o "$BUILD/runtime_blob.o"
 
 # 1.2.17 sovereign native field lane.  This extends the separate direct-native AOT
 # physicalization so the protected 1.2.15 f64 tensor path remains byte-authoritative.
-# The field lane is pure handwritten assembly and maps materialized WHFLD216
+# The field lane is pure handwritten assembly and maps materialized WHFLD217
 # fields directly; it never routes through C, LLVM, JIT, Python, or a bytecode
 # interpreter.
 as --64 runtime/field_runtime_512_x86_64.S -o "$BUILD/field_runtime_512.o"
@@ -229,11 +229,11 @@ echo 'ARCHITECTURE_AGING_1_3_55=PASS'
 echo 'WHEELCHAIR_1_3_55_BUILD=PASS'
 
 # 1.3.56 final compiler-workspace aging. Field/access cardinality and Tensor
-# staging/optimizer metadata are instance facts. Rank-8 remains the WHFLD216
-# external-format width; logical VREG ownership remains the current physicalizer.
+# staging/optimizer metadata and Field RankFact geometry are instance facts.
+# No fixed external rank width or r1..r8 runtime family survives.
 ! grep -Rqs 'FIELD_RUNTIME_FIELD_CAP\|FIELD_RUNTIME_ACCESS_CAP' compiler runtime tools
 ! grep -RqsE '\bMAX_(FIELDS|SPECS|ACCESS)\b' compiler/field_frontend_common_x86_64.S runtime/field_runtime_512_x86_64.S runtime/field_runtime_256_x86_64.S
-grep -q '^\.equ FIELD_RUNTIME_RANK_CAP,8$' compiler/field_runtime_capacity.inc
+! grep -RqsE 'FIELD_RUNTIME_RANK_CAP|MAX_RANK' compiler/field_frontend_common_x86_64.S compiler/field_surface_lowerer_x86_64.inc runtime/field_runtime_512_x86_64.S runtime/field_runtime_256_x86_64.S
 grep -q '^ff_prepare_instance_arena:' compiler/field_frontend_common_x86_64.S
 grep -q '^field_prepare_instance_arenas:' runtime/field_runtime_512_x86_64.S
 for f in \
@@ -888,23 +888,19 @@ echo 'SLIDING_WINDOW_WORKLOAD_MATCHER=0'
 echo 'SECOND_SPACETIME_SCHEDULER=0'
 echo 'FRONTEND_PHYSICAL_AUTHORITY_UNIFIED=PASS'
 echo 'WHEELCHAIR_1_3_81_BUILD=PASS'
-# 1.3.82 persistent Rank-N CoordinateFact physicalization.  This is the old
-# Physical Reality lifetime model extended through the missing coordinate layer,
-# not a boundary/stencil optimizer family.
-grep -q '^.equ PR_PERSISTENT_RANKN_COORDINATEFACT,1$' compiler/physical_reality.inc
-grep -q '^.equ PR_COORDINATEFACT_PER_ACCESS_REDECODE,0$' compiler/physical_reality.inc
-grep -q '^.equ PR_COORDINATEFACT_EXECUTION_LOCAL_CARRIERS,1$' compiler/physical_reality.inc
-grep -q '^.equ PR_COORDINATEFACT_SHARED_ACROSS_LAYOUTS,1$' compiler/physical_reality.inc
+# 1.3.110 Field RankFact aging. Coordinate realization follows invocation rank;
+# eight spare AVX-512 carriers are no longer a semantic or ABI width authority.
+grep -q '^.equ PR_RANKFACT_DYNAMIC_AXIS_GEOMETRY,1$' compiler/physical_reality.inc
+grep -q '^.equ PR_COORDINATEFACT_FIXED_CARRIER_WIDTH,0$' compiler/physical_reality.inc
 grep -q '^.equ PR_AVX512_COORDINATE_OFFSET_STACK_AUTHORITY,0$' compiler/physical_reality.inc
 grep -q '^.equ PR_COORDINATEFACT_SECOND_IR,0$' compiler/physical_reality.inc
 grep -q '^.equ PR_COORDINATE_WORKLOAD_MATCHER,0$' compiler/physical_reality.inc
-grep -q '^field_prepare_coords_f32_r8:$' runtime/field_runtime_512_x86_64.S
-grep -q '^field_compute_offsets_from_coords_f32_r8:$' runtime/field_runtime_512_x86_64.S
-grep -q '^ff_runtime_prepare_coords_va_for_field:$' compiler/field_frontend_common_x86_64.S
-grep -q '^ff_runtime_offsets_from_coords_va_for_access:$' compiler/field_frontend_common_x86_64.S
+grep -q '^field_compute_offsets_f32:$' runtime/field_runtime_512_x86_64.S
+grep -q '^field_compute_offsets_f32:$' runtime/field_runtime_256_x86_64.S
+! grep -RqsE 'field_(prepare_coords|compute_offsets_from_coords|advance_coords|compute_offsets|load|store)_f32_r[1-8]\b' runtime compiler tools
 ! grep -RqsE 'coordinate[ _-]*(optimizer|scheduler|manager)|boundary[ _-]*coordinate[ _-]*(route|matcher)|stencil[ _-]*coordinate' compiler runtime surface tools
-echo 'PERSISTENT_RANKN_COORDINATEFACT=PASS'
-echo 'COORDINATEFACT_PER_ACCESS_REDECODE=0'
+echo 'RANKFACT_DYNAMIC_AXIS_GEOMETRY=PASS'
+echo 'COORDINATEFACT_FIXED_CARRIER_WIDTH=0'
 echo 'AVX512_COORDINATE_OFFSET_STACK_AUTHORITY=0'
 echo 'COORDINATEFACT_SECOND_IR=0'
 echo 'COORDINATE_WORKLOAD_MATCHER=0'
@@ -1345,3 +1341,125 @@ echo 'COMPLETION_LOCAL_SIBLING_EXPOSURE_1_3_102=PASS'
 echo 'RUNTIME_READY_QUEUE_1_3_102=0'
 echo 'WORK_STEALING_1_3_102=0'
 echo 'WHEELCHAIR_1_3_102_BUILD=PASS'
+
+# 1.3.103 General scalar-FP physical aging. A next StateFact may consume its
+# already-dead old carrier through the existing effective last-use proof, and
+# scalar carrier copies have one VEX/EVEX encoding authority. No workload route
+# or second FP transition backend is introduced.
+grep -q '^g_emit_phys_xmm_move:$' compiler/general_frontend_x86_64.S
+sed -n '/^g_emit_phys_xmm_move:/,/^g_emit_phys_xmm_from_rax:/p' compiler/general_frontend_x86_64.S > "$BUILD/fp_move_13103.tmp"
+grep -q 'call g_emit_phys_vex_scalar3' "$BUILD/fp_move_13103.tmp"
+! grep -q '\.gepxm_evex:' "$BUILD/fp_move_13103.tmp"
+rm -f "$BUILD/fp_move_13103.tmp"
+grep -q '^.gtri_update_fp_separate_dest:$' compiler/general_frontend_x86_64.S
+grep -q '^.gtri_update_fp_separate_alloc:$' compiler/general_frontend_x86_64.S
+sed -n '/^.gtri_update_fp_separate_dest:/,/^.gtri_update_fp_dest:/p' compiler/general_frontend_x86_64.S > "$BUILD/fp_lifetime_13103.tmp"
+grep -q 'g_phys_state_last_use_ptr' "$BUILD/fp_lifetime_13103.tmp"
+! grep -Eq 'stiff|soft|young|timestep|explicit_dynamics|mass3|chem6|rigid7' "$BUILD/fp_lifetime_13103.tmp"
+rm -f "$BUILD/fp_lifetime_13103.tmp"
+echo 'GENERAL_FP_DEAD_AUTHORITY_REUSE_1_3_103=PASS'
+echo 'SCALAR_FP_TRANSPORT_EMITTER_CONVERGENCE_1_3_103=PASS'
+echo 'WORKLOAD_SPECIFIC_FP_ROUTE_1_3_103=0'
+echo 'SECOND_FP_TRANSITION_BACKEND_1_3_103=0'
+echo 'WHEELCHAIR_1_3_103_BUILD=PASS'
+
+
+# 1.3.104 hard-limit aging. Arbitrary compiler tables and launch-width probes
+# are instance/kernel-derived facts. Architectural/ABI representation frontiers
+# remain explicit rather than being disguised by larger magic numbers.
+! grep -q 'G_PHYS_CSE_MAX' compiler/general_frontend_x86_64.S
+grep -q '^g_prepare_phys_fact_arena:$' compiler/general_frontend_x86_64.S
+grep -q '^g_phys_fact_capacity:.skip 4$' compiler/general_frontend_x86_64.S
+for F in compiler/tensor_frontend_x86_64.S compiler/tensor_derived_frontend_x86_64.S; do
+  grep -q 'tensor_optimizer_capacity' "$F"
+  grep -q '^vec_cache_binding_ptr:.skip 8$' "$F"
+  ! grep -Eq 'vec_cache_binding:.skip 64|vec_cache_key_[abc]:.skip 64' "$F"
+done
+! grep -Eq 'tensor_affine_profile_coeff:.skip 16|tensor_const_profile_bits:.skip 64' compiler/tensor_frontend_x86_64.S
+! grep -Eq 'argv_copy|exe_path:[[:space:]]*\.skip|selected_path:[[:space:]]*\.skip' compiler/native_driver_x86_64.S
+grep -q '^.equ RUNTIME_AFFINITY_SEED_BYTES,128$' runtime/execution_admission_refresh_x86_64.inc
+grep -q 'cmp eax,-ERRNO_EINVAL' runtime/execution_admission_refresh_x86_64.inc
+! grep -q 'RUNTIME_AFFINITY_MASK_BYTES' runtime/execution_admission_refresh_x86_64.inc
+grep -q '^sd_count_external_affinity:$' compiler/silicon_domain_probe_x86_64.S
+sed -n '/^.dctopo_loop:/,/^.dctopo_fallback:/p' compiler/topologyc_x86_64.S > "$BUILD/topology_enum_13104.tmp"
+! grep -Eq 'cmp r9d,[[:space:]]*8' "$BUILD/topology_enum_13104.tmp"
+sed -n '/^.dct_loop:/,/^.dct_pop:/p' compiler/topologyc_x86_64.S > "$BUILD/cache_enum_13104.tmp"
+! grep -Eq 'cmp r9d,[[:space:]]*32' "$BUILD/cache_enum_13104.tmp"
+rm -f "$BUILD/topology_enum_13104.tmp" "$BUILD/cache_enum_13104.tmp"
+! grep -Eq 'cmp (rax|eax|edi),[[:space:]]*255' compiler/surface_lowerer_x86_64.S
+sed -n '/^s_expand_zeta_ast:/,/^s_expand_polylog_ast:/p' compiler/surface_lowerer_x86_64.S > "$BUILD/zeta_13104.tmp"
+! grep -Eq 'cmp rax,[[:space:]]*32|cmp r14d,[[:space:]]*32' "$BUILD/zeta_13104.tmp"
+sed -n '/^s_expand_polylog_ast:/,/^s_expand_gamma_ast:/p' compiler/surface_lowerer_x86_64.S > "$BUILD/polylog_13104.tmp"
+! grep -Eq 'cmp rax,[[:space:]]*16|cmp r14d,[[:space:]]*16' "$BUILD/polylog_13104.tmp"
+rm -f "$BUILD/zeta_13104.tmp" "$BUILD/polylog_13104.tmp"
+echo 'INSTANCE_DERIVED_OPTIMIZER_CAPACITY_1_3_104=PASS'
+echo 'KERNEL_DERIVED_AFFINITY_WIDTH_1_3_104=PASS'
+echo 'CPUID_ENUMERATION_FUSE_1_3_104=0'
+echo 'ARBITRARY_MATH_DIMENSION_WALLS_1_3_104=0'
+echo 'WORKLOAD_SPECIFIC_LIMIT_ROUTE_1_3_104=0'
+echo 'SECOND_LIMIT_BACKEND_1_3_104=0'
+echo 'WHEELCHAIR_1_3_104_BUILD=PASS'
+
+
+# 1.3.106 Rank-N physical aging. Precision and Fourier geometry are one
+# type-level Physical Fact, planned once by AOT. ValueFacts carry no geometry;
+# runtime multiplication has no geometry planner/fallback. High-precision
+# arithmetic keeps one authority and no named-width route, JIT, DSL parallel
+# surface, runtime algorithm selector, or second arithmetic backend is added.
+grep -q '^.equ GTYPE_RANKN_FP_BASE,GTYPE_STATIC_LAST+1$' compiler/general_frontend_x86_64.S
+grep -q '^g_intern_rankn_precision:$' compiler/general_frontend_x86_64.S
+grep -q '^g_rankn_type_facts_ptr:.skip 8$' compiler/general_frontend_x86_64.S
+grep -q 'GENERAL_RANKN_TYPE_COUNT_OFF' compiler/general_frontend_x86_64.S
+grep -q '^rankn_physical_fact_ptr:' runtime/general_runtime_template_x86_64.S
+grep -q '^rankn_type_count_patch:' runtime/general_runtime_template_x86_64.S
+grep -q '^.equ RPF_TYPE_BASE,TYPE_STATIC_LAST+1$' runtime/rankn_precision_physical_x86_64.inc
+grep -q '^.equ RPF_PREC,8$' runtime/rankn_precision_physical_x86_64.inc
+grep -q '^rpf_raw_mul10_add:$' runtime/rankn_precision_physical_x86_64.inc
+! grep -RqsE 'GTYPE_RANKN_FP_(FLAG|MASK)|RPF_TYPE_(FLAG|MASK)|0x3fffffff|1073741823' compiler runtime tools
+! grep -RqsE '\bRPF_N\b|\bRPF_GEOM\b|rpf_nf_choose_geom|g_emit_rankn_fourier_geom_store' runtime compiler
+! grep -RqsE 'rankn_(width_selector|precision_selector|jit|kernel_offload)|fp(128|256)_backend' compiler runtime tools
+echo 'RANKN_TYPE_PHYSICAL_FACT_1_3_106=PASS'
+echo 'RUNTIME_FOURIER_PLANNER_1_3_106=0'
+echo 'RANKN_VALUE_GEOMETRY_STATE_1_3_106=0'
+echo 'RANKN_DECIMAL_PER_DIGIT_FOURIER_1_3_106=0'
+echo 'RANKN_NAMED_WIDTH_ROUTE_1_3_106=0'
+echo 'SECOND_RANKN_BACKEND_1_3_106=0'
+echo 'WHEELCHAIR_1_3_106_BUILD=PASS'
+
+# 1.3.109 Rank-N physical-work convergence.  Local propagation keeps facts
+# live instead of rediscovering them: dead carrier helpers are gone, Knuth
+# division derives normalized digit geometry from P and quotient production,
+# RNE carry-out closes directly to the top bit, and exact unit twiddles do not
+# invoke x87.  No named precision route, selector, JIT, DSL surface or second
+# high-precision backend is admitted.
+grep -q '^rpf_project_local_carrier:$' runtime/rankn_precision_physical_x86_64.inc
+grep -q '^\.global rankn_fp_div_u64$' runtime/rankn_precision_physical_x86_64.inc
+grep -q '^rpf_value_equal:$' runtime/rankn_precision_physical_x86_64.inc
+for dead in rpf_limbs_from_object rpf_copy_limbs rpf_shl1 rpf_shr1 rpf_shr_sticky rpf_shl_exact rpf_highlen32; do
+  ! grep -q "^${dead}:" runtime/rankn_precision_physical_x86_64.inc
+done
+sed -n '/^rankn_fp_div:/,/^\.global rankn_fp_div_u64/p' runtime/rankn_precision_physical_x86_64.inc > "$BUILD/rankn_div_13109.tmp"
+! grep -q 'call rpf_highlen32' "$BUILD/rankn_div_13109.tmp"
+grep -q 'qn32 carried from quotient production' "$BUILD/rankn_div_13109.tmp"
+sed -n '/^rpf_round_from_integer:/,/^\.global rankn_fp_from_u64/p' runtime/rankn_precision_physical_x86_64.inc > "$BUILD/rankn_round_13109.tmp"
+! grep -q 'call rpf_shr1' "$BUILD/rankn_round_13109.tmp"
+grep -q 'only surviving information is the carry across bit P' "$BUILD/rankn_round_13109.tmp"
+sed -n '/^rpf_nf_make_tw:/,/^rpf_nf_dif2:/p' runtime/rankn_precision_physical_x86_64.inc > "$BUILD/rankn_tw_13109.tmp"
+grep -q 'j=0 is the exact unit twiddle' "$BUILD/rankn_tw_13109.tmp"
+grep -q 'test rbx,rbx' "$BUILD/rankn_tw_13109.tmp"
+sed -n '/^rpf_sincos_core:/,/^rankn_fp_sin:/p' runtime/rankn_precision_physical_x86_64.inc > "$BUILD/rankn_sincos_13109.tmp"
+[ "$(grep -c 'call rankn_fp_div_u64' "$BUILD/rankn_sincos_13109.tmp")" -eq 4 ]
+[ "$(grep -c 'call rankn_fp_neg' "$BUILD/rankn_sincos_13109.tmp")" -eq 0 ]
+sed -n '/^.rpfsc_double:/,/^.rpfsc_output:/p' runtime/rankn_precision_physical_x86_64.inc > "$BUILD/rankn_double_13109.tmp"
+! grep -q 'call rankn_fp_add' "$BUILD/rankn_double_13109.tmp"
+grep -q 'inc qword ptr \[rax+RPF_EXP\]' "$BUILD/rankn_double_13109.tmp"
+rm -f "$BUILD/rankn_div_13109.tmp" "$BUILD/rankn_round_13109.tmp" "$BUILD/rankn_tw_13109.tmp" "$BUILD/rankn_sincos_13109.tmp" "$BUILD/rankn_double_13109.tmp"
+! grep -RqsE 'localfp|local_float|rankn_local_backend|precision_tier_selector|local_strict_selector|local_propagation_selector' compiler runtime surface tools
+! grep -RqsE 'schoolbook_selector|karatsuba_selector|toom_selector|math_precision_selector|transcendental_width_selector|rankn_(jit|kernel_offload)' compiler runtime surface tools
+echo 'RANKN_DEAD_CARRIER_AUTHORITIES_1_3_109=0'
+echo 'RANKN_DIVISION_GEOMETRY_RESCAN_1_3_109=0'
+echo 'RANKN_RNE_OVERFLOW_FULL_SHIFT_1_3_109=0'
+echo 'RANKN_ZERO_TWIDDLE_TRIG_1_3_109=0'
+echo 'RANKN_SINCOS_NEGATIVE_COPY_1_3_109=0'
+echo 'SECOND_RANKN_MATH_BACKEND_1_3_109=0'
+echo 'WHEELCHAIR_1_3_109_BUILD=PASS'

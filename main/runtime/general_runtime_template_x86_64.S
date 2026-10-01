@@ -23,9 +23,10 @@
 .equ TYPE_F32, 4
 .equ TYPE_F64, 5
 .equ TYPE_STRING, 6
+.equ TYPE_STATIC_LAST, 102
 
-# Parameterized >64-bit floating physical authority.  Constants and helpers are
-# available before _start; precision itself is encoded in the type fact.
+# Parameterized >64-bit floating physical authority. Type identity is compact;
+# its precision payload lives in the exact-sized read-only PrecisionFact trailer.
 .include "runtime/rankn_precision_physical_x86_64.inc"
 
 .section .text
@@ -57,6 +58,7 @@ _start:
     mov qword ptr [rip+program_code_ptr],rax
     mov qword ptr [rip+input_type_ptr],0
     mov qword ptr [rip+output_type_ptr],0
+    mov qword ptr [rip+rankn_physical_fact_ptr],0
     mov rsi,qword ptr [rip+program_trailer_size_patch]
     test rsi,rsi
     jz .program_ready
@@ -83,6 +85,9 @@ _start:
     mov ecx,dword ptr [rip+input_count_patch]
     lea rdx,[rax+rcx*4]
     mov qword ptr [rip+output_type_ptr],rdx
+    mov ecx,dword ptr [rip+output_count_patch]
+    lea rdx,[rdx+rcx*4]
+    mov qword ptr [rip+rankn_physical_fact_ptr],rdx
     mov rcx,qword ptr [rip+program_code_rel_offset_patch]
     add rax,rcx
     jc .program_map_fail_mapped
@@ -129,10 +134,12 @@ _start:
     je .in_f64
     cmp eax,TYPE_STRING
     je .in_string
-    mov edx,eax
-    and edx,RPF_TYPE_FLAG
-    cmp edx,RPF_TYPE_FLAG
-    je .in_rankn_fp
+    push rdi
+    mov edi,eax
+    call rpf_precision_from_type
+    pop rdi
+    test rax,rax
+    jnz .in_rankn_fp
     jmp .bad_args
 .in_bool:
     call parse_bool
@@ -198,10 +205,10 @@ _start:
     mov eax,dword ptr [r10+rbx*4]
     cmp eax,TYPE_STRING
     je .print_string
-    mov edx,eax
-    and edx,RPF_TYPE_FLAG
-    cmp edx,RPF_TYPE_FLAG
-    je .print_rankn_fp
+    mov edi,eax
+    call rpf_precision_from_type
+    test rax,rax
+    jnz .print_rankn_fp
     mov rax,rbx
     call make_out_index
     mov r10,qword ptr [rip+output_pages_base_patch]
@@ -466,9 +473,11 @@ print_bits_line:
     ret
 
 # parse_rankn_fp(rdi=cstr, edx=encoded fpP) -> rax=object, edx=0/1.
-# Decimal ingress is exact up to the significant-digit capacity of P.  Six
-# private arithmetic objects are carved from one sequential precision-derived
-# arena; no fixed per-input or per-object span participates in admission.
+# Decimal ingress is one exact integer recurrence D=10D+d followed by one
+# normalization (and one division only when a decimal denominator exists).
+# Five P-derived carriers are sufficient: raw numerator, normalized numerator,
+# raw denominator, normalized denominator, and result. No per-digit fpP multiply,
+# conversion, or precision-specific path participates.
 parse_rankn_fp:
     push rbx; push rbp; push r12; push r13; push r14; push r15
     sub rsp,64
@@ -478,17 +487,16 @@ parse_rankn_fp:
     test eax,eax; jz .prf_bad
     mov ebp,eax                       # P
     lea eax,[eax+63]; shr eax,6       # N
-    imul rdx,rax,512
-    jo .prf_bad
-    add rdx,4096
-    jc .prf_bad
-    add rdx,63
-    jc .prf_bad
-    and rdx,-64                       # exact object span for this P
+    mov dword ptr [rsp+56],eax
+    mov edi,r13d
+    call rpf_object_span
+    test rax,rax
+    jz .prf_bad
+    mov rdx,rax                       # one shared exact physical-span authority
     mov [rsp+48],rdx
     mov r15,qword ptr [rip+rankn_input_cursor]
     mov rax,rdx
-    imul rax,rax,6
+    imul rax,rax,5
     jo .prf_bad
     mov rcx,r15
     add rcx,rax
@@ -496,14 +504,12 @@ parse_rankn_fp:
     cmp rcx,qword ptr [rip+rankn_input_end_patch]
     ja .prf_bad
     mov qword ptr [rip+rankn_input_cursor],rcx
-    # Six equal P-derived objects: numerator, ten, temp, digit/denom scratch,
-    # denominator, and final rounded result.
-    mov [rsp],r15
-    mov rax,r15; add rax,rdx; mov [rsp+8],rax
-    add rax,rdx; mov [rsp+16],rax
-    add rax,rdx; mov [rsp+24],rax
-    add rax,rdx; mov rbx,rax
-    add rax,rdx; mov r15,rax
+    # Five equal P-derived carriers.
+    mov [rsp],r15                    # raw numerator base
+    mov rax,r15; add rax,rdx; mov [rsp+8],rax   # normalized numerator
+    add rax,rdx; mov [rsp+16],rax                 # raw denominator base
+    add rax,rdx; mov [rsp+24],rax                 # normalized denominator
+    add rax,rdx; mov r15,rax                      # final result
     # sign
     xor r14d,r14d
     cmp byte ptr [r12],'-'; jne .prf_plus
@@ -520,13 +526,11 @@ parse_rankn_fp:
     cmp byte ptr [r12+1],'.'; jne .prf_cap_ready
     inc dword ptr [rsp+32]
 .prf_cap_ready:
-    # initialize numerator=0, ten=10, denominator=1
-    mov rdi,[rsp]; xor esi,esi; mov edx,r13d; call rankn_fp_from_u64
-    test edx,edx; jnz .prf_bad
-    mov rdi,[rsp+8]; mov esi,10; mov edx,r13d; call rankn_fp_from_u64
-    test edx,edx; jnz .prf_bad
-    mov rdi,rbx; mov esi,1; mov edx,r13d; call rankn_fp_from_u64
-    test edx,edx; jnz .prf_bad
+    # Raw numerator=0 and denominator=1. Each is written once, then evolved by
+    # the exact decimal recurrence without entering floating arithmetic.
+    mov rdi,[rsp]; add rdi,RPF_DATA; mov ecx,[rsp+56]; call rpf_zero_limbs
+    mov rdi,[rsp+16]; add rdi,RPF_DATA; mov ecx,[rsp+56]; call rpf_zero_limbs
+    mov rax,[rsp+16]; mov qword ptr [rax+RPF_DATA],1
     mov dword ptr [rsp+36],0          # raw digit count
     xor ebp,ebp                       # fractional digit count
     mov dword ptr [rsp+40],0          # seen dot
@@ -545,32 +549,49 @@ parse_rankn_fp:
     cmp dword ptr [rsp+40],0; je .prf_no_frac
     inc ebp
 .prf_no_frac:
-    # temp = numerator*10
-    mov rdi,[rsp+16]; mov rsi,[rsp]; mov rdx,[rsp+8]; mov ecx,r13d; call rankn_fp_mul
+    movzx edx,byte ptr [r12]; sub edx,'0'
+    mov rdi,[rsp]; add rdi,RPF_DATA; mov ecx,[rsp+56]; call rpf_raw_mul10_add
     test eax,eax; jnz .prf_bad
-    # digit object at +3M, then numerator = temp + digit
-    movzx esi,byte ptr [r12]; sub esi,'0'
-    mov rdi,[rsp+24]; mov edx,r13d; call rankn_fp_from_u64
-    test edx,edx; jnz .prf_bad
-    mov rdi,[rsp]; mov rsi,[rsp+16]; mov rdx,[rsp+24]; mov ecx,r13d; call rankn_fp_add
-    test eax,eax; jnz .prf_bad
-    # denominator *= 10 for every fractional digit; use +3M as temp then copy.
     cmp dword ptr [rsp+40],0; je .prf_next
-    mov rdi,[rsp+24]; mov rsi,rbx; mov rdx,[rsp+8]; mov ecx,r13d; call rankn_fp_mul
+    mov rdi,[rsp+16]; add rdi,RPF_DATA; mov ecx,[rsp+56]; xor edx,edx; call rpf_raw_mul10_add
     test eax,eax; jnz .prf_bad
-    mov rdi,rbx; mov rsi,[rsp+24]; mov edx,r13d; call rankn_fp_convert
-    test edx,edx; jnz .prf_bad
 .prf_next:
     inc r12; jmp .prf_loop
 .prf_finish:
     cmp dword ptr [rsp+44],0; je .prf_bad
     test ebp,ebp; jz .prf_integer
-    mov rdi,r15; mov rsi,[rsp]; mov rdx,rbx; mov ecx,r13d; call rankn_fp_div
+    # Normalize numerator once.
+    mov rdi,[rsp+8]
+    mov rsi,[rsp]; add rsi,RPF_DATA
+    mov edx,[rsp+56]
+    xor ecx,ecx
+    xor r8d,r8d
+    mov r9d,r13d
+    call rpf_round_from_integer
+    test eax,eax; jnz .prf_bad
+    # Normalize denominator once, then perform the sole fractional division.
+    mov rdi,[rsp+24]
+    mov rsi,[rsp+16]; add rsi,RPF_DATA
+    mov edx,[rsp+56]
+    xor ecx,ecx
+    xor r8d,r8d
+    mov r9d,r13d
+    call rpf_round_from_integer
+    test eax,eax; jnz .prf_bad
+    mov rdi,r15; mov rsi,[rsp+8]; mov rdx,[rsp+24]; mov ecx,r13d; call rankn_fp_div
     test eax,eax; jnz .prf_bad
     jmp .prf_sign
 .prf_integer:
-    mov rdi,r15; mov rsi,[rsp]; mov edx,r13d; call rankn_fp_convert
-    test edx,edx; jnz .prf_bad
+    # Integer input needs no intermediate normalized object.
+    mov rdi,r15
+    mov rsi,[rsp]; add rsi,RPF_DATA
+    mov edx,[rsp+56]
+    mov ecx,r14d
+    xor r8d,r8d
+    mov r9d,r13d
+    call rpf_round_from_integer
+    test eax,eax; jnz .prf_bad
+    jmp .prf_ok
 .prf_sign:
     test r14d,r14d; jz .prf_ok
     mov qword ptr [r15+RPF_SIGN],1
@@ -595,7 +616,7 @@ prf_hex_fixed:
     pop rbx; ret
 
 # Exact canonical stream for arbitrary P.  No fixed-width name or fixed limb
-# count appears in the protocol.  Header: outNN_rankn_fp=0xTTTTTTTT:S:E:N:
+# count appears in the protocol. Header: outNN_rankn_fp=0xPPPPPPPPPPPPPPPP:S:E:N:
 # followed by N high-to-low 16-hex-digit limbs.
 print_rankn_fp_line:
     push rbx; push rbp; push r12; push r13; push r14; push r15
@@ -607,16 +628,16 @@ print_rankn_fp_line:
     lea rsi,[rip+rankn_fp_label]; mov ecx,rankn_fp_label_end-rankn_fp_label
     lea rdi,[r14+5]; rep movsb
     mov r15d,5+(rankn_fp_label_end-rankn_fp_label)
-    mov eax,[r12+RPF_TYPE]; mov ecx,8; call prf_hex_fixed
+    mov rax,[r12+RPF_PREC]; mov ecx,16; call prf_hex_fixed
     mov byte ptr [r14+r15],':'; inc r15d
     mov rax,[r12+RPF_SIGN]; mov ecx,1; call prf_hex_fixed
     mov byte ptr [r14+r15],':'; inc r15d
     mov rax,[r12+RPF_EXP]; mov ecx,16; call prf_hex_fixed
     mov byte ptr [r14+r15],':'; inc r15d
-    mov eax,[r12+RPF_N]; mov ecx,8; call prf_hex_fixed
+    mov rbp,[r12+RPF_PREC]; add rbp,63; shr rbp,6
+    mov rax,rbp; mov ecx,16; call prf_hex_fixed
     mov byte ptr [r14+r15],':'; inc r15d
     mov eax,SYS_write; mov edi,1; mov rsi,r14; mov edx,r15d; syscall
-    mov ebp,[r12+RPF_N]
 .prfpl_limb:
     test ebp,ebp; jz .prfpl_nl
     dec ebp
@@ -812,6 +833,10 @@ program_code_rel_offset_patch: .quad 0
 program_code_ptr: .quad 0
 input_type_ptr: .quad 0
 output_type_ptr: .quad 0
+rankn_physical_fact_ptr: .quad 0
+.global rankn_type_count_patch
+rankn_type_count_patch: .long 0
+.p2align 3
 .global input_values_base_patch
 input_values_base_patch: .quad 0
 .global input_aux_base_patch

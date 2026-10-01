@@ -1,6 +1,6 @@
-# Wheelchair 1.3.102
+# Wheelchair 1.3.111
 
-![Build](https://img.shields.io/badge/build-27%2F27%20PASS-brightgreen) ![Release](https://img.shields.io/badge/release-1.3.102-blue)
+![Build](https://img.shields.io/badge/build-29%2F29%20PASS-brightgreen) ![Release](https://img.shields.io/badge/release-1.3.111-blue)
 
 Wheelchair is an HPC- and simulation-first general-purpose AOT language built around Rank-N semantics, matrix-free execution, ValueFacts, StateFacts, AddressFacts, RegionFacts, CoordinateFacts, GroupFact, Physical Reality, Traffic Reality, Silicon Domain Graphs, and Physical DAG execution.
 
@@ -12,6 +12,87 @@ physical work / mathematical-physical lower bound -> 1
 
 Idle silicon is valid whenever another materialization costs more than the remaining necessary work.
 
+
+## 1.3.111: high precision carries facts, not empty storage
+
+The P>64 Rank-N path is physically older and smaller without adding another arithmetic family. Big/big division now keeps its base-2^32 recurrence in real u32 digits, reuses the quotient high-water fact at the existing StrictClose boundary, and no longer pays for zero-extended qword slots. The historical `512*N+4096` object envelope is gone: PrecisionFact plus the existing Fourier TypePhysicalFact geometry now determine the exact live add/mul/div span used by compiler temporaries, decimal ingress and advanced mathematics.
+
+Direct big/big division improves by roughly 1.17x-1.34x over 1.3.110 in the measured 4096-262144-bit range. Experiments that were mathematically valid but physically regressive were removed rather than retained as alternate paths.
+
+## 1.3.110: Field rank is a fact, not a file width
+
+Field no longer has a semantic Rank-8 ceiling. `WHFLD217` carries one u64 RankFact followed by exactly `rank` extent and stride facts; Surface, canonical Field metadata, AddressFact deltas and runtime hot tables all derive their axis storage from that same invocation RankFact. The historical `FIELD_RUNTIME_RANK_CAP`, fixed 32-byte access delta, fixed `extent[8]/stride[8]`, and `r1..r8` runtime address/load/store families are gone.
+
+Native512 and Native256 now consume one runtime-rank address relation. AVX-512 spare coordinate registers remain physical resources rather than a language width authority. Current release probes execute rank 9, 17 and 33 through the same path, while old `WHFLD216` files are rejected rather than translated. Padded/strided output remains truthful through the unified scatter relation.
+
+A 1,048,576-element strict reduction shows no low-rank tax versus 1.3.109: sampled medians are about **1.039x** at rank 3 on Native512, **1.006x** at rank 3 on Native256, **0.999x** at rank 8 on Native512, and **1.018x** at rank 8 on Native256. These are small measurements, so the release claims structural convergence rather than a broad speedup. The separate signed-dword coordinate/span frontier remains explicit and is not disguised as a rank limit.
+
+No old-format compatibility reader, rank selector, workload route, DSL parallel surface, JIT, scheduler, worker pool, or second Field backend is added.
+
+
+## 1.3.109: local facts are not rediscovered globally
+
+Rank-N physical aging continues without a second high-precision system. General division now carries geometry already implied by normalized `fpP` and quotient production instead of rescanning U/V/Q. Strict RNE carry-out closes directly from the carry fact rather than shifting the complete P-bit carrier again. Fourier twiddle construction starts from the exact unit value, and the shared `sin/cos` relation keeps disposable sign and exact powers of two local instead of cloning a complete ValueFact or performing an extra high-precision addition.
+
+Seven obsolete carrier/geometry helper authorities are absent from the final General runtime. On the same `sin(fp8192)` generated probe, `.text` contracts from **16605 B to 16029 B (-3.47%)**. Wall-time probes are mostly neutral with low-single-digit movement in both directions, so this release makes no broad speedup claim; an experimentally shorter cross-span pointer-rotation realization was rejected after it increased cache/TLB work.
+
+The current release remains one `fpP`, one Rank-N/PrecisionFact authority and one Strict/RNE closure. No named-width backend, local-float dialect, precision selector, algorithm-threshold tree, JIT, kernel offload, scheduler, worker pool, workload matcher or source-visible parallel mechanism is added.
+
+
+## 1.3.108: advanced mathematics keeps local facts local
+
+Rank-N advanced relations now stop inflating exact scalar series coefficients into full `fpP` ValueFacts. `exp`, `log`, and the shared `sin/cos` propagation authority consume one shared exact `rankn_fp_div_u64` relation; the quotient is closed through the same strict RNE authority used by the rest of Rank-N. Representation convergence likewise uses one bit-identical ValueFact-silence predicate instead of invoking full numerical ordering.
+
+The compiler-side `fpP` constant/cast regression introduced by the earlier type-physicalization aging is repaired at its root: binding kind is stable local state across inference and Rank-N type materialization rather than a caller-saved register. Shared arithmetic zero identities also close centrally, so `sqrt(0)`, `exp(0)`, `log(1)`, `sin(0)`, and `cos(0)` no longer need or receive per-function compatibility branches.
+
+Same-host whole-process A/B against unmodified 1.3.107 shows the intended high-precision scaling: at 4096 bits, `exp/log/sin/cos` improve about **3.39x / 3.40x / 5.27x / 5.66x**; at 8192 bits, about **4.08x / 4.81x / 9.74x / 11.32x**. `sqrt` remains essentially a control because its dominant relation is true big/big division rather than a scalar series quotient. Representative MPFR RNDN probes at 1024/4096/8192 bits are bit-identical to 1.3.107, so the speedup does not come from relaxing the existing numerical result.
+
+No transcendental width selector, named-precision backend, `localfp` dialect, JIT, kernel offload, scheduler, worker pool, workload matcher, or second math backend is added.
+
+
+## 1.3.107: Local-Strict becomes physical aging, not a new dialect
+
+Rank-N add/sub now projects each canonical `fpP` operand directly into one operation-local guard/sticky carrier. The old `copy -> <<3 -> exponent shift -> sticky` sequence is gone from the production add/sub core. That carrier never escapes the semantic operation: the result still closes through the single strict normalization/RNE authority, so local representation does not defer rounding across later operations.
+
+The old Local-Strict research prototypes are absorbed only at the level that survives architecture review. Fixed local cell widths, sparse/local alternate representations, and separate numerical modes are not imported. `fpP` remains the only source surface and `PrecisionFact(P)` remains the only semantic precision authority.
+
+Pinned three-run medians versus unmodified 1.3.106 show add speedups of about **1.145x at 4096 bits**, **1.170x at 16384 bits**, **1.237x at 65536 bits**, **1.174x at 524288 bits**, and **1.140x at 1048576 bits**. Small widths improve only a few percent because fixed call overhead dominates. Multiplication and division receive no new algorithm family in this release and remain controls near their previous performance. Wheelchair still does not beat GMP overall in high-precision addition. Exact GMP oracles pass add/sub through 65536 bits and multiplication/RNE through 1048576 bits.
+
+No local-float DSL, precision selector, schoolbook/Karatsuba/Toom threshold tree, JIT, kernel-offload surface, scheduler, worker pool, workload matcher, or source-visible parallel mechanism is added.
+
+
+## 1.3.106: Rank-N physical work stops repeating itself
+
+High precision keeps one arithmetic authority while redundant physical work is removed around it. Every `fpP` type now owns one AOT `TypePhysicalFact` containing precision and Fourier geometry; numeric ValueFacts no longer carry geometry, and the runtime Fourier planner is gone. Exponent alignment is one word+bit relocation, same-P copies are direct carrier clones, normalized zero tests are O(1), destination initialization occurs only at final RNE commit, and division drops redundant scratch clears.
+
+Decimal ingress now accumulates source digits with the exact integer relation `D = 10D + digit` and normalizes only after the decimal sequence is complete. The old path invoked Rank-N Fourier multiplication for every decimal digit. In an fp4096 diagnostic with two roughly 900-digit inputs, whole-process median wall time falls from 102.55 ms in 1.3.105 to 0.407 ms in 1.3.106, about 252x. Direct arithmetic sees smaller but structural gains: add is about 1.24x to 1.46x faster across the sampled range, and small/mid-width multiplication reaches roughly 2x to 3x versus 1.3.105.
+
+GMP is not globally defeated. Against GMP 6.3.0 `mpf`, the sampled 524288-bit multiplication point is about 1.15x faster, while neighboring 262144-bit and 1048576-bit points remain slower; add and division remain clear frontiers. An independent GMP integer oracle passes exact product/RNE checks from 65 through 1048576 bits. No algorithm threshold tree, named-width backend, JIT, workload route, scheduler, worker pool, or source-visible parallel mechanism is added.
+
+
+## 1.3.105: Rank-N precision becomes a fact
+
+Parameterized floating precision is no longer packed into the low 30 bits of a semantic type ID. `fpP` now interns one compact type identity while the actual `P` lives in an exact-sized u64 PrecisionFact trailer derived from the represented program. The generated runtime maps that same trailer and copies precision once into the hot Rank-N object header. Limb count is derived from `P`; the duplicate stored limb-count field is gone.
+
+The historical `0x3fffffff` precision ceiling is therefore absent from compiler admission. `fp1073741824`, the first precision beyond the former wall, compiles through the ordinary path without a named-width backend or replacement threshold. Canonical Rank-N output exposes precision itself rather than the compiler-internal interned type identity.
+
+This release does not claim that every arithmetic kernel can physically execute every u64 precision. Local digit/index widths that belong to existing arithmetic realizations remain explicit implementation frontiers and are not promoted into semantic type limits. No JIT, kernel-offload surface, runtime width selector, scheduler, worker pool, or source-visible parallel mechanism is added.
+
+
+## 1.3.104: capacity follows facts, not magic numbers
+
+Arbitrary capacity tables now age into authorities that already exist. General physical CSE/constant candidates and Tensor profiling/cache facts follow instance-sized arenas instead of 32/16/64-slot tables. Invocation affinity storage grows to the kernel-reported cpuset width instead of assuming 128 bytes, while static placement remains locality-only. The native driver reuses process-start argv and mmap-sizes path storage rather than maintaining fixed copies.
+
+CPUID topology/cache scans now stop on architectural terminators. Structured matrix/vector dimensions leave the old 255-wide tag window, and the AOT-static `zeta`, `polylog`, and `tetration` relations no longer carry 32/16/8 semantic ceilings. None of these changes introduces a workload route, scheduler, worker pool, JIT, source-visible parallel directive, or second backend.
+
+`WHFLD216` rank/geometry remains an explicit format/runtime representation frontier in this release. It is not papered over by increasing `8` to another constant.
+
+
+## 1.3.103: dead authority becomes the next value
+
+General scalar FP realization now consumes its existing effective last-use frontier when placing a next StateFact. If the old authority is already dead before that update, the next value is born in the dead carrier instead of creating a separate output carrier and copying it back at the timestep boundary. Scalar FP carrier copies also converge onto the existing VEX/EVEX scalar emitter; the duplicate low-register copy encoder is gone.
+
+No dynamics recognizer, timestep heuristic, workload route, scheduler, worker pool, runtime CPU query, source-visible parallel directive, JIT path or second FP backend is introduced. A two-region explicit-dynamics diagnostic with a 10:1 timestep ratio removes four pure carrier transports per timestep in the four-state recurrence. Longer pinned wall-time A/B is neutral within measurement noise, so 1.3.103 makes no speedup claim for that case; the structural reduction is retained because it removes redundant physical work without adding a branch family.
 
 ## 1.3.102: execution admission becomes an invocation fact
 
@@ -128,6 +209,6 @@ bin/fieldc INPUT.json -o OUTPUT
 
 ## Release authority
 
-The current release gate contains **27 tests**. Production authority remains under `compiler/`, `runtime/`, `surface/`, `tools/`, `build.sh`, and generated `bin/` executables. `devtrash/` contains regression, benchmark, historical, and archaeological material only.
+The current release gate contains **29 tests**. Production authority remains under `compiler/`, `runtime/`, `surface/`, `tools/`, `build.sh`, and generated `bin/` executables. `devtrash/` contains regression, benchmark, historical, and archaeological material only.
 
-See `ARCHITECTURE_AGING_1_3_102.md`, `PERFORMANCE_1_3_102.md`, `TESTING_1_3_102.md`, `PURE_ASSEMBLY_RELEASE_PROOF_1_3_102.md`, `RELEASE_SURFACE_CONVERGENCE_1_3_102.md`, and `WHEELCHAIR_CHARTER_1_3_102.md`.
+See `ARCHITECTURE_AGING_1_3_105.md`, `PERFORMANCE_1_3_105.md`, `TESTING_1_3_105.md`, `PURE_ASSEMBLY_RELEASE_PROOF_1_3_105.md`, `RELEASE_SURFACE_CONVERGENCE_1_3_105.md`, and `WHEELCHAIR_CHARTER_1_3_105.md`.

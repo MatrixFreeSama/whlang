@@ -714,9 +714,7 @@ detect_cpu_topology:
     mov dword ptr [rip+logical_per_package],r8d
 .dctopo_next:
     inc r9d
-    cmp r9d,8
-    jb .dctopo_loop
-    jmp .dctopo_finish
+    jmp .dctopo_loop
 .dctopo_fallback:
     mov eax,1
     cpuid
@@ -1823,8 +1821,7 @@ detect_cache_topology:
     mov dword ptr [rip+l3_share_threads],esi
 .dct_next:
     inc r9d
-    cmp r9d, 32
-    jb .dct_loop
+    jmp .dct_loop
 .dct_pop:
     pop rbx
 .dct_done:

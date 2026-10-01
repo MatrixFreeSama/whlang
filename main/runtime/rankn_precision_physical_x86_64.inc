@@ -1,25 +1,22 @@
-# Wheelchair 1.3.40 parameterized Rank-N floating physical authority.
+# Wheelchair parameterized Rank-N floating physical authority.
 # Any floating precision wider than the native 64-bit lane is represented by
-# one logical ValueFact whose significand is a Rank-N limb axis.  No named
-# wide-width implementation exists here; precision is data carried by TYPE.
+# one logical ValueFact whose significand is a Rank-N limb axis. Type identity
+# is compact; precision is an independent u64 Physical Fact in the program
+# trailer and is copied once into each hot object header. Fourier geometry is
+# type-level Physical Fact data and is never duplicated in ValueFacts.
 #
-# Encoded type: RPF_TYPE_FLAG | significand_bits, significand_bits > 64.
 # Object layout:
-#   +0  u32 encoded type
-#   +4  u32 precision bits
-#   +8  u32 primary limb count = ceil(P/64)
-#   +12 u32 packed AOT Fourier geometry: b | a2<<8 | a3<<16 | a5<<24
+#   +0  u32 interned semantic type identity
+#   +4  u32 alignment padding (no semantic state)
+#   +8  u64 precision bits
 #   +16 u64 sign (0/1)
 #   +24 i64 unbiased exponent of normalized top significand bit
 #   +32 primary little-endian u64 limbs
-# The compiler reserves additional private limbs after the primary payload for
-# physical product-plane / quotient / reduction scratch. Helpers never own a scheduler.
+# Primary limb count is derived from precision and is never stored separately.
 
-.equ RPF_TYPE_FLAG,0x40000000
-.equ RPF_TYPE_MASK,0x3fffffff
+.equ RPF_TYPE_BASE,TYPE_STATIC_LAST+1
 .equ RPF_TYPE,0
-.equ RPF_PREC,4
-.equ RPF_N,8
+.equ RPF_PREC,8
 .equ RPF_SIGN,16
 .equ RPF_EXP,24
 .equ RPF_DATA,32
@@ -45,97 +42,137 @@
     pop rbx
 .endm
 
-# edi=encoded type -> eax=P or 0 invalid.
+# edi=interned type -> rax=P or 0 invalid, edx=packed Fourier geometry.
+# The exact program trailer stores one 16-byte TypePhysicalFact per fpP type;
+# no bit mask, named-width ceiling, per-value geometry, or runtime planner exists.
 rpf_precision_from_type:
+    cmp edi,RPF_TYPE_BASE
+    jb .rpft_bad
     mov eax,edi
-    and eax,RPF_TYPE_FLAG
-    cmp eax,RPF_TYPE_FLAG
-    jne .rpft_bad
-    mov eax,edi
-    and eax,RPF_TYPE_MASK
-    cmp eax,64
+    sub eax,RPF_TYPE_BASE
+    jc .rpft_bad
+    cmp eax,dword ptr [rip+rankn_type_count_patch]
+    jae .rpft_bad
+    mov rcx,qword ptr [rip+rankn_physical_fact_ptr]
+    test rcx,rcx
+    jz .rpft_bad
+    shl rax,4
+    mov edx,dword ptr [rcx+rax+8]
+    mov rax,qword ptr [rcx+rax]
+    cmp rax,64
     jbe .rpft_bad
     ret
 .rpft_bad:
     xor eax,eax
+    xor edx,edx
     ret
 
-# edi=encoded type -> eax=ceil(P/64), 0 invalid.
+# edi=interned type -> rax=ceil(P/64), 0 invalid.
 rpf_limbs_from_type:
     call rpf_precision_from_type
-    test eax,eax
+    test rax,rax
     jz .rpfl_bad
-    add eax,63
-    shr eax,6
+    add rax,63
+    jc .rpfl_bad
+    shr rax,6
     ret
 .rpfl_bad: xor eax,eax; ret
 
-# rdi=ptr, ecx=count limbs
+# rdi=ptr, rcx=count limbs
 rpf_zero_limbs:
     xor eax,eax
-    test ecx,ecx
+    test rcx,rcx
     jz .rpzl_done
 .rpzl_loop:
     mov [rdi],rax
     add rdi,8
-    dec ecx
+    dec rcx
     jnz .rpzl_loop
 .rpzl_done: ret
 
-# rdi=dst, rsi=src, ecx=count limbs
-rpf_copy_limbs:
-    test ecx,ecx
-    jz .rpcl_done
-.rpcl_loop:
-    mov rax,[rsi]
-    mov [rdi],rax
-    add rdi,8
-    add rsi,8
-    dec ecx
-    jnz .rpcl_loop
-.rpcl_done: ret
+# rdi=object, rsi=u64 payload, rdx=left shift. Carrier must already be zero.
+# A normalized <=64-bit source occupies at most two destination limbs.
+rpf_deposit_u64_shifted:
+    mov r8,rdx
+    shr r8,6
+    mov ecx,edx
+    and ecx,63
+    mov rax,rsi
+    xor rdx,rdx
+    shld rdx,rax,cl
+    shl rax,cl
+    mov [rdi+RPF_DATA+r8*8],rax
+    test rdx,rdx
+    jz .rpfdu_done
+    mov [rdi+RPF_DATA+r8*8+8],rdx
+.rpfdu_done:
+    ret
 
-# rdi=ptr, ecx=count -> eax=msb bit index, -1 zero
+# rdi=raw u64 limbs, rcx=N, edx=small addend (0..9) -> eax=overflow.
+# Decimal ingress uses the exact recurrence D <- 10*D + digit directly on
+# its integer carrier; no per-digit floating multiply/normalize episode exists.
+rpf_raw_mul10_add:
+    mov r8d,edx
+    mov r10d,10
+    xor r9d,r9d
+.rpfr10_loop:
+    cmp r9,rcx
+    jae .rpfr10_done
+    mov rax,[rdi+r9*8]
+    mul r10
+    add rax,r8
+    adc rdx,0
+    mov [rdi+r9*8],rax
+    mov r8,rdx
+    inc r9
+    jmp .rpfr10_loop
+.rpfr10_done:
+    xor eax,eax
+    test r8,r8
+    setnz al
+    ret
+
+# rdi=ptr, rcx=count -> rax=msb bit index, -1 zero
 rpf_msb:
-    test ecx,ecx
+    test rcx,rcx
     jz .rpfm_zero
-    lea edx,[ecx-1]
+    lea rdx,[rcx-1]
 .rpfm_loop:
     mov rax,[rdi+rdx*8]
     test rax,rax
     jnz .rpfm_yes
-    dec edx
+    dec rdx
     jns .rpfm_loop
 .rpfm_zero:
     mov eax,-1
     ret
 .rpfm_yes:
     bsr rax,rax
-    shl edx,6
-    add eax,edx
+    shl rdx,6
+    add rax,rdx
     ret
 
-# rdi=a,rsi=b,ecx=count -> eax -1/0/1 unsigned big-int compare
+# rdi=a,rsi=b,rcx=count -> eax -1/0/1 unsigned big-int compare
 rpf_cmp:
-    test ecx,ecx
+    test rcx,rcx
     jz .rpfc_eq
-    lea edx,[ecx-1]
+    lea rdx,[rcx-1]
 .rpfc_loop:
     mov rax,[rdi+rdx*8]
     mov r8,[rsi+rdx*8]
     cmp rax,r8
     ja .rpfc_gt
     jb .rpfc_lt
-    dec edx
+    dec rdx
     jns .rpfc_loop
 .rpfc_eq: xor eax,eax; ret
 .rpfc_gt: mov eax,1; ret
 .rpfc_lt: mov eax,-1; ret
 
-# rdi=a in/out,rsi=b,ecx=count -> carry eax 0/1
+# rdi=a in/out,rsi=b,rcx=count -> carry eax 0/1
 rpf_add_limbs:
     xor edx,edx
-    test ecx,ecx
+    test rcx,rcx
     jz .rpfal_done
     clc
 .rpfal_loop:
@@ -143,15 +180,15 @@ rpf_add_limbs:
     adc [rdi],rax
     lea rdi,[rdi+8]
     lea rsi,[rsi+8]
-    dec ecx
+    dec rcx
     jnz .rpfal_loop
     setc dl
 .rpfal_done: mov eax,edx; ret
 
-# rdi=a in/out,rsi=b,ecx=count -> borrow eax 0/1, requires a>=b for no borrow
+# rdi=a in/out,rsi=b,rcx=count -> borrow eax 0/1, requires a>=b for no borrow
 rpf_sub_limbs:
     xor edx,edx
-    test ecx,ecx
+    test rcx,rcx
     jz .rpfsl_done
     clc
 .rpfsl_loop:
@@ -159,147 +196,207 @@ rpf_sub_limbs:
     sbb [rdi],rax
     lea rdi,[rdi+8]
     lea rsi,[rsi+8]
-    dec ecx
+    dec rcx
     jnz .rpfsl_loop
     setc dl
 .rpfsl_done: mov eax,edx; ret
 
-# rdi=buf, ecx=count limbs. logical <<= 1, return carry eax.
-rpf_shl1:
-    xor edx,edx
-    test ecx,ecx
-    jz .rpfs1_done
-    clc
-    xor r8d,r8d
-.rpfs1_loop:
-    rcl qword ptr [rdi+r8*8],1
-    inc r8d                 # INC preserves CF
-    dec ecx                 # DEC preserves CF
-    jnz .rpfs1_loop
-    setc dl
-.rpfs1_done: mov eax,edx; ret
-
-# rdi=buf, ecx=count limbs. logical >>=1; discarded bit returned eax.
-rpf_shr1:
-    xor edx,edx
-    test ecx,ecx
-    jz .rpfr1_done
-    mov r8d,ecx
-    dec r8d
-    clc
-.rpfr1_loop:
-    rcr qword ptr [rdi+r8*8],1
-    dec r8d                 # DEC preserves CF
-    dec ecx                 # DEC preserves CF
-    jnz .rpfr1_loop
-    setc dl
-.rpfr1_done: mov eax,edx; ret
-
-# rdi=buf, ecx=count limbs, rdx=shift. Right shift in place with sticky collapse to bit0.
-rpf_shr_sticky:
+# rdi=dst, rsi=canonical src, rcx=src limbs, rdx=dst limbs, r8=signed shift.
+# Materialize one operation-local exact carrier in one pass.  Positive shift
+# moves left exactly; negative shift moves right and collapses every discarded
+# low bit into sticky bit 0.  This is the Local-Strict physical projection used
+# by add/sub: copy, guard extension, exponent alignment and sticky formation are
+# one relation rather than four full-carrier episodes.
+rpf_project_local_carrier:
     push rbx
+    push rbp
     push r12
     push r13
-    mov r12,rdx
-    xor ebx,ebx
+    push r14
+    push r15
+    mov r15,rdi                  # dst
+    mov rbx,rsi                  # src
+    mov r12,rcx                  # src N
+    mov r13,rdx                  # dst N
+    mov r14,r8                   # signed shift
+    test r14,r14
+    js .rpfplc_right
+
+    # Exact left projection.
+    mov rbp,r14
+    shr rbp,6                    # whole-limb displacement q
+    mov r10d,r14d
+    and r10d,63                  # intra-limb displacement r
+    xor r11d,r11d                # destination i
+.rpfplc_left_loop:
+    cmp r11,r13
+    jae .rpfplc_done
+    xor eax,eax
+    cmp r11,rbp
+    jb .rpfplc_left_store
+    mov r9,r11
+    sub r9,rbp                   # nominal source j
+    test r10d,r10d
+    jz .rpfplc_left_direct
+    # Current source contributes its low part when it exists.
+    cmp r9,r12
+    jae .rpfplc_left_prev
+    mov rax,[rbx+r9*8]
+    mov ecx,r10d
+    shl rax,cl
+.rpfplc_left_prev:
+    # Previous source contributes the cross-limb high part even when j==srcN.
+    test r9,r9
+    jz .rpfplc_left_store
+    lea rdx,[r9-1]
+    cmp rdx,r12
+    jae .rpfplc_left_store
+    mov rdx,[rbx+rdx*8]
+    mov ecx,64
+    sub ecx,r10d
+    shr rdx,cl
+    or rax,rdx
+    jmp .rpfplc_left_store
+.rpfplc_left_direct:
+    cmp r9,r12
+    jae .rpfplc_left_store
+    mov rax,[rbx+r9*8]
+.rpfplc_left_store:
+    mov [r15+r11*8],rax
+    inc r11
+    jmp .rpfplc_left_loop
+
+.rpfplc_right:
+    neg r14                     # positive right distance
+    xor ebp,ebp                 # sticky accumulator in rbp
     test r12,r12
-    jz .rpfss_done
-    mov eax,ecx
+    jz .rpfplc_zero_dst
+    mov rax,r12
     shl rax,6
-    cmp r12,rax
-    jb .rpfss_loop
-    # Everything is discarded: collapse any source one into bit0.
-    xor r13d,r13d
-.rpfss_orall:
-    cmp r13d,ecx
-    jae .rpfss_zeroall
-    or rbx,[rdi+r13*8]
-    inc r13d
-    jmp .rpfss_orall
-.rpfss_zeroall:
-    mov r13d,ecx
-.rpfss_zloop:
-    test r13d,r13d
-    jz .rpfss_finish
-    dec r13d
-    mov qword ptr [rdi+r13*8],0
-    jmp .rpfss_zloop
-.rpfss_loop:
-    test r12,r12
-    jz .rpfss_finish
-    push rcx
-    call rpf_shr1
-    pop rcx
-    or ebx,eax
-    dec r12
-    jmp .rpfss_loop
-.rpfss_finish:
-    test rbx,rbx
-    jz .rpfss_done
-    or qword ptr [rdi],1
-.rpfss_done:
+    cmp r14,rax
+    jb .rpfplc_right_partial
+    # Entire source is discarded; only sticky survives.
+    xor r11d,r11d
+.rpfplc_all_sticky:
+    cmp r11,r12
+    jae .rpfplc_zero_dst
+    or rbp,[rbx+r11*8]
+    inc r11
+    jmp .rpfplc_all_sticky
+
+.rpfplc_right_partial:
+    mov r9,r14
+    shr r9,6                    # q
+    mov r10d,r14d
+    and r10d,63                 # r
+    xor r11d,r11d
+.rpfplc_sticky_words:
+    cmp r11,r9
+    jae .rpfplc_sticky_bits
+    or rbp,[rbx+r11*8]
+    inc r11
+    jmp .rpfplc_sticky_words
+.rpfplc_sticky_bits:
+    test r10d,r10d
+    jz .rpfplc_right_move
+    mov rax,[rbx+r9*8]
+    mov ecx,r10d
+    mov rdx,1
+    shl rdx,cl
+    dec rdx
+    and rax,rdx
+    or rbp,rax
+.rpfplc_right_move:
+    xor r11d,r11d               # destination i
+.rpfplc_right_loop:
+    cmp r11,r13
+    jae .rpfplc_finish_sticky
+    lea r8,[r11+r9]             # source j=i+q
+    xor eax,eax
+    cmp r8,r12
+    jae .rpfplc_right_store
+    mov rax,[rbx+r8*8]
+    test r10d,r10d
+    jz .rpfplc_right_store
+    mov ecx,r10d
+    shr rax,cl
+    lea rdx,[r8+1]
+    cmp rdx,r12
+    jae .rpfplc_right_store
+    mov rdx,[rbx+rdx*8]
+    mov ecx,64
+    sub ecx,r10d
+    shl rdx,cl
+    or rax,rdx
+.rpfplc_right_store:
+    mov [r15+r11*8],rax
+    inc r11
+    jmp .rpfplc_right_loop
+
+.rpfplc_zero_dst:
+    xor r11d,r11d
+.rpfplc_zero_loop:
+    cmp r11,r13
+    jae .rpfplc_finish_sticky
+    mov qword ptr [r15+r11*8],0
+    inc r11
+    jmp .rpfplc_zero_loop
+.rpfplc_finish_sticky:
+    test rbp,rbp
+    jz .rpfplc_done
+    or qword ptr [r15],1
+.rpfplc_done:
+    pop r15
+    pop r14
     pop r13
     pop r12
+    pop rbp
     pop rbx
     ret
 
-# rdi=buf, ecx=count limbs, edx=shift. Exact left shift, overflow beyond count discarded.
-rpf_shl_exact:
-    test edx,edx
-    jz .rpfse_done
-.rpfse_loop:
-    push rdx
-    push rcx
-    call rpf_shl1
-    pop rcx
-    pop rdx
-    dec edx
-    jnz .rpfse_loop
-.rpfse_done: ret
-
-# rdi=src, ecx=count, edx=bit index >=0 -> eax 0/1
+# rdi=src, rcx=count, rdx=bit index -> eax 0/1
 rpf_test_bit:
-    test edx,edx
+    test rdx,rdx
     js .rpftb_zero
-    mov eax,edx
-    shr eax,6
-    cmp eax,ecx
+    mov rax,rdx
+    shr rax,6
+    cmp rax,rcx
     jae .rpftb_zero
-    mov r8d,edx
+    mov r8,rdx
     and r8d,63
     mov rax,[rdi+rax*8]
-    mov ecx,r8d
+    mov rcx,r8
     shr rax,cl
     and eax,1
     ret
 .rpftb_zero: xor eax,eax; ret
 
-# rdi=src, ecx=count, edx=number of lowest bits -> eax nonzero if any set.
+# rdi=src, rcx=count, rdx=number of lowest bits -> eax nonzero if any set.
 rpf_any_low_bits:
-    test edx,edx
+    test rdx,rdx
     jle .rpfalb_zero
-    mov r8d,edx
-    shr r8d,6                 # full limbs
+    mov r8,rdx
+    shr r8,6                 # full limbs
     xor r9d,r9d
     xor eax,eax
 .rpfalb_full:
-    cmp r9d,r8d
+    cmp r9,r8
     jae .rpfalb_rem
-    cmp r9d,ecx
+    cmp r9,rcx
     jae .rpfalb_zero
     or rax,[rdi+r9*8]
-    inc r9d
+    inc r9
     jmp .rpfalb_full
 .rpfalb_rem:
     test rax,rax
     jnz .rpfalb_yes
-    mov r10d,edx
+    mov r10,rdx
     and r10d,63
     jz .rpfalb_zero
-    cmp r8d,ecx
+    cmp r8,rcx
     jae .rpfalb_zero
     mov rax,[rdi+r8*8]
-    mov ecx,r10d
+    mov rcx,r10
     mov r11,-1
     shl r11,cl
     not r11
@@ -310,7 +407,33 @@ rpf_any_low_bits:
 .rpfalb_yes: mov eax,1; ret
 .rpfalb_zero: xor eax,eax; ret
 
-# rdi=dst, esi=encoded type. Initialize header and zero primary limbs.
+# rdi=dst, esi=interned type. Initialize semantic header only.
+# The primary carrier is deliberately untouched: strict closures that overwrite
+# every live limb must not pay an otherwise dead zero-fill pass.
+rpf_object_header_init:
+    push rbx
+    push r12
+    mov r12,rdi
+    mov ebx,esi
+    mov edi,esi
+    call rpf_precision_from_type
+    test rax,rax
+    jz .rpfoh_bad
+    mov [r12+RPF_PREC],rax
+    mov [r12+RPF_TYPE],ebx
+    mov qword ptr [r12+RPF_SIGN],0
+    mov qword ptr [r12+RPF_EXP],0
+    xor eax,eax
+    jmp .rpfoh_done
+.rpfoh_bad: mov eax,1
+.rpfoh_done:
+    pop r12
+    pop rbx
+    ret
+
+# rdi=dst, esi=interned type. Initialize header and a canonical zero carrier.
+# Zero constructors keep the direct hot path; strict nonzero closures use the
+# header-only entry above and therefore never pay this zero-fill.
 rpf_object_init:
     push rbx
     push r12
@@ -318,13 +441,14 @@ rpf_object_init:
     mov ebx,esi
     mov edi,esi
     call rpf_precision_from_type
-    test eax,eax
+    test rax,rax
     jz .rpfoi_bad
-    mov [r12+RPF_PREC],eax
+    mov [r12+RPF_PREC],rax
     mov [r12+RPF_TYPE],ebx
-    lea ecx,[eax+63]
-    shr ecx,6
-    mov [r12+RPF_N],ecx
+    mov rcx,rax
+    add rcx,63
+    jc .rpfoi_bad
+    shr rcx,6
     mov qword ptr [r12+RPF_SIGN],0
     mov qword ptr [r12+RPF_EXP],0
     lea rdi,[r12+RPF_DATA]
@@ -341,31 +465,46 @@ rpf_object_init:
 # r8=signed binary scale K where value=src_integer*2^K, r9d=dest encoded type.
 # Correctly rounds to destination precision with round-to-nearest-even.
 rpf_round_from_integer:
+    mov r10d,-1               # producer did not preserve a top-bit fact
+    jmp .rpfr_entry
+# Same strict closure with a producer-supplied exact source top bit in r10d.
+# This is not a second rounding path; it only skips physical rediscovery.
+rpf_round_from_integer_known_top:
+.rpfr_entry:
     RPF_SAVE
-    sub rsp,32
+    sub rsp,48
     mov r12,rdi
     mov r13,rsi
     mov r14d,edx
     mov [rsp],rcx             # sign
     mov [rsp+8],r8            # K
     mov r15d,r9d
+    test r10d,r10d
+    jns .rpfr_top_known
     mov rdi,r13
     mov ecx,r14d
     call rpf_msb
     test eax,eax
     js .rpfr_zero
+    jmp .rpfr_top_ready
+.rpfr_top_known:
+    mov eax,r10d
+.rpfr_top_ready:
     mov ebx,eax               # source top bit t
     mov [rsp+24],eax          # preserve t across generic copy loops
     mov rdi,r12
     mov esi,r15d
-    call rpf_object_init
+    call rpf_object_header_init
     test eax,eax
     jnz .rpfr_bad
     mov eax,[r12+RPF_PREC]
     mov ebp,eax               # P
-    mov ecx,[r12+RPF_N]
-    lea rdi,[r12+RPF_DATA]
-    call rpf_zero_limbs
+    mov rcx,[r12+RPF_PREC]
+    add rcx,63
+    shr rcx,6
+    mov [rsp+32],rcx          # N is immutable throughout rounding
+    # Header-only init keeps the primary carrier untouched.  The common
+    # right-shift closure overwrites every live limb exactly once.
     # shift = t-(P-1)
     mov eax,ebp
     dec eax
@@ -377,7 +516,7 @@ rpf_round_from_integer:
     # Right-shift copy by repeating source copy into destination scratch then shift.
     # First copy low N limbs from source; source may have more limbs, so use a temporary
     # region immediately after primary payload with src_limbs capacity.
-    mov ecx,[r12+RPF_N]
+    mov rcx,[rsp+32]
     lea rdi,[r12+RPF_DATA]
     xor eax,eax
     # generic bit extraction: destination bit j gets source bit j+shift.
@@ -409,7 +548,7 @@ rpf_round_from_integer:
     shl rdx,cl
     or rax,rdx
 .rpfr_r_restorec:
-    mov ecx,[r12+RPF_N]
+    mov rcx,[rsp+32]
 .rpfr_r_store:
     mov [rdi+r10*8],rax
     inc r10d
@@ -437,7 +576,7 @@ rpf_round_from_integer:
     jz .rpfr_store_meta
 .rpfr_inc:
     lea rdi,[r12+RPF_DATA]
-    mov ecx,[r12+RPF_N]
+    mov rcx,[rsp+32]
     mov rax,1
     clc
     xor r10d,r10d
@@ -470,22 +609,27 @@ rpf_round_from_integer:
     # P multiple of 64; overflow would be carry beyond N, already lost. Detect all-zero after wrap impossible here.
     jmp .rpfr_store_meta
 .rpfr_overflow:
-    lea rdi,[r12+RPF_DATA]
-    mov ecx,[r12+RPF_N]
-    call rpf_shr1
+    # RNE overflow proves that every retained low bit wrapped to zero and the
+    # only surviving information is the carry across bit P.  Close directly to
+    # the normalized top bit instead of rescanning/shifting the whole carrier.
     mov eax,ebp
     dec eax
     mov edx,eax
     shr edx,6
     and eax,63
-    bts qword ptr [r12+RPF_DATA+rdx*8],rax
+    mov r10,1
+    mov ecx,eax
+    shl r10,cl
+    mov [r12+RPF_DATA+rdx*8],r10
     inc dword ptr [rsp+24]
     jmp .rpfr_store_meta
 .rpfr_left:
     neg edx                    # left shift amount d
     mov [rsp+20],edx
-    mov ecx,[r12+RPF_N]
+    # The sparse left-deposit path ORs source pieces, so only this uncommon path
+    # materializes a zero carrier.
     lea rdi,[r12+RPF_DATA]
+    mov rcx,[rsp+32]
     call rpf_zero_limbs
     mov eax,[rsp+20]
     mov r10d,eax
@@ -501,7 +645,8 @@ rpf_round_from_integer:
     jz .rpfr_l_next
     mov edx,ebx
     add edx,r10d
-    cmp edx,[r12+RPF_N]
+    mov rcx,[rsp+32]
+    cmp rdx,rcx
     jae .rpfr_l_next
     test r11d,r11d
     jz .rpfr_l_direct
@@ -510,7 +655,8 @@ rpf_round_from_integer:
     shl r8,cl
     or [r12+RPF_DATA+rdx*8],r8
     inc edx
-    cmp edx,[r12+RPF_N]
+    mov rcx,[rsp+32]
+    cmp rdx,rcx
     jae .rpfr_l_next
     mov ecx,64
     sub ecx,r11d
@@ -544,7 +690,7 @@ rpf_round_from_integer:
 .rpfr_bad:
     mov eax,1
 .rpfr_done:
-    add rsp,32
+    add rsp,48
     RPF_RESTORE
     ret
 
@@ -572,21 +718,13 @@ rankn_fp_from_u64:
     mov rdi,r12; mov esi,r14d; call rpf_object_init; test eax,eax; jnz .rffu_bad
     mov [r12+RPF_SIGN],qword ptr 0
     mov [r12+RPF_EXP],rbx
-    # Place source integer so its msb lands at P-1, bit by bit (P can be arbitrary).
-    mov ecx,[r12+RPF_N]; lea rdi,[r12+RPF_DATA]; call rpf_zero_limbs
+    # Place source integer so its msb lands at P-1 in one at-most-two-limb deposit.
     mov eax,ebp; dec eax; sub eax,ebx
-    mov r10d,eax               # left shift
-    xor r11d,r11d
-.rffu_bits:
-    cmp r11d,64
-    jae .rffu_ok
-    bt r13,r11
-    jnc .rffu_next
-    mov eax,r11d; add eax,r10d
-    mov edx,eax; shr edx,6; and eax,63
-    bts qword ptr [r12+RPF_DATA+rdx*8],rax
-.rffu_next: inc r11d; jmp .rffu_bits
-.rffu_ok: mov rax,r12; xor edx,edx; jmp .rffu_done
+    mov edx,eax
+    mov rdi,r12
+    mov rsi,r13
+    call rpf_deposit_u64_shifted
+    mov rax,r12; xor edx,edx; jmp .rffu_done
 .rffu_zero:
     mov rdi,r12; mov esi,r14d; call rpf_object_init; test eax,eax; jnz .rffu_bad
     mov rax,r12; xor edx,edx; jmp .rffu_done
@@ -644,17 +782,11 @@ rankn_fp_from_f64_bits:
     mov eax,[r12+RPF_PREC]; dec eax
     bsr rcx,rbx
     sub eax,ecx                # shift mantissa left
-    mov r10d,eax
-    xor r11d,r11d
-.rffd_bits:
-    cmp r11d,64; jae .rffd_ok
-    bt rbx,r11
-    jnc .rffd_next
-    mov eax,r11d; add eax,r10d
-    mov edx,eax; shr edx,6; and eax,63
-    bts qword ptr [r12+RPF_DATA+rdx*8],rax
-.rffd_next: inc r11d; jmp .rffd_bits
-.rffd_ok: mov rax,r12; xor edx,edx; jmp .rffd_done
+    mov edx,eax
+    mov rdi,r12
+    mov rsi,rbx
+    call rpf_deposit_u64_shifted
+    mov rax,r12; xor edx,edx; jmp .rffd_done
 .rffd_zero:
     mov rdi,r12; mov esi,r14d; call rpf_object_init; test eax,eax; jnz .rffd_bad
     mov rax,r12; xor edx,edx; jmp .rffd_done
@@ -666,8 +798,17 @@ rankn_fp_from_f64_bits:
 rankn_fp_convert:
     RPF_SAVE
     mov r12,rdi; mov r13,rsi; mov r14d,edx
-    mov eax,[r13+RPF_N]
-    mov r15d,eax
+    cmp dword ptr [r13+RPF_TYPE],r14d
+    jne .rpfcv_rescale
+    mov rdi,r12; mov rsi,r13; mov edx,r14d
+    call rpf_copy_object
+    test eax,eax
+    jnz .rpfcv_bad
+    mov rax,r12; xor edx,edx; jmp .rpfcv_done
+.rpfcv_rescale:
+    mov r15,[r13+RPF_PREC]
+    add r15,63
+    shr r15,6
     mov rax,[r13+RPF_EXP]
     mov ecx,[r13+RPF_PREC]
     dec ecx
@@ -686,46 +827,70 @@ rankn_fp_convert:
 .rpfcv_done: RPF_RESTORE; ret
 
 # Internal addition core. r10d=0 add,1 subtract b sign.
+# Each operand is projected once from its canonical ValueFact into an operation-
+# local guard/sticky carrier.  The local carrier may be noncanonical; it cannot
+# escape this semantic operation and is closed by the one strict RNE authority.
 rpf_add_core:
     RPF_SAVE
-    sub rsp,32
+    sub rsp,48
     mov r12,rdi; mov r13,rsi; mov r14,rdx; mov r15d,ecx
     mov [rsp],r10d
-    mov rdi,r12; mov esi,r15d; call rpf_object_init; test eax,eax; jnz .rpfac_bad
-    mov ebp,[r12+RPF_N]
-    # Require operands already same precision as destination.
-    mov eax,[r12+RPF_PREC]
-    cmp [r13+RPF_PREC],eax; jne .rpfac_bad
-    cmp [r14+RPF_PREC],eax; jne .rpfac_bad
-    # scratch A at primary+N, scratch B after N+2
+    mov edi,r15d; call rpf_precision_from_type; test rax,rax; jz .rpfac_bad
+    mov rbx,rax                              # destination PrecisionFact P
+    mov rbp,rax; add rbp,63; shr rbp,6      # canonical limb count N
+    cmp [r13+RPF_PREC],rbx; jne .rpfac_bad
+    cmp [r14+RPF_PREC],rbx; jne .rpfac_bad
+
+    # Operation-local carriers live after the primary destination payload.
     lea r8,[r12+RPF_DATA]
-    mov eax,ebp; shl rax,3; lea r9,[r8+rax]
+    mov rax,rbp; shl rax,3
+    lea r9,[r8+rax]
     lea r11,[r9+rax+16]
     mov [rsp+8],r9
     mov [rsp+16],r11
-    # zero/copy N+2 and shift left 3
-    mov rdi,r9; lea ecx,[ebp+2]; call rpf_zero_limbs
-    mov rdi,r9; lea rsi,[r13+RPF_DATA]; mov ecx,ebp; call rpf_copy_limbs
-    mov rdi,r9; lea ecx,[ebp+2]; mov edx,3; call rpf_shl_exact
-    mov rdi,r11; lea ecx,[ebp+2]; call rpf_zero_limbs
-    mov rdi,r11; lea rsi,[r14+RPF_DATA]; mov ecx,ebp; call rpf_copy_limbs
-    mov rdi,r11; lea ecx,[ebp+2]; mov edx,3; call rpf_shl_exact
-    # align to maximum exponent
-    mov rax,[r13+RPF_EXP]; mov rbx,[r14+RPF_EXP]
-    cmp rax,rbx
-    jge .rpfac_aexp
-    mov [rsp+24],rbx            # save Emax before caller-saved helper use
-    mov rdx,rbx; sub rdx,rax
-    mov rdi,r9; lea ecx,[ebp+2]; call rpf_shr_sticky
-    jmp .rpfac_aligned
-.rpfac_aexp:
-    mov [rsp+24],rax            # save Emax before caller-saved helper use
-    mov rdx,rax; sub rdx,rbx
-    mov rdi,r11; lea ecx,[ebp+2]; call rpf_shr_sticky
-.rpfac_aligned:
+
+    # Emax and the two signed local projections: 3-(Emax-Eoperand).
+    mov rax,[r13+RPF_EXP]
+    mov rdx,[r14+RPF_EXP]
+    cmp rax,rdx
+    jge .rpfac_emax_a
+    mov [rsp+24],rdx
+    mov rcx,rdx
+    sub rcx,rax
+    mov rax,3
+    sub rax,rcx
+    mov [rsp+32],rax                        # shift A
+    mov qword ptr [rsp+40],3                # shift B
+    jmp .rpfac_project
+.rpfac_emax_a:
+    mov [rsp+24],rax
+    mov qword ptr [rsp+32],3                # shift A
+    sub rax,rdx
+    mov rcx,3
+    sub rcx,rax
+    mov [rsp+40],rcx                        # shift B
+
+.rpfac_project:
+    # A: canonical P-bit significand -> one local (N+2)-limb guard carrier.
+    mov rdi,[rsp+8]
+    lea rsi,[r13+RPF_DATA]
+    mov rcx,rbp
+    lea rdx,[rbp+2]
+    mov r8,[rsp+32]
+    call rpf_project_local_carrier
+    # B: same relation, independently.  No copy/shift/alignment episodes remain.
+    mov rdi,[rsp+16]
+    lea rsi,[r14+RPF_DATA]
+    mov rcx,rbp
+    lea rdx,[rbp+2]
+    mov r8,[rsp+40]
+    call rpf_project_local_carrier
+
+    mov r9,[rsp+8]
+    mov r11,[rsp+16]
     mov rcx,[r13+RPF_SIGN]
     mov rdx,[r14+RPF_SIGN]
-    xor edx,dword ptr [rsp]     # subtract flips b sign bit
+    xor edx,dword ptr [rsp]                 # subtract flips b sign bit
     cmp rcx,rdx
     jne .rpfac_sub
     mov rdi,r9; mov rsi,r11; lea ecx,[ebp+2]; call rpf_add_limbs
@@ -745,8 +910,9 @@ rpf_add_core:
     mov r10,[r14+RPF_SIGN]
     xor r10d,[rsp]
 .rpfac_round:
+    # local carrier scale: Emax-(P-1)-3.  Strict closure owns normalization/RNE.
     mov r8,[rsp+24]
-    mov eax,[r12+RPF_PREC]; dec eax; sub r8,rax; sub r8,3
+    mov eax,[r13+RPF_PREC]; dec eax; sub r8,rax; sub r8,3
     mov rdi,r12; mov rsi,r9; lea edx,[ebp+2]; mov rcx,r10; mov r9d,r15d
     call rpf_round_from_integer
     test eax,eax; jnz .rpfac_bad
@@ -755,7 +921,7 @@ rpf_add_core:
     mov rdi,r12; mov esi,r15d; call rpf_object_init
     xor eax,eax; jmp .rpfac_done
 .rpfac_bad: mov eax,1
-.rpfac_done: add rsp,32; RPF_RESTORE; ret
+.rpfac_done: add rsp,48; RPF_RESTORE; ret
 
 .global rankn_fp_add
 rankn_fp_add: xor r10d,r10d; jmp rpf_add_core
@@ -769,18 +935,8 @@ rankn_fp_sub: mov r10d,1; jmp rpf_add_core
 # base-2^32 helpers below.
 # -----------------------------------------------------------------------------
 
-# rdi=base32 slots, ecx=capacity -> eax=significant digit count.
-rpf_highlen32:
-    mov eax,ecx
-.rh32_loop:
-    test eax,eax; jz .rh32_done
-    mov edx,eax; dec edx
-    mov r8,[rdi+rdx*8]; mov r8d,r8d
-    test r8,r8; jnz .rh32_done
-    dec eax; jmp .rh32_loop
-.rh32_done: ret
-
 # Correct count-preserving base-2^32 shift helper used by Knuth division.
+# Logical base-2^32 digits are physical dwords, not zero-extended qword slots.
 rpf_shl32_slots2:
     push rbx; push rbp
     mov ebx,ecx; mov ebp,edx
@@ -788,11 +944,10 @@ rpf_shl32_slots2:
     xor r8d,r8d; xor r9d,r9d
 .rs322_loop:
     cmp r8d,ebx; jae .rs322_done
-    mov rax,[rdi+r8*8]; mov eax,eax
+    mov eax,dword ptr [rdi+r8*4]
     mov r10,rax; mov ecx,ebp; shl r10,cl; or r10,r9
     mov r9,r10; shr r9,32
-    mov r10d,r10d
-    mov [rdi+r8*8],r10
+    mov dword ptr [rdi+r8*4],r10d
     inc r8d; jmp .rs322_loop
 .rs322_done:
     pop rbp; pop rbx; ret
@@ -810,25 +965,30 @@ rpf_get32:
     ret
 .rg32_zero: xor eax,eax; ret
 
-# rdi=dst64,rsi=src base32 slots,ecx=dst64 count,edx=src32 count.
+# rdi=dst64,rsi=src base32 dwords,ecx=dst64 count,edx=src32 count.
+# Each destination qword is written once from two compact 32-bit digits.
 rpf_32_to_u64:
-    push rbx; push r12; push r13; push r14; push r15
-    mov r12,rdi; mov r13,rsi; mov r14d,ecx; mov r15d,edx
-    mov rdi,r12; mov ecx,r14d; call rpf_zero_limbs
-    xor ebx,ebx
+    xor r8d,r8d
 .r32u_loop:
-    cmp ebx,r15d; jae .r32u_done
-    mov rax,[r13+rbx*8]; mov eax,eax
-    mov edx,ebx; shr edx,1
-    cmp edx,r14d; jae .r32u_next
-    test ebx,1; jz .r32u_low
-    shl rax,32
-.r32u_low:
-    or [r12+rdx*8],rax
-.r32u_next:
-    inc ebx; jmp .r32u_loop
+    cmp r8d,ecx
+    jae .r32u_done
+    lea r9d,[r8d+r8d]
+    xor eax,eax
+    cmp r9d,edx
+    jae .r32u_store
+    mov eax,dword ptr [rsi+r9*4]
+    lea r10d,[r9d+1]
+    cmp r10d,edx
+    jae .r32u_store
+    mov r11d,dword ptr [rsi+r10*4]
+    shl r11,32
+    or rax,r11
+.r32u_store:
+    mov [rdi+r8*8],rax
+    inc r8d
+    jmp .r32u_loop
 .r32u_done:
-    pop r15; pop r14; pop r13; pop r12; pop rbx; ret
+    ret
 
 # -----------------------------------------------------------------------------
 # Native zero-algorithm-if Fourier product realization.
@@ -870,173 +1030,6 @@ rpf_nf_half:     .double 0.5
     vaddsubpd \out, \out, \t2
 .endm
 
-# uint64 ceil_log2(uint64 x), x>=1
-rpf_nf_ceil_log2:
-    cmp rdi,1
-    jbe .rpf_ncl_zero
-    dec rdi
-    bsr rax,rdi
-    inc eax
-    ret
-.rpf_ncl_zero: xor eax,eax; ret
-
-# edi=P, rsi=geom*. Search one Fourier geometry only; no algorithm-name branch.
-# b is bounded by floor(53/2)=26, derived from binary64 coefficient exactness.
-rpf_nf_choose_geom:
-    push rbx; push rbp; push r12; push r13; push r14; push r15
-    sub rsp,80
-    mov r12d,edi
-    mov r13,rsi
-    # No stale geometry state: the search either writes one valid geometry or fails.
-    mov qword ptr [r13+0],0
-    mov qword ptr [r13+8],0
-    mov qword ptr [r13+16],0
-    mov qword ptr [r13+24],0
-    mov qword ptr [r13+32],0
-    mov qword ptr [rsp+0],-1              # best cost
-    mov dword ptr [rsp+8],0               # best b
-    mov ebx,26                             # b
-.rpf_ncg_b_loop:
-    cmp ebx,1
-    jl .rpf_ncg_done_search
-    # n=ceil(P/b)
-    mov eax,r12d
-    add eax,ebx
-    dec eax
-    xor edx,edx
-    div ebx
-    mov r14d,eax
-    mov [rsp+16],rax                       # n
-    lea r15,[rax+rax-1]                    # need=2n-1
-    mov [rsp+24],r15
-    # safety digit square = (2^b-1)^2
-    mov ecx,ebx
-    mov rax,1
-    shl rax,cl
-    dec rax
-    imul rax,rax
-    mov [rsp+32],rax                       # md2
-    # enumerate base3=3^a3 while base3 <= 2*need
-    mov qword ptr [rsp+40],1               # base3
-    mov dword ptr [rsp+48],0               # a3
-.rpf_ncg_a3_loop:
-    mov rax,[rsp+40]
-    mov rcx,[rsp+24]
-    shl rcx,1
-    cmp rax,rcx
-    ja .rpf_ncg_next_b
-    mov [rsp+56],rax                       # base=base3*5^a5
-    mov dword ptr [rsp+64],0               # a5
-.rpf_ncg_a5_loop:
-    mov rbp,[rsp+56]                       # base
-    mov rcx,[rsp+24]
-    shl rcx,1
-    cmp rbp,rcx
-    ja .rpf_ncg_a5_done
-    # ratio=ceil(need/base)
-    mov rax,[rsp+24]
-    lea rax,[rax+rbp-1]
-    xor edx,edx
-    div rbp
-    mov rdi,rax
-    call rpf_nf_ceil_log2
-    mov r10d,eax                           # a2
-    cmp r10d,62
-    ja .rpf_ncg_candidate_next
-    mov r11,rbp
-    mov ecx,r10d
-    shl r11,cl                             # N
-    cmp r11,[rsp+24]
-    jb .rpf_ncg_candidate_next
-    # L=ceil_log2(N)
-    mov rdi,r11
-    call rpf_nf_ceil_log2
-    test eax,eax
-    jz .rpf_ncg_candidate_next
-    mov r9d,eax                            # L
-    # safety: n*md2 < floor((2^51-1)/L), one native-SIMD guard bit
-    mov rax,0x0007ffffffffffff
-    xor edx,edx
-    mov ecx,r9d
-    div rcx
-    mov r8,rax                             # threshold
-    mov rax,[rsp+32]
-    mul qword ptr [rsp+16]
-    test rdx,rdx
-    jnz .rpf_ncg_candidate_next
-    cmp rax,r8
-    jae .rpf_ncg_candidate_next
-    # Continuous physical surface.  Quadratic repeated-radix terms model the
-    # measured register/memory compound cost of stacking non-binary stages;
-    # this is geometry cost, never a precision threshold or algorithm branch.
-    # cost = N*(100*a2 + 120*a3 + 180*a5 + 10*a3^2 + 30*a5^2) + 40*n
-    mov eax,r10d
-    imul eax,eax,100
-    mov ecx,[rsp+48]
-    mov edx,ecx
-    imul ecx,ecx,120
-    add eax,ecx
-    imul edx,edx
-    imul edx,edx,10
-    add eax,edx
-    mov ecx,[rsp+64]
-    mov edx,ecx
-    imul ecx,ecx,180
-    add eax,ecx
-    imul edx,edx
-    imul edx,edx,30
-    add eax,edx
-    mov ecx,eax
-    mov rax,r11
-    imul rax,rcx
-    mov rcx,[rsp+16]
-    imul rcx,rcx,40
-    add rax,rcx
-    cmp rax,[rsp+0]
-    jae .rpf_ncg_candidate_next
-    mov [rsp+0],rax
-    mov [rsp+8],ebx                        # best b (diagnostic only)
-    mov [rsp+12],r10d                      # best a2 (diagnostic only)
-    # Store best immediately into geom; overwritten only on better candidate.
-    mov [r13+G_B],ebx
-    mov [r13+G_A2],r10d
-    mov eax,[rsp+48]; mov [r13+G_A3],eax
-    mov eax,[rsp+64]; mov [r13+G_A5],eax
-    mov rax,[rsp+16]; mov [r13+G_NCOEF],rax
-    mov [r13+G_NFFT],r11
-.rpf_ncg_candidate_next:
-    # base *= 5; a5++
-    mov rax,[rsp+56]
-    mov rcx,5
-    mul rcx
-    test rdx,rdx
-    jnz .rpf_ncg_a5_done
-    mov [rsp+56],rax
-    inc dword ptr [rsp+64]
-    jmp .rpf_ncg_a5_loop
-.rpf_ncg_a5_done:
-    mov rax,[rsp+40]
-    mov rcx,3
-    mul rcx
-    test rdx,rdx
-    jnz .rpf_ncg_next_b
-    mov [rsp+40],rax
-    inc dword ptr [rsp+48]
-    jmp .rpf_ncg_a3_loop
-.rpf_ncg_next_b:
-    dec ebx
-    jmp .rpf_ncg_b_loop
-.rpf_ncg_done_search:
-    cmp dword ptr [r13+G_B],0
-    je .rpf_ncg_bad
-    xor eax,eax
-    jmp .rpf_ncg_done
-.rpf_ncg_bad: mov eax,1
-.rpf_ncg_done:
-    add rsp,80
-    pop r15; pop r14; pop r13; pop r12; pop rbp; pop rbx
-    ret
-
 # rdi=tw, rsi=m, rdx=len, ecx=inv(0 fwd / 1 inv)
 # Extended-precision recurrence with periodic renormalization; no libm/runtime planner.
 rpf_nf_make_tw:
@@ -1061,13 +1054,17 @@ rpf_nf_make_tw:
     fstp qword ptr [rsp+40]                 # wi
     vmovsd xmm2,[rsp+32]
     vmovsd xmm3,[rsp+40]
-    vxorpd xmm0,xmm0,xmm0
+    # j=0 is the exact unit twiddle.  Do not ask x87 to rediscover (1,0).
+    mov rax,0x3ff0000000000000
+    vmovq xmm0,rax
     vxorpd xmm1,xmm1,xmm1
     xor ebx,ebx
 .rpf_nmtf_loop:
     cmp rbx,r13
     jae .rpf_nmtf_done
-    # Re-anchor every 256 values from j*base_angle using x87 extended input.
+    # Re-anchor every 16 nonzero values from j*base_angle using x87 extended input.
+    test rbx,rbx
+    jz .rpf_nmtf_have_phase
     test bl,15
     jnz .rpf_nmtf_have_phase
     mov [rsp+8],rbx
@@ -1428,10 +1425,10 @@ rpf_fourier_mul_u64:
     mov [rsp+16],rdx                        # b
     mov [rsp+24],r8                         # scratch
     mov [rsp+32],ecx                        # P
-    mov [rsp+44],r9d                        # AOT packed geometry, 0 = derive here
+    mov [rsp+44],r9d                        # type-level AOT packed geometry
     mov eax,[rsp+44]
     test eax,eax
-    jz .rpf_nfm_choose_geom
+    jz .rpf_nfm_bad
     # packed geometry bytes: b | a2<<8 | a3<<16 | a5<<24
     mov edx,eax; and edx,255; mov [rsp+64+G_B],edx
     mov edx,eax; shr edx,8; and edx,255; mov [rsp+64+G_A2],edx
@@ -1453,12 +1450,6 @@ rpf_fourier_mul_u64:
     imul rax,rax,5; dec edx; jmp .rpf_nfm_pack5
 .rpf_nfm_geom_pack_done:
     mov [rsp+64+G_NFFT],rax
-    jmp .rpf_nfm_geom_ready
-.rpf_nfm_choose_geom:
-    lea rsi,[rsp+64]
-    mov edi,[rsp+32]
-    call rpf_nf_choose_geom
-    test eax,eax; jnz .rpf_nfm_bad
 .rpf_nfm_geom_ready:
     mov eax,[rsp+64+G_B]; mov [rsp+36],eax # bcoef
     mov eax,[rsp+32]; add eax,63; shr eax,6; mov [rsp+40],eax # n64
@@ -1634,7 +1625,6 @@ rpf_fourier_mul_u64:
     inc rbp; test r11,r11; jnz .rpf_nfm_tail_loop
 .rpf_nfm_ok:
     mov rax,[rsp+48]
-    xor edx,edx                              # status 0 in edx too
     jmp .rpf_nfm_done
 .rpf_nfm_bad:
     xor eax,eax
@@ -1653,12 +1643,14 @@ rankn_fp_mul:
     RPF_SAVE
     sub rsp,48
     mov r12,rdi; mov r13,rsi; mov r14,rdx; mov r15d,ecx
-    mov rdi,r12; mov esi,r15d; call rpf_object_init; test eax,eax; jnz .rpfm_bad
-    mov ebp,[r12+RPF_N]
-    mov eax,[r12+RPF_PREC]
-    cmp [r13+RPF_PREC],eax; jne .rpfm_bad
-    cmp [r14+RPF_PREC],eax; jne .rpfm_bad
-    mov [rsp+32],eax                       # P
+    mov edi,r15d; call rpf_precision_from_type; test rax,rax; jz .rpfm_bad
+    test edx,edx; jz .rpfm_bad
+    mov [rsp+40],edx                       # one type-level AOT geometry fact
+    mov [rsp+32],rax                       # P
+    mov rbp,rax; add rbp,63; shr rbp,6
+    mov rax,[rsp+32]
+    cmp [r13+RPF_PREC],rax; jne .rpfm_bad
+    cmp [r14+RPF_PREC],rax; jne .rpfm_bad
     # Static/AOT-owned scratch begins immediately after the primary carrier.
     lea r8,[r12+RPF_DATA]
     mov eax,ebp; shl rax,3; add r8,rax
@@ -1667,7 +1659,7 @@ rankn_fp_mul:
     lea rsi,[r13+RPF_DATA]
     lea rdx,[r14+RPF_DATA]
     mov ecx,[rsp+32]
-    mov r9d,[r12+12]
+    mov r9d,[rsp+40]
     call rpf_fourier_mul_u64
     test rax,rax; jz .rpfm_bad
     mov [rsp],rax
@@ -1693,30 +1685,44 @@ rankn_fp_div:
     RPF_SAVE
     sub rsp,160
     mov r12,rdi; mov r13,rsi; mov r14,rdx; mov r15d,ecx
+    mov edi,r15d; call rpf_precision_from_type; test rax,rax; jz .rpfd2_bad
+    mov [rsp+120],eax                              # P, Knuth digit core remains dword-indexed
+    mov rbp,rax; add rbp,63; shr rbp,6
+    cmp [r13+RPF_PREC],rax; jne .rpfd2_bad
+    cmp [r14+RPF_PREC],rax; jne .rpfd2_bad
+    # Division is a relation over ValueFacts, so its zero identities belong here
+    # rather than in individual transcendental functions.  Reject a zero divisor;
+    # close an exact zero numerator directly and never enter Knuth geometry with
+    # an empty high digit domain.
+    mov rdi,r14; call rpf_object_is_zero; test eax,eax; jnz .rpfd2_bad
+    mov rdi,r13; call rpf_object_is_zero; test eax,eax; jz .rpfd2_nonzero_a
     mov rdi,r12; mov esi,r15d; call rpf_object_init; test eax,eax; jnz .rpfd2_bad
-    mov ebp,[r12+RPF_N]
-    mov eax,[r12+RPF_PREC]; mov [rsp+120],eax      # P
-    cmp [r13+RPF_PREC],eax; jne .rpfd2_bad
-    cmp [r14+RPF_PREC],eax; jne .rpfd2_bad
+    xor eax,eax; jmp .rpfd2_done
+.rpfd2_nonzero_a:
+    mov eax,dword ptr [rsp+120]
     lea ecx,[eax+31]; shr ecx,5; mov [rsp+124],ecx # nd
     lea edx,[eax+4]; mov [rsp+128],edx             # K
     mov eax,edx; shr eax,5; mov [rsp+132],eax      # qw
     and edx,31; mov [rsp+136],edx                  # rb
     mov eax,[rsp+124]; add eax,[rsp+132]; add eax,6; mov [rsp+140],eax # ucap
-    # scratch layout: U[ucap], V[nd+2], Q[ucap], Q64[2*N+8]
+    # scratch layout: compact U[ucap]u32, V[nd+2]u32, Q[ucap]u32, then Q64.
+    # Base-2^32 is the division recurrence itself; widening every logical digit
+    # to a qword was pure traffic and doubled the live scratch footprint.
     lea r8,[r12+RPF_DATA]; mov eax,ebp; shl rax,3; lea r9,[r8+rax]
     mov [rsp],r9                                    # U
-    mov ecx,[rsp+140]; mov eax,ecx; shl rax,3; lea r10,[r9+rax]
+    mov ecx,[rsp+140]; mov eax,ecx; shl rax,2; lea r10,[r9+rax]
     mov [rsp+8],r10                                 # V
-    mov ecx,[rsp+124]; add ecx,2; mov eax,ecx; shl rax,3; lea r11,[r10+rax]
+    mov ecx,[rsp+124]; add ecx,2; mov eax,ecx; shl rax,2; lea r11,[r10+rax]
     mov [rsp+16],r11                                # Q
-    mov ecx,[rsp+140]; mov eax,ecx; shl rax,3; add r11,rax
+    mov ecx,[rsp+140]; mov eax,ecx; shl rax,2; add r11,rax
+    add r11,7; and r11,-8
     mov [rsp+24],r11                                # Q64
-    # zero all scratch domains
-    mov rdi,[rsp]; mov ecx,[rsp+140]; call rpf_zero_limbs
-    mov rdi,[rsp+8]; mov ecx,[rsp+124]; add ecx,2; call rpf_zero_limbs
-    mov rdi,[rsp+16]; mov ecx,[rsp+140]; call rpf_zero_limbs
-    mov rdi,[rsp+24]; lea ecx,[rbp*2+8]; call rpf_zero_limbs
+    # U is assembled with OR and therefore needs one dword clear. V's live
+    # digits and Q's quotient digits are written once; only V guards are zeroed.
+    mov rdi,[rsp]; xor eax,eax; mov ecx,[rsp+140]; rep stosd
+    mov r10,[rsp+8]; mov eax,[rsp+124]
+    mov dword ptr [r10+rax*4],0
+    mov dword ptr [r10+rax*4+4],0
     # Build U=(A << K) and V=B in base32 slots.
     xor ebx,ebx
 .rpfd2_fill:
@@ -1726,39 +1732,52 @@ rankn_fp_div:
     mov r9d,ebx; add r9d,[rsp+132]
     mov r10,[rsp]
     mov ecx,[rsp+136]; test ecx,ecx; jz .rpfd2_u_direct
-    mov rax,r8; shl rax,cl; mov eax,eax; or [r10+r9*8],rax
-    inc r9d; mov rax,r8; mov ecx,32; sub ecx,[rsp+136]; shr rax,cl; or [r10+r9*8],rax
+    mov eax,r8d; shl eax,cl; or dword ptr [r10+r9*4],eax
+    inc r9d; mov eax,r8d; mov ecx,32; sub ecx,[rsp+136]; shr eax,cl; or dword ptr [r10+r9*4],eax
     jmp .rpfd2_v
 .rpfd2_u_direct:
-    or [r10+r9*8],r8
+    or dword ptr [r10+r9*4],r8d
 .rpfd2_v:
     lea rdi,[r14+RPF_DATA]; mov esi,ebp; mov edx,ebx; call rpf_get32
-    mov r10,[rsp+8]; mov [r10+rbx*8],rax
+    mov r10,[rsp+8]; mov dword ptr [r10+rbx*4],eax
     inc ebx; jmp .rpfd2_fill
 .rpfd2_filled:
-    mov rdi,[rsp+8]; mov ecx,[rsp+124]; add ecx,2; call rpf_highlen32
-    test eax,eax; jz .rpfd2_bad
-    mov [rsp+144],eax                               # n
-    mov rdi,[rsp]; mov ecx,[rsp+140]; dec ecx; call rpf_highlen32
+    # Normalized fpP already carries its high-bit fact at P-1.  Preserve that
+    # information instead of rescanning V/U after materialization.
+    mov eax,[rsp+124]
+    mov [rsp+144],eax                               # n = ceil(P/32)
+    # un_pre = ceil((2P+4)/32), the exact digit count of A<<K before Knuth normalization.
+    mov eax,[rsp+120]
+    mov edx,eax
+    add rax,rax
+    add rax,35
+    shr rax,5
     mov [rsp+148],eax                               # un pre-normalization
-    # s = clz32(V[n-1])
-    mov r10,[rsp+8]; mov edx,[rsp+144]; dec edx; mov eax,[r10+rdx*8]
-    bsr eax,eax; mov ecx,31; sub ecx,eax; mov [rsp+152],ecx
-    # normalize V and U by s
+    # s = n*32-P.  Since B is normalized this is exactly clz32(V[n-1]).
+    mov ecx,[rsp+144]
+    shl ecx,5
+    sub ecx,edx
+    mov [rsp+152],ecx
+    # normalize V and U by s. U owns one explicit zero guard for any carry-out.
     mov rdi,[rsp+8]; mov ecx,[rsp+144]; inc ecx; mov edx,[rsp+152]; call rpf_shl32_slots2
     mov rdi,[rsp]; mov ecx,[rsp+148]; inc ecx; mov edx,[rsp+152]; call rpf_shl32_slots2
-    mov rdi,[rsp]; mov ecx,[rsp+140]; dec ecx; call rpf_highlen32
+    # un_norm = n + ceil((P+4)/32).  No post-shift highlen scan is needed.
+    mov eax,[rsp+120]
+    add rax,35
+    shr rax,5
+    add eax,[rsp+144]
     mov [rsp+148],eax
-    mov r10,[rsp]; mov edx,eax; mov qword ptr [r10+rdx*8],0
+    mov r10,[rsp]; mov edx,eax; mov dword ptr [r10+rdx*4],0
     mov ecx,eax; sub ecx,[rsp+144]; mov [rsp+156],ecx # m
+    mov dword ptr [rsp+88],0                        # qn32 high-water mark
     # vtop cached in stack 112
-    mov r10,[rsp+8]; mov edx,[rsp+144]; dec edx; mov rax,[r10+rdx*8]; mov eax,eax; mov [rsp+112],rax
+    mov r10,[rsp+8]; mov edx,[rsp+144]; dec edx; mov eax,dword ptr [r10+rdx*4]; mov [rsp+112],rax
     mov ebx,[rsp+156]
 .rpfd2_j:
     test ebx,ebx; js .rpfd2_quot_done
     mov r10,[rsp]; mov edx,ebx; add edx,[rsp+144]
-    mov r8,[r10+rdx*8]; mov r8d,r8d
-    mov r9,[r10+rdx*8-8]; mov r9d,r9d
+    mov r8d,dword ptr [r10+rdx*4]
+    mov r9d,dword ptr [r10+rdx*4-4]
     mov rax,r8; shl rax,32; or rax,r9; mov [rsp+96],rax # num
     xor edx,edx; mov rcx,[rsp+112]; div rcx
     mov r8,rax; shr r8,32; test r8,r8; jz .rpfd2_q_ok
@@ -1771,11 +1790,12 @@ rankn_fp_div:
 .rpfd2_adjust:
     mov rax,[rsp+72]; shr rax,32; test rax,rax; jnz .rpfd2_subtract
     mov r10,[rsp+8]; mov edx,[rsp+144]; sub edx,2
-    mov rax,[rsp+64]; mul qword ptr [r10+rdx*8]    # low 64 sufficient
+    mov r11d,dword ptr [r10+rdx*4]
+    mov rax,[rsp+64]; imul rax,r11                 # exact 32x32 product
     mov r8,rax
     mov r9,[rsp+72]; shl r9,32
     mov r10,[rsp]; mov edx,ebx; add edx,[rsp+144]; sub edx,2
-    mov rax,[r10+rdx*8]; mov eax,eax; or r9,rax
+    mov eax,dword ptr [r10+rdx*4]; or r9,rax
     cmp r8,r9; jbe .rpfd2_subtract
     dec qword ptr [rsp+64]
     mov rax,[rsp+112]; add [rsp+72],rax
@@ -1786,46 +1806,56 @@ rankn_fp_div:
     xor r10d,r10d                                   # borrow
 .rpfd2_sub_loop:
     cmp r8d,[rsp+144]; jae .rpfd2_sub_top
-    mov r11,[rsp+8]; mov rax,[rsp+64]; mul qword ptr [r11+r8*8]
+    mov r11,[rsp+8]; mov r11d,dword ptr [r11+r8*4]
+    mov rax,[rsp+64]; imul rax,r11
     add rax,r9; mov r9,rax; shr r9,32
     mov eax,eax; add rax,r10                 # sub
     mov r11,[rsp]; mov edx,ebx; add edx,r8d
-    mov rcx,[r11+rdx*8]; mov ecx,ecx
+    mov ecx,dword ptr [r11+rdx*4]
     cmp rcx,rax; setb r10b; movzx r10d,r10b
-    sub rcx,rax; mov ecx,ecx; mov [r11+rdx*8],rcx
+    sub ecx,eax; mov dword ptr [r11+rdx*4],ecx
     inc r8d; jmp .rpfd2_sub_loop
 .rpfd2_sub_top:
     mov r11,[rsp]; mov edx,ebx; add edx,[rsp+144]
-    mov rcx,[r11+rdx*8]; mov ecx,ecx
+    mov ecx,dword ptr [r11+rdx*4]
     mov rax,r9; add rax,r10
     cmp rcx,rax; setb r8b; movzx r8d,r8b            # under
-    sub rcx,rax; mov ecx,ecx; mov [r11+rdx*8],rcx
+    sub ecx,eax; mov dword ptr [r11+rdx*4],ecx
     test r8d,r8d; jz .rpfd2_store_q
     dec qword ptr [rsp+64]
     xor r9d,r9d; xor r10d,r10d
 .rpfd2_addback:
     cmp r10d,[rsp+144]; jae .rpfd2_addtop
     mov r11,[rsp]; mov edx,ebx; add edx,r10d
-    mov rax,[r11+rdx*8]; mov eax,eax
-    mov rcx,[rsp+8]; add rax,[rcx+r10*8]; add rax,r9
-    mov rcx,rax; mov ecx,ecx; mov [r11+rdx*8],rcx
+    mov eax,dword ptr [r11+rdx*4]
+    mov rcx,[rsp+8]; mov ecx,dword ptr [rcx+r10*4]; add rax,rcx; add rax,r9
+    mov dword ptr [r11+rdx*4],eax
     shr rax,32; mov r9,rax
     inc r10d; jmp .rpfd2_addback
 .rpfd2_addtop:
-    mov r11,[rsp]; mov edx,ebx; add edx,[rsp+144]; add [r11+rdx*8],r9
+    mov r11,[rsp]; mov edx,ebx; add edx,[rsp+144]; add dword ptr [r11+rdx*4],r9d
 .rpfd2_store_q:
-    mov r11,[rsp+16]; mov rax,[rsp+64]; mov [r11+rbx*8],rax
+    mov r11,[rsp+16]; mov eax,dword ptr [rsp+64]; mov dword ptr [r11+rbx*4],eax
+    cmp dword ptr [rsp+88],0
+    jne .rpfd2_qhigh_known
+    test eax,eax
+    jz .rpfd2_qhigh_known
+    lea ecx,[ebx+1]
+    mov [rsp+88],ecx
+.rpfd2_qhigh_known:
     dec ebx; jmp .rpfd2_j
 .rpfd2_quot_done:
     # remainder lives in U[0..n-1]
     xor r8d,r8d; xor r9d,r9d; mov r10,[rsp]
 .rpfd2_rem_loop:
     cmp r8d,[rsp+144]; jae .rpfd2_rem_done
-    or r9,[r10+r8*8]; inc r8d; jmp .rpfd2_rem_loop
+    mov eax,dword ptr [r10+r8*4]; or r9,rax; inc r8d; jmp .rpfd2_rem_loop
 .rpfd2_rem_done:
     mov [rsp+104],r9
-    mov rdi,[rsp+16]; mov ecx,[rsp+140]; call rpf_highlen32
-    mov [rsp+108],eax                               # qn32
+    mov eax,[rsp+88]
+    test eax,eax
+    jz .rpfd2_bad                                   # nonzero numerator and scaled quotient cannot vanish
+    mov [rsp+108],eax                               # qn32 carried from quotient production
     mov eax,[rsp+108]; add eax,1; shr eax,1; add eax,1; mov [rsp+100],eax # q64 count
     mov rdi,[rsp+24]; mov rsi,[rsp+16]; mov ecx,[rsp+100]; mov edx,[rsp+108]; call rpf_32_to_u64
     cmp qword ptr [rsp+104],0; je .rpfd2_no_sticky
@@ -1833,9 +1863,18 @@ rankn_fp_div:
 .rpfd2_no_sticky:
     mov r8,[r13+RPF_EXP]; sub r8,[r14+RPF_EXP]
     movsxd rax,dword ptr [rsp+128]; sub r8,rax
+    # Quotient production already owns the high-water digit.  Preserve its
+    # exact top bit instead of rescanning the converted Q64 carrier.
+    mov ecx,[rsp+108]; dec ecx
+    mov r11,[rsp+16]
+    mov eax,dword ptr [r11+rcx*4]
+    bsr edx,eax
+    shl ecx,5
+    add ecx,edx
+    mov r10d,ecx
     mov rcx,[r13+RPF_SIGN]; xor rcx,[r14+RPF_SIGN]
     mov rdi,r12; mov rsi,[rsp+24]; mov edx,[rsp+100]; mov r9d,r15d
-    call rpf_round_from_integer
+    call rpf_round_from_integer_known_top
     test eax,eax; jnz .rpfd2_bad
     xor eax,eax; jmp .rpfd2_done
 .rpfd2_bad: mov eax,1
@@ -1844,24 +1883,156 @@ rankn_fp_div:
     RPF_RESTORE
     ret
 
+# rdi=dst,rsi=src,rdx=positive u64 divisor,ecx=type -> eax status.
+# Exact scalar quotient relation used by local mathematical propagation.  A
+# series index remains an integer fact; it is never inflated into a second fpP
+# ValueFact merely to feed the general big/big divider.  Two guard limbs are
+# appended to the significand, one streaming u128/u64 division resolves every
+# quotient limb, and the exact remainder becomes sticky below the RNE guard.
+# There is one relation for every P>64 and no precision threshold or named-width
+# route.
+.global rankn_fp_div_u64
+rankn_fp_div_u64:
+    RPF_SAVE
+    sub rsp,48
+    mov r12,rdi
+    mov r13,rsi
+    mov r14,rdx
+    mov r15d,ecx
+    test r14,r14
+    jz .rpfdu64_bad
+    cmp dword ptr [r13+RPF_TYPE],r15d
+    jne .rpfdu64_bad
+    mov rax,[r13+RPF_PREC]
+    cmp rax,64
+    jbe .rpfdu64_bad
+    mov [rsp],rax                         # P
+    # Zero is an exact scalar-quotient fixed point.  Close it directly instead
+    # of fabricating an all-zero integer carrier that the nonzero RNE closure
+    # intentionally does not accept.
+    mov rdi,r13
+    call rpf_object_is_zero
+    test eax,eax
+    jz .rpfdu64_nonzero
+    mov rdi,r12
+    mov esi,r15d
+    call rpf_object_init
+    test eax,eax
+    jnz .rpfdu64_bad
+    xor eax,eax
+    jmp .rpfdu64_done
+.rpfdu64_nonzero:
+    mov rbp,[rsp]
+    add rbp,63
+    jc .rpfdu64_bad
+    shr rbp,6                             # N
+    mov [rsp+8],rbp
+    # Quotient scratch starts after the primary carrier.  U=M<<128 therefore
+    # owns exactly N+2 source/quotient limbs; every quotient limb is overwritten
+    # once, so no zero-fill is required.
+    lea r11,[r12+RPF_DATA+rbp*8]
+    mov [rsp+16],r11
+    lea r10,[rbp+2]
+    mov [rsp+24],r10                      # L=N+2
+    xor edx,edx                           # streaming remainder
+    mov rbx,r10
+.rpfdu64_loop:
+    test rbx,rbx
+    jz .rpfdu64_quot_done
+    dec rbx
+    xor eax,eax
+    cmp rbx,2
+    jb .rpfdu64_have_limb
+    mov rcx,rbx
+    sub rcx,2
+    cmp rcx,rbp
+    jae .rpfdu64_have_limb
+    mov rax,[r13+RPF_DATA+rcx*8]
+.rpfdu64_have_limb:
+    div r14                               # RDX:RAX / divisor
+    mov r11,[rsp+16]
+    mov [r11+rbx*8],rax
+    jmp .rpfdu64_loop
+.rpfdu64_quot_done:
+    test rdx,rdx
+    jz .rpfdu64_round
+    mov r11,[rsp+16]
+    or qword ptr [r11],1                  # remainder is sticky far below guard
+.rpfdu64_round:
+    # x = M*2^(E-(P-1)); Q approximates (M<<128)/d.  The +128 guard extension
+    # is removed only through the shared strict RNE closure.
+    mov r8,[r13+RPF_EXP]
+    mov rax,[rsp]
+    dec rax
+    sub r8,rax
+    sub r8,128
+    mov rcx,[r13+RPF_SIGN]
+    mov rdi,r12
+    mov rsi,[rsp+16]
+    mov edx,dword ptr [rsp+24]
+    mov r9d,r15d
+    call rpf_round_from_integer
+    test eax,eax
+    jnz .rpfdu64_bad
+    xor eax,eax
+    jmp .rpfdu64_done
+.rpfdu64_bad:
+    mov eax,1
+.rpfdu64_done:
+    add rsp,48
+    RPF_RESTORE
+    ret
+
+# rdi=a,rsi=b -> eax=1 iff the represented fpP ValueFacts are bit-identical.
+# Local propagation needs only representation equality, not a full numeric
+# ordering episode.  This shared predicate is the convergence authority for
+# sqrt/exp/log/sincos fixed-point silence.
+rpf_value_equal:
+    mov eax,dword ptr [rdi+RPF_TYPE]
+    cmp dword ptr [rsi+RPF_TYPE],eax
+    jne .rpfve_no
+    mov rax,[rdi+RPF_PREC]
+    cmp [rsi+RPF_PREC],rax
+    jne .rpfve_no
+    mov rdx,[rdi+RPF_SIGN]
+    cmp [rsi+RPF_SIGN],rdx
+    jne .rpfve_no
+    mov rdx,[rdi+RPF_EXP]
+    cmp [rsi+RPF_EXP],rdx
+    jne .rpfve_no
+    add rax,63
+    jc .rpfve_no
+    shr rax,6
+    mov rcx,rax
+    lea rdi,[rdi+RPF_DATA]
+    lea rsi,[rsi+RPF_DATA]
+    repe cmpsq
+    sete al
+    movzx eax,al
+    ret
+.rpfve_no:
+    xor eax,eax
+    ret
+
 # rdi=a,rsi=b -> eax=-1/0/1 numeric comparison.  This is the sole P>64
 # comparison authority: sign, normalized exponent and significand are compared
 # directly.  Precision is data; no named-width or producer-shape route exists.
 .global rankn_fp_cmp
 rankn_fp_cmp:
     RPF_SAVE
-    sub rsp,16
     mov r12,rdi; mov r13,rsi
-    mov eax,[r12+RPF_PREC]; cmp [r13+RPF_PREC],eax; jne .rpfcmp_bad
-    mov ebx,[r12+RPF_N]; cmp [r13+RPF_N],ebx; jne .rpfcmp_bad
-    lea rdi,[r12+RPF_DATA]; mov ecx,ebx; call rpf_msb; mov [rsp],eax
-    lea rdi,[r13+RPF_DATA]; mov ecx,ebx; call rpf_msb; mov [rsp+8],eax
-    cmp dword ptr [rsp],-1; jne .rpfcmp_a_nonzero
-    cmp dword ptr [rsp+8],-1; je .rpfcmp_eq
+    mov rax,[r12+RPF_PREC]; cmp [r13+RPF_PREC],rax; jne .rpfcmp_bad
+    mov rbx,rax; add rbx,63; shr rbx,6
+    # Normalized nonzero ValueFacts are identified by their P-1 bit, so zero
+    # classification is O(1) rather than two full significand scans.
+    mov rdi,r12; call rpf_object_is_zero; mov r14d,eax
+    mov rdi,r13; call rpf_object_is_zero; mov r15d,eax
+    test r14d,r14d; jz .rpfcmp_a_nonzero
+    test r15d,r15d; jnz .rpfcmp_eq
     cmp qword ptr [r13+RPF_SIGN],0; jne .rpfcmp_gt
     jmp .rpfcmp_lt
 .rpfcmp_a_nonzero:
-    cmp dword ptr [rsp+8],-1; jne .rpfcmp_both_nonzero
+    test r15d,r15d; jz .rpfcmp_both_nonzero
     cmp qword ptr [r12+RPF_SIGN],0; jne .rpfcmp_lt
     jmp .rpfcmp_gt
 .rpfcmp_both_nonzero:
@@ -1891,28 +2062,46 @@ rankn_fp_cmp:
 .rpfcmp_lt: mov eax,-1; jmp .rpfcmp_done
 .rpfcmp_bad: xor eax,eax
 .rpfcmp_done:
-    add rsp,16
     RPF_RESTORE
     ret
 
 # rdi=dst,rsi=src -> rax=dst, edx status
 .global rankn_fp_neg
 rankn_fp_neg:
-    push rbx; push r12; push r13
+    push r12; push r13
     mov r12,rdi; mov r13,rsi
-    mov ebx,[r13+RPF_TYPE]
-    mov rdi,r12; mov rsi,r13; mov edx,ebx; call rankn_fp_convert
-    test edx,edx; jnz .rpfn_done
+    cmp r12,r13
+    je .rpfn_sign
+    mov edx,[r13+RPF_TYPE]
+    call rpf_copy_object
+    mov edx,eax
+    test eax,eax
+    jnz .rpfn_done
+.rpfn_sign:
     xor qword ptr [r12+RPF_SIGN],1
-.rpfn_done: mov rax,r12; pop r13; pop r12; pop rbx; ret
+    xor edx,edx
+.rpfn_done:
+    mov rax,r12
+    pop r13; pop r12
+    ret
 .global rankn_fp_abs
 rankn_fp_abs:
     push r12; push r13
     mov r12,rdi; mov r13,rsi
-    mov edx,[r13+RPF_TYPE]; call rankn_fp_convert
-    test edx,edx; jnz .rpfa_done
+    cmp r12,r13
+    je .rpfa_sign
+    mov edx,[r13+RPF_TYPE]
+    call rpf_copy_object
+    mov edx,eax
+    test eax,eax
+    jnz .rpfa_done
+.rpfa_sign:
     mov qword ptr [r12+RPF_SIGN],0
-.rpfa_done: mov rax,r12; pop r13; pop r12; ret
+    xor edx,edx
+.rpfa_done:
+    mov rax,r12
+    pop r13; pop r12
+    ret
 
 
 # -----------------------------------------------------------------------------
@@ -1926,18 +2115,135 @@ rankn_fp_abs:
 # remains private without a runtime allocator.
 # -----------------------------------------------------------------------------
 
-# edi=encoded type -> rax physical object span /0.  Must stay structurally
-# identical to g_alloc_rankn_fp_temp's P-derived envelope.
-rpf_math_object_span:
-    call rpf_limbs_from_type
-    test eax,eax
-    jz .rpmos_bad
-    imul rax,rax,512
-    add rax,4096
+# edi=encoded type -> rax exact physical object span /0.  One runtime
+# authority mirrors g_rankn_fp_object_span: PrecisionFact plus its Fourier
+# geometry determine the maximum live add/mul/compact-div layout.  No fixed
+# bytes-per-limb envelope or subsystem-private span survives.
+rpf_object_span:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp,16
+    call rpf_precision_from_type
+    test rax,rax
+    jz .rpos_bad
+    mov r12,rax                              # P
+    mov r14d,edx                             # packed Fourier geometry
+    add rax,63
+    jc .rpos_bad
+    shr rax,6
+    mov r13,rax                              # N
+    test r14d,r14d
+    jz .rpos_bad
+
+    mov ecx,r14d
+    shr ecx,8
+    and ecx,255
+    cmp ecx,62
+    ja .rpos_bad
+    mov r15,1
+    shl r15,cl
+    mov edx,r14d
+    shr edx,16
+    and edx,255
+.rpos_f3:
+    test edx,edx
+    jz .rpos_f5_start
+    imul r15,r15,3
+    jo .rpos_bad
+    dec edx
+    jmp .rpos_f3
+.rpos_f5_start:
+    mov edx,r14d
+    shr edx,24
+.rpos_f5:
+    test edx,edx
+    jz .rpos_have_fft
+    imul r15,r15,5
+    jo .rpos_bad
+    dec edx
+    jmp .rpos_f5
+.rpos_have_fft:
+    mov rbx,r13
+    shl rbx,3
+    add rbx,32                               # primary_end
+
+    # Exact Fourier scratch end.
+    mov rax,rbx
+    add rax,63
+    and rax,-64                              # A
+    mov rcx,r15
+    shl rcx,4
+    add rax,rcx                              # T
+    mov rcx,r15
+    shl rcx,3
+    add rax,rcx
+    add rax,16
+    add rax,63
+    and rax,-64                              # product
+    mov rcx,r13
+    shl rcx,4
+    add rcx,32                               # (2N+4)*8
+    add rax,rcx
+    mov [rsp],rax
+
+    # Exact compact Knuth scratch end.
+    mov r8,r12
+    add r8,31
+    shr r8,5                                 # nd
+    mov r9,r12
+    add r9,4
+    shr r9,5                                 # qw
+    mov r10,r8
+    add r10,r9
+    add r10,6                                # ucap
+    mov rax,rbx
+    mov rcx,r10
+    shl rcx,2
+    add rax,rcx                              # U
+    mov rcx,r8
+    add rcx,2
+    shl rcx,2
+    add rax,rcx                              # V
+    mov rcx,r10
+    shl rcx,2
+    add rax,rcx                              # Q
+    add rax,7
+    and rax,-8                               # Q64
+    mov rcx,r10
+    add rcx,1
+    shr rcx,1
+    add rcx,1
+    shl rcx,3
+    add rax,rcx
+    cmp rax,[rsp]
+    jbe .rpos_add
+    mov [rsp],rax
+.rpos_add:
+    mov rax,r13
+    add rax,2
+    shl rax,4
+    add rax,rbx                              # two local add carriers
+    cmp rax,[rsp]
+    jbe .rpos_align
+    mov [rsp],rax
+.rpos_align:
+    mov rax,[rsp]
     add rax,63
     and rax,-64
+    jmp .rpos_done
+.rpos_bad:
+    xor eax,eax
+.rpos_done:
+    add rsp,16
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
     ret
-.rpmos_bad: xor eax,eax; ret
 
 # rdi=base,rsi=span,edx=slot -> rax slot pointer.
 rpf_math_slot:
@@ -1961,22 +2267,53 @@ rpf_make_pow2:
 .rpfmp_bad: mov eax,1
 .rpfmp_done: RPF_RESTORE; ret
 
-# rdi=obj -> eax=1 zero,0 nonzero.
+# rdi=obj -> eax=1 zero,0 nonzero. Normalized nonzero objects always own bit P-1.
 rpf_object_is_zero:
-    push rdi; push rcx
-    mov ecx,[rdi+RPF_N]
-    lea rdi,[rdi+RPF_DATA]
-    call rpf_msb
-    test eax,eax
-    sets al
+    mov rax,[rdi+RPF_PREC]
+    cmp rax,64
+    jbe .rpfioz_yes
+    dec rax
+    mov rcx,rax
+    shr rax,6
+    and ecx,63
+    mov rdx,[rdi+RPF_DATA+rax*8]
+    bt rdx,rcx
+    setnc al
     movzx eax,al
-    pop rcx; pop rdi
+    ret
+.rpfioz_yes:
+    mov eax,1
     ret
 
-# rdi=dst,rsi=src,edx=type -> eax status (convert uses EDX status).
+# rdi=dst,rsi=src,edx=type -> eax status. Same-P copy is a carrier clone, not a conversion.
 rpf_copy_object:
-    call rankn_fp_convert
-    mov eax,edx
+    push r12
+    push r13
+    mov r12,rdi
+    mov r13,rsi
+    cmp dword ptr [r13+RPF_TYPE],edx
+    jne .rpfco_bad
+    cmp r12,r13
+    je .rpfco_ok
+    mov rax,[r13+RPF_PREC]
+    cmp rax,64
+    jbe .rpfco_bad
+    add rax,63
+    jc .rpfco_bad
+    shr rax,6
+    add rax,4                 # four qwords of header plus N payload limbs
+    mov rcx,rax
+    mov rdi,r12
+    mov rsi,r13
+    rep movsq
+.rpfco_ok:
+    xor eax,eax
+    jmp .rpfco_done
+.rpfco_bad:
+    mov eax,1
+.rpfco_done:
+    pop r13
+    pop r12
     ret
 
 # rdi=workspace base,rsi=src,edx=type -> eax status.
@@ -1985,7 +2322,7 @@ rankn_fp_sqrt:
     RPF_SAVE
     sub rsp,48
     mov r12,rdi; mov r13,rsi; mov r14d,edx
-    mov edi,r14d; call rpf_math_object_span; test rax,rax; jz .rpfsq_bad
+    mov edi,r14d; call rpf_object_span; test rax,rax; jz .rpfsq_bad
     mov r15,rax
     cmp dword ptr [r13+RPF_TYPE],r14d; jne .rpfsq_bad
     mov rdi,r13; call rpf_object_is_zero; test eax,eax; jnz .rpfsq_zero
@@ -1997,24 +2334,27 @@ rankn_fp_sqrt:
     # prev2 = 0.
     mov rdi,r12; mov rsi,r15; mov edx,5; call rpf_math_slot; mov [rsp+8],rax
     mov rdi,rax; xor esi,esi; mov edx,r14d; call rankn_fp_from_u64; test edx,edx; jnz .rpfsq_bad
+    # Stable local carriers are addressed once.  Iteration advances roles, not bytes.
+    mov rdi,r12; mov rsi,r15; mov edx,2; call rpf_math_slot; mov [rsp+16],rax
+    mov rdi,r12; mov rsi,r15; mov edx,3; call rpf_math_slot; mov [rsp+24],rax
+    mov rdi,r12; mov rsi,r15; mov edx,4; call rpf_math_slot; mov [rsp+32],rax
     mov ebp,[r13+RPF_PREC]; add ebp,4
 .rpfsq_loop:
     test ebp,ebp; jz .rpfsq_cap
-    # q=x/g -> slot2
-    mov rdi,r12; mov rsi,r15; mov edx,2; call rpf_math_slot; mov [rsp+16],rax
-    mov rdi,rax; mov rsi,r13; mov rdx,[rsp]; mov ecx,r14d; call rankn_fp_div; test eax,eax; jnz .rpfsq_bad
-    # s=g+q -> slot3
-    mov rdi,r12; mov rsi,r15; mov edx,3; call rpf_math_slot; mov [rsp+24],rax
-    mov rdi,rax; mov rsi,[rsp]; mov rdx,[rsp+16]; mov ecx,r14d; call rankn_fp_add; test eax,eax; jnz .rpfsq_bad
-    # next=s/2 exactly by exponent shift after copy -> slot4
-    mov rdi,r12; mov rsi,r15; mov edx,4; call rpf_math_slot; mov [rsp+32],rax
-    mov rdi,rax; mov rsi,[rsp+24]; mov edx,r14d; call rpf_copy_object; test eax,eax; jnz .rpfsq_bad
+    # q=x/g
+    mov rdi,[rsp+16]; mov rsi,r13; mov rdx,[rsp]; mov ecx,r14d; call rankn_fp_div; test eax,eax; jnz .rpfsq_bad
+    # s=g+q
+    mov rdi,[rsp+24]; mov rsi,[rsp]; mov rdx,[rsp+16]; mov ecx,r14d; call rankn_fp_add; test eax,eax; jnz .rpfsq_bad
+    # next=s/2 exactly by exponent shift after one carrier clone.
+    mov rdi,[rsp+32]; mov rsi,[rsp+24]; mov edx,r14d; call rpf_copy_object; test eax,eax; jnz .rpfsq_bad
     mov rdi,[rsp+32]; call rpf_object_is_zero; test eax,eax; jnz .rpfsq_next_ready
     mov rax,[rsp+32]; dec qword ptr [rax+RPF_EXP]
 .rpfsq_next_ready:
-    mov rdi,[rsp+32]; mov rsi,[rsp]; call rankn_fp_cmp; test eax,eax; jz .rpfsq_use_next
-    mov rdi,[rsp+32]; mov rsi,[rsp+8]; call rankn_fp_cmp; test eax,eax; jz .rpfsq_cycle
-    # prev2 <- g ; g <- next
+    mov rdi,[rsp+32]; mov rsi,[rsp]; call rpf_value_equal; test eax,eax; jnz .rpfsq_use_next
+    mov rdi,[rsp+32]; mov rsi,[rsp+8]; call rpf_value_equal; test eax,eax; jnz .rpfsq_cycle
+    # prev2 <- g ; g <- next.  Until ValueFact/scratch are separated, keeping
+    # the hot state in stable adjacent carriers is physically cheaper than
+    # rotating identities across full private-scratch spans.
     mov rdi,[rsp+8]; mov rsi,[rsp]; mov edx,r14d; call rpf_copy_object; test eax,eax; jnz .rpfsq_bad
     mov rdi,[rsp]; mov rsi,[rsp+32]; mov edx,r14d; call rpf_copy_object; test eax,eax; jnz .rpfsq_bad
     dec ebp; jmp .rpfsq_loop
@@ -2056,7 +2396,7 @@ rankn_fp_exp:
     RPF_SAVE
     sub rsp,80
     mov r12,rdi; mov r13,rsi; mov r14d,edx
-    mov edi,r14d; call rpf_math_object_span; test rax,rax; jz .rpfex_bad
+    mov edi,r14d; call rpf_object_span; test rax,rax; jz .rpfex_bad
     mov r15,rax
     cmp dword ptr [r13+RPF_TYPE],r14d; jne .rpfex_bad
     mov rax,[r13+RPF_SIGN]; mov [rsp+56],rax
@@ -2080,22 +2420,21 @@ rankn_fp_exp:
     mov rdi,rax; mov rsi,[rsp+8]; mov edx,r14d; call rpf_copy_object; test eax,eax; jnz .rpfex_bad
     mov rdi,r12; mov rsi,r15; mov edx,4; call rpf_math_slot; mov [rsp+24],rax
     mov rdi,rax; mov rsi,[rsp+8]; mov edx,r14d; call rpf_copy_object; test eax,eax; jnz .rpfex_bad
+    mov rdi,r12; mov rsi,r15; mov edx,5; call rpf_math_slot; mov [rsp+32],rax
+    mov rdi,r12; mov rsi,r15; mov edx,7; call rpf_math_slot; mov [rsp+40],rax
     mov qword ptr [rsp+64],1
     mov ebp,[r13+RPF_PREC]; add ebp,16
 .rpfex_series:
     test ebp,ebp; jz .rpfex_series_done
     # tmp=term*y
-    mov rdi,r12; mov rsi,r15; mov edx,5; call rpf_math_slot; mov [rsp+32],rax
-    mov rdi,rax; mov rsi,[rsp+24]; mov rdx,[rsp]; mov ecx,r14d; call rankn_fp_mul; test eax,eax; jnz .rpfex_bad
-    # n object slot6
-    mov rdi,r12; mov rsi,r15; mov edx,6; call rpf_math_slot; mov [rsp+40],rax
-    mov rdi,rax; mov rsi,[rsp+64]; mov edx,r14d; call rankn_fp_from_u64; test edx,edx; jnz .rpfex_bad
-    mov rdi,[rsp+24]; mov rsi,[rsp+32]; mov rdx,[rsp+40]; mov ecx,r14d; call rankn_fp_div; test eax,eax; jnz .rpfex_bad
-    # nextsum slot7
-    mov rdi,r12; mov rsi,r15; mov edx,7; call rpf_math_slot; mov rbx,rax
-    mov rdi,rbx; mov rsi,[rsp+16]; mov rdx,[rsp+24]; mov ecx,r14d; call rankn_fp_add; test eax,eax; jnz .rpfex_bad
-    mov rdi,rbx; mov rsi,[rsp+16]; call rankn_fp_cmp; test eax,eax; jz .rpfex_series_done
-    mov rdi,[rsp+16]; mov rsi,rbx; mov edx,r14d; call rpf_copy_object; test eax,eax; jnz .rpfex_bad
+    mov rdi,[rsp+32]; mov rsi,[rsp+24]; mov rdx,[rsp]; mov ecx,r14d; call rankn_fp_mul; test eax,eax; jnz .rpfex_bad
+    # term = tmp / n.  The local series index stays an integer fact; do not
+    # materialize a full fpP denominator only to invoke big/big division.
+    mov rdi,[rsp+24]; mov rsi,[rsp+32]; mov rdx,[rsp+64]; mov ecx,r14d; call rankn_fp_div_u64; test eax,eax; jnz .rpfex_bad
+    # nextsum uses the alternate sum carrier; silence is checked before role rotation.
+    mov rdi,[rsp+40]; mov rsi,[rsp+16]; mov rdx,[rsp+24]; mov ecx,r14d; call rankn_fp_add; test eax,eax; jnz .rpfex_bad
+    mov rdi,[rsp+40]; mov rsi,[rsp+16]; call rpf_value_equal; test eax,eax; jnz .rpfex_series_done
+    mov rdi,[rsp+16]; mov rsi,[rsp+40]; mov edx,r14d; call rpf_copy_object; test eax,eax; jnz .rpfex_bad
     inc qword ptr [rsp+64]
     dec ebp; jmp .rpfex_series
 .rpfex_series_done:
@@ -2129,7 +2468,7 @@ rankn_fp_log:
     RPF_SAVE
     sub rsp,96
     mov r12,rdi; mov r13,rsi; mov r14d,edx
-    mov edi,r14d; call rpf_math_object_span; test rax,rax; jz .rpflg_bad
+    mov edi,r14d; call rpf_object_span; test rax,rax; jz .rpflg_bad
     mov r15,rax
     cmp dword ptr [r13+RPF_TYPE],r14d; jne .rpflg_bad
     mov rdi,r13; call rpf_object_is_zero; test eax,eax; jnz .rpflg_bad
@@ -2139,6 +2478,8 @@ rankn_fp_log:
     mov rdi,rax; mov rsi,r13; mov edx,r14d; call rpf_copy_object; test eax,eax; jnz .rpflg_bad
     mov rdi,r12; mov rsi,r15; mov edx,2; call rpf_math_slot; mov [rsp+8],rax
     mov rdi,rax; mov esi,1; mov edx,r14d; call rankn_fp_from_u64; test edx,edx; jnz .rpflg_bad
+    # The nested sqrt region is fixed for the whole contraction chain.
+    mov rdi,r12; mov rsi,r15; mov edx,16; call rpf_math_slot; mov [rsp+64],rax
     xor ebx,ebx                         # number of local sqrt contractions
 .rpflg_contract:
     mov rax,[rsp]; mov rcx,[rax+RPF_EXP]
@@ -2147,8 +2488,7 @@ rankn_fp_log:
     jmp .rpflg_contract_done
 .rpflg_do_sqrt:
     # Nested sqrt workspace starts at slot16 and therefore owns slots16..31.
-    mov rdi,r12; mov rsi,r15; mov edx,16; call rpf_math_slot; mov [rsp+64],rax
-    mov rdi,rax; mov rsi,[rsp]; mov edx,r14d; call rankn_fp_sqrt; test eax,eax; jnz .rpflg_bad
+    mov rdi,[rsp+64]; mov rsi,[rsp]; mov edx,r14d; call rankn_fp_sqrt; test eax,eax; jnz .rpflg_bad
     mov rdi,[rsp]; mov rsi,[rsp+64]; mov edx,r14d; call rpf_copy_object; test eax,eax; jnz .rpflg_bad
     inc ebx; jmp .rpflg_contract
 .rpflg_contract_done:
@@ -2167,22 +2507,21 @@ rankn_fp_log:
     mov rdi,rax; mov rsi,[rsp+32]; mov edx,r14d; call rpf_copy_object; test eax,eax; jnz .rpflg_bad
     mov rdi,r12; mov rsi,r15; mov edx,8; call rpf_math_slot; mov [rsp+56],rax
     mov rdi,rax; mov rsi,[rsp+32]; mov edx,r14d; call rpf_copy_object; test eax,eax; jnz .rpflg_bad
+    # Slots 3/4 are dead after u is formed; reuse their pointer cells for stable series scratch.
+    mov rdi,r12; mov rsi,r15; mov edx,9; call rpf_math_slot; mov [rsp+16],rax
+    mov rdi,r12; mov rsi,r15; mov edx,11; call rpf_math_slot; mov [rsp+24],rax
+    mov rdi,r12; mov rsi,r15; mov edx,12; call rpf_math_slot; mov [rsp+88],rax
     mov qword ptr [rsp+80],3
     mov ebp,[r13+RPF_PREC]; add ebp,16
 .rpflg_series:
     test ebp,ebp; jz .rpflg_series_done
-    # power *= u2 -> slot9 then back slot7
-    mov rdi,r12; mov rsi,r15; mov edx,9; call rpf_math_slot; mov rbx,rax
-    mov rdi,rbx; mov rsi,[rsp+48]; mov rdx,[rsp+40]; mov ecx,r14d; call rankn_fp_mul; test eax,eax; jnz .rpflg_bad
-    mov rdi,[rsp+48]; mov rsi,rbx; mov edx,r14d; call rpf_copy_object; test eax,eax; jnz .rpflg_bad
-    # denominator slot10, fraction slot11, nextsum slot12
-    mov rdi,r12; mov rsi,r15; mov edx,10; call rpf_math_slot; mov [rsp+88],rax
-    mov rdi,rax; mov rsi,[rsp+80]; mov edx,r14d; call rankn_fp_from_u64; test edx,edx; jnz .rpflg_bad
-    mov rdi,r12; mov rsi,r15; mov edx,11; call rpf_math_slot; mov rbx,rax
-    mov rdi,rbx; mov rsi,[rsp+48]; mov rdx,[rsp+88]; mov ecx,r14d; call rankn_fp_div; test eax,eax; jnz .rpflg_bad
-    mov rdi,r12; mov rsi,r15; mov edx,12; call rpf_math_slot; mov [rsp+88],rax
-    mov rdi,rax; mov rsi,[rsp+56]; mov rdx,rbx; mov ecx,r14d; call rankn_fp_add; test eax,eax; jnz .rpflg_bad
-    mov rdi,[rsp+88]; mov rsi,[rsp+56]; call rankn_fp_cmp; test eax,eax; jz .rpflg_series_done
+    # power *= u2 into the alternate carrier, then rotate identities.
+    mov rdi,[rsp+16]; mov rsi,[rsp+48]; mov rdx,[rsp+40]; mov ecx,r14d; call rankn_fp_mul; test eax,eax; jnz .rpflg_bad
+    mov rdi,[rsp+48]; mov rsi,[rsp+16]; mov edx,r14d; call rpf_copy_object; test eax,eax; jnz .rpflg_bad
+    # fraction = power / odd_integer.  The denominator stays a scalar fact.
+    mov rdi,[rsp+24]; mov rsi,[rsp+48]; mov rdx,[rsp+80]; mov ecx,r14d; call rankn_fp_div_u64; test eax,eax; jnz .rpflg_bad
+    mov rdi,[rsp+88]; mov rsi,[rsp+56]; mov rdx,[rsp+24]; mov ecx,r14d; call rankn_fp_add; test eax,eax; jnz .rpflg_bad
+    mov rdi,[rsp+88]; mov rsi,[rsp+56]; call rpf_value_equal; test eax,eax; jnz .rpflg_series_done
     mov rdi,[rsp+56]; mov rsi,[rsp+88]; mov edx,r14d; call rpf_copy_object; test eax,eax; jnz .rpflg_bad
     add qword ptr [rsp+80],2
     dec ebp; jmp .rpflg_series
@@ -2207,7 +2546,7 @@ rpf_sincos_core:
     mov r14d,edx
     mov dword ptr [rsp+120],ecx
     mov edi,r14d
-    call rpf_math_object_span
+    call rpf_object_span
     test rax,rax
     jz .rpfsc_bad
     mov r15,rax
@@ -2249,6 +2588,8 @@ rpf_sincos_core:
     # local frame so nested arithmetic cannot turn a caller-saved register into
     # hidden state.
     mov rdi,r12; mov rsi,r15; mov edx,8; call rpf_math_slot; mov [rsp+56],rax
+    # slot9 is retained only as the double-angle output carrier; series negation
+    # is an in-place sign fact and no longer copies into it.
     mov rdi,r12; mov rsi,r15; mov edx,9; call rpf_math_slot; mov [rsp+64],rax
     mov rdi,r12; mov rsi,r15; mov edx,10; call rpf_math_slot; mov [rsp+72],rax
     mov rdi,r12; mov rsi,r15; mov edx,11; call rpf_math_slot; mov [rsp+80],rax
@@ -2264,32 +2605,28 @@ rpf_sincos_core:
 
     # sin term_j = -term_{j-1}*y^2 / ((2j)(2j+1)).
     mov rdi,[rsp+56]; mov rsi,[rsp+32]; mov rdx,[rsp+8]; mov ecx,r14d; call rankn_fp_mul; test eax,eax; jnz .rpfsc_bad
-    mov rdi,[rsp+64]; mov rsi,[rsp+56]; call rankn_fp_neg; test edx,edx; jnz .rpfsc_bad
-    mov rax,[rsp+112]; lea rsi,[rax+rax]
-    mov rdi,[rsp+72]; mov edx,r14d; call rankn_fp_from_u64; test edx,edx; jnz .rpfsc_bad
-    mov rdi,[rsp+80]; mov rsi,[rsp+64]; mov rdx,[rsp+72]; mov ecx,r14d; call rankn_fp_div; test eax,eax; jnz .rpfsc_bad
-    mov rax,[rsp+112]; lea rsi,[rax+rax+1]
-    mov rdi,[rsp+72]; mov edx,r14d; call rankn_fp_from_u64; test edx,edx; jnz .rpfsc_bad
-    mov rdi,[rsp+32]; mov rsi,[rsp+80]; mov rdx,[rsp+72]; mov ecx,r14d; call rankn_fp_div; test eax,eax; jnz .rpfsc_bad
+    mov rax,[rsp+56]; xor qword ptr [rax+RPF_SIGN],1
+    mov rax,[rsp+112]; lea rdx,[rax+rax]
+    mov rdi,[rsp+80]; mov rsi,[rsp+56]; mov ecx,r14d; call rankn_fp_div_u64; test eax,eax; jnz .rpfsc_bad
+    mov rax,[rsp+112]; lea rdx,[rax+rax+1]
+    mov rdi,[rsp+32]; mov rsi,[rsp+80]; mov ecx,r14d; call rankn_fp_div_u64; test eax,eax; jnz .rpfsc_bad
     mov rdi,[rsp+88]; mov rsi,[rsp+24]; mov rdx,[rsp+32]; mov ecx,r14d; call rankn_fp_add; test eax,eax; jnz .rpfsc_bad
 
     # cos term_j = -term_{j-1}*y^2 / ((2j-1)(2j)).
     mov rdi,[rsp+56]; mov rsi,[rsp+48]; mov rdx,[rsp+8]; mov ecx,r14d; call rankn_fp_mul; test eax,eax; jnz .rpfsc_bad
-    mov rdi,[rsp+64]; mov rsi,[rsp+56]; call rankn_fp_neg; test edx,edx; jnz .rpfsc_bad
-    mov rax,[rsp+112]; lea rsi,[rax+rax-1]
-    mov rdi,[rsp+72]; mov edx,r14d; call rankn_fp_from_u64; test edx,edx; jnz .rpfsc_bad
-    mov rdi,[rsp+80]; mov rsi,[rsp+64]; mov rdx,[rsp+72]; mov ecx,r14d; call rankn_fp_div; test eax,eax; jnz .rpfsc_bad
-    mov rax,[rsp+112]; lea rsi,[rax+rax]
-    mov rdi,[rsp+72]; mov edx,r14d; call rankn_fp_from_u64; test edx,edx; jnz .rpfsc_bad
-    mov rdi,[rsp+48]; mov rsi,[rsp+80]; mov rdx,[rsp+72]; mov ecx,r14d; call rankn_fp_div; test eax,eax; jnz .rpfsc_bad
+    mov rax,[rsp+56]; xor qword ptr [rax+RPF_SIGN],1
+    mov rax,[rsp+112]; lea rdx,[rax+rax-1]
+    mov rdi,[rsp+80]; mov rsi,[rsp+56]; mov ecx,r14d; call rankn_fp_div_u64; test eax,eax; jnz .rpfsc_bad
+    mov rax,[rsp+112]; lea rdx,[rax+rax]
+    mov rdi,[rsp+48]; mov rsi,[rsp+80]; mov ecx,r14d; call rankn_fp_div_u64; test eax,eax; jnz .rpfsc_bad
     mov rdi,[rsp+96]; mov rsi,[rsp+40]; mov rdx,[rsp+48]; mov ecx,r14d; call rankn_fp_add; test eax,eax; jnz .rpfsc_bad
 
     # Representation-local termination: once neither sum changes in the
     # current P-bit representation, additional local propagation is silent.
-    mov rdi,[rsp+88]; mov rsi,[rsp+24]; call rankn_fp_cmp; mov ebx,eax
-    mov rdi,[rsp+96]; mov rsi,[rsp+40]; call rankn_fp_cmp; or eax,ebx
+    mov rdi,[rsp+88]; mov rsi,[rsp+24]; call rpf_value_equal; mov ebx,eax
+    mov rdi,[rsp+96]; mov rsi,[rsp+40]; call rpf_value_equal; and eax,ebx
     test eax,eax
-    jz .rpfsc_series_done
+    jnz .rpfsc_series_done
     mov rdi,[rsp+24]; mov rsi,[rsp+88]; mov edx,r14d; call rpf_copy_object; test eax,eax; jnz .rpfsc_bad
     mov rdi,[rsp+40]; mov rsi,[rsp+96]; mov edx,r14d; call rpf_copy_object; test eax,eax; jnz .rpfsc_bad
     inc qword ptr [rsp+112]
@@ -2303,10 +2640,13 @@ rpf_sincos_core:
 .rpfsc_double:
     test rbp,rbp
     jz .rpfsc_output
-    # tmp=2*sin, negtmp/newSin=tmp*cos
-    mov rdi,[rsp+56]; mov rsi,[rsp+24]; mov rdx,[rsp+24]; mov ecx,r14d; call rankn_fp_add; test eax,eax; jnz .rpfsc_bad
-    mov rdi,[rsp+64]; mov rsi,[rsp+56]; mov rdx,[rsp+40]; mov ecx,r14d; call rankn_fp_mul; test eax,eax; jnz .rpfsc_bad
-    # denom=cos^2, intermediate=sin^2, nextS/newCos=denom-intermediate.
+    # newSin = 2*sin*cos.  Multiplication produces the exact binary product;
+    # multiplication by two is only an exponent fact, never another fpP add.
+    mov rdi,[rsp+64]; mov rsi,[rsp+24]; mov rdx,[rsp+40]; mov ecx,r14d; call rankn_fp_mul; test eax,eax; jnz .rpfsc_bad
+    mov rdi,[rsp+64]; call rpf_object_is_zero; test eax,eax; jnz .rpfsc_newsin_ready
+    mov rax,[rsp+64]; inc qword ptr [rax+RPF_EXP]
+.rpfsc_newsin_ready:
+    # newCos = cos^2 - sin^2.
     mov rdi,[rsp+72]; mov rsi,[rsp+40]; mov rdx,[rsp+40]; mov ecx,r14d; call rankn_fp_mul; test eax,eax; jnz .rpfsc_bad
     mov rdi,[rsp+80]; mov rsi,[rsp+24]; mov rdx,[rsp+24]; mov ecx,r14d; call rankn_fp_mul; test eax,eax; jnz .rpfsc_bad
     mov rdi,[rsp+88]; mov rsi,[rsp+72]; mov rdx,[rsp+80]; mov ecx,r14d; call rankn_fp_sub; test eax,eax; jnz .rpfsc_bad
@@ -2348,7 +2688,7 @@ rankn_fp_to_f64_bits:
     RPF_SAVE
     sub rsp,32
     mov r12,rdi
-    mov eax,[r12+RPF_N]; mov r13d,eax
+    mov r13,[r12+RPF_PREC]; add r13,63; shr r13,6
     lea rdi,[r12+RPF_DATA]; mov ecx,r13d; call rpf_msb
     test eax,eax; js .rpftd_zero
     mov r14,[r12+RPF_EXP]

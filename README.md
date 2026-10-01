@@ -13,18 +13,28 @@
 
 Wheelchair targets the same broad numerical-computing territory as C and Fortran, but it does not start from a mandatory sequential instruction stream and then try to recover parallelism afterward. Its compiler treats mathematical structure, value identity, causal dependence, precision, locality, and physical realization as first-class compile-time information.
 
-> Current release: **1.3.102**  
+> Current release: **1.3.111**  
 > Target: **Linux x86-64, static ELF64**  
 > Source surfaces: **WH (`.wh`)** and **WHEX (`.whex`)**  
-> [Download Wheelchair 1.3.102](./dist/Wheelchair-1.3.102.zip)
+> [Download Wheelchair 1.3.111](./dist/Wheelchair-1.3.111.zip)
 
 Archive SHA-256:
 
 ```text
-e569f0b4c988467658402561f4b993325d9727dc4e59e61322d247591b079bf1
+e05a66e4f586c4fcb3a6b1e10b379f1ecfddbcff0392ab34773d91800000957d
 ```
 
 ---
+
+## Current release: 1.3.111
+
+Wheelchair 1.3.111 continues the same convergence direction instead of adding another numerical backend. For `P > 64`, high precision remains one Rank-N / PrecisionFact system. Big/big division now uses real base-2^32 `u32` recurrence digits, reuses its existing quotient high-water fact at the single Strict/RNE closure, and no longer pays for zero-extended qword slots. The historical `512*N+4096` object envelope is removed: PrecisionFact plus the existing Fourier TypePhysicalFact geometry derives the live add/mul/div span.
+
+Across the retained 4096-262144-bit A/B set, direct big/big division measured about **1.17x-1.34x** faster than 1.3.110. `sqrt`, which consumes that division path, improves about **1.10x** at 4096 bits and **1.16x** at 8192 bits. Correct experiments that regressed physical performance were removed rather than retained as alternate paths.
+
+The preceding 1.3.110 release also removed Field's historical semantic Rank-8 ceiling. `WHFLD217` carries one `u64` RankFact followed by exactly `rank` extent and stride facts; Surface, canonical Field metadata, AddressFact deltas, and runtime tables derive axis storage from that same RankFact. Native256 and Native512 use one runtime-rank address relation. Old `WHFLD216` input is rejected rather than translated. Rank 9, 17, and 33 execute through the same production path.
+
+No named-width high-precision backend, precision selector, workload route, JIT, kernel-offload surface, scheduler, worker pool, source-visible parallel directive, or old-format compatibility reader is added.
 
 ## Features
 
@@ -300,8 +310,8 @@ WH is the friendlier surface; WHEX is the more explicit structural surface. Both
 The release archive ships prebuilt static compiler binaries under `bin/`.
 
 ```sh
-unzip Wheelchair-1.3.102.zip
-cd Wheelchair-1.3.102
+unzip Wheelchair-1.3.111.zip
+cd Wheelchair-1.3.111
 
 ./bin/wheelchairc surface/examples/equivalent_en.wh -o demo
 ./demo 4
@@ -797,7 +807,7 @@ C, Fortran, Python, GMP, and other external tools may appear under `devtrash/` a
 
 Source buffers, parser metadata, symbol and causal-edge arenas, General inputs/states/outputs, Field counts/accesses, and several code-staging workspaces are sized from the actual program. This removes historical implementation ceilings without replacing them with larger fixed tables.
 
-ShapeFact-N stores axis identities and extents; rank, strides, and product cardinality are derived from those facts. Its logical shape model is separate from the capabilities of each physical consumer. Current limits such as Tensor's single runtime extent and the Field Rank-8/four-logical-VREG representation remain explicit. Instance-sized storage does not imply unrestricted execution support.
+ShapeFact-N stores axis identities and extents; rank, strides, and product cardinality are derived from those facts. Its logical shape model is separate from the capabilities of each physical consumer. Current frontiers such as Tensor's single-runtime-extent realization and Field's signed-dword coordinate/stride/span geometry remain explicit. Field rank itself is no longer a fixed-width language limit. Instance-sized storage does not imply unrestricted execution support.
 
 ### Why there is no production GPU backend yet
 
@@ -885,7 +895,7 @@ The 1.3 series moved more decisions into shared semantic and physical facts: whi
 
 ### Historical evidence
 
-The pre-version account comes from the recovered archive's `README.md`, `SPECIFICATION.md`, and compiler sources. The 1.0.0 package's `RELEASE.md` identifies the first public version baseline without claiming architecture completion. Early numbered milestones are retained in `RELEASE_NOTES.md` inside [1.2.0](./dist/Wheelchair-1.2.0.zip) and in `worktree/` inside [1.2.8](./dist/Wheelchair-1.2.8.zip). Later notes and proofs are preserved under `devtrash/history/` and `devtrash/release_history/` in the [current archive](./dist/Wheelchair-1.3.102.zip). This is a reconstruction from surviving artifacts; the date in the pre-version filename does not establish the project's creation date.
+The pre-version account comes from the recovered archive's `README.md`, `SPECIFICATION.md`, and compiler sources. The 1.0.0 package's `RELEASE.md` identifies the first public version baseline without claiming architecture completion. Early numbered milestones are retained in `RELEASE_NOTES.md` inside [1.2.0](./dist/Wheelchair-1.2.0.zip) and in `worktree/` inside [1.2.8](./dist/Wheelchair-1.2.8.zip). Later notes and proofs are preserved under `devtrash/history/` and `devtrash/release_history/` in the [current archive](./dist/Wheelchair-1.3.111.zip). This is a reconstruction from surviving artifacts; the date in the pre-version filename does not establish the project's creation date.
 
 ## Landmark architecture releases
 
@@ -925,6 +935,10 @@ These milestones record changes in semantics, execution, and release verificatio
 | **1.3.78** | WH repair, convergence, source locations, and final-error presentation joined one shared human-feedback authority. |
 | **1.3.79** | One current test entry, explicit regression admission, and external native coverage closed release verification. The eight production compiler binaries remained byte-identical to 1.3.78. |
 | **1.3.96–1.3.97** | General scalar Physical Reality absorbed the wide scalar register file, removed fixed candidate/resident cliffs, and then erased proved whole-generation next-to-old state transport without adding workload-specific scheduling. |
+| **1.3.103–1.3.104** | Program-derived capacity aging removed redundant transport and historical fixed-capacity walls without adding scheduler or workload routes. |
+| **1.3.105–1.3.109** | PrecisionFact and Local Propagation aged Rank-N high precision: exact decimal ingress, scalar series quotients, geometry reuse, and dead carrier work converged around one Strict/RNE authority. |
+| **1.3.110** | Field rank became a RankFact rather than `rank <= 8`; fixed axis tables and `r1..r8` runtime families disappeared. |
+| **1.3.111** | Big/big Rank-N division uses compact u32 digits, exact live object spans replace the old envelope, and quotient high-water facts feed the existing closure without rediscovery. |
 
 The table selects turning points rather than listing every patch. Versioned benchmark results above remain observations of their original releases and hosts, not measurements of the current compiler unless explicitly labeled as the current snapshot.
 

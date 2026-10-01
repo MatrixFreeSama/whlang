@@ -1,6 +1,5 @@
 .intel_syntax noprefix
 .include "runtime/execution_admission_refresh_x86_64.inc"
-.include "compiler/field_runtime_capacity.inc"
 # Wheelchair 1.2.16 native materialized-field runtime, AVX-512 physicalization.
 # External field ABI is a compact mmap-able binary descriptor.  The hot path
 # never walks descriptor objects: launch-time validation collapses them into
@@ -30,12 +29,11 @@
 .equ CLONE_VM_FILES_FS_SIGCHLD,0x711
 .equ CLONE_PARENT,0x8000
 .equ REGION_STACK_SIZE,16384
-.equ MAX_RANK,FIELD_RUNTIME_RANK_CAP
 # Reduction frontier follows the qword chunk-index domain.
 .equ REDUCE_LEVELS,64
-.equ FIELD_HEADER_SIZE,256
-.equ FIELD_MAGIC,0x363132444c464857  # "WHFLD216" little endian
-.equ FIELD_VERSION,1
+.equ FIELD_HEADER_SIZE,64
+.equ FIELD_MAGIC,0x373132444c464857  # "WHFLD217" little endian
+.equ FIELD_VERSION,2
 .equ FIELD_TYPE_F32,1
 .equ FIELD_MODE_INPUT,0
 .equ FIELD_MODE_OUTPUT,1
@@ -45,12 +43,13 @@
 .equ FH_MAGIC,0
 .equ FH_VERSION,8
 .equ FH_TYPE,12
-.equ FH_RANK,16
-.equ FH_FLAGS,20
+.equ FH_RANK,16          # u64 RankFact
 .equ FH_DATA_OFF,24
-.equ FH_EXTENTS,32
-.equ FH_STRIDES,96
-.equ FH_TOTAL,160
+.equ FH_TOTAL,32
+.equ FH_FLAGS,40
+# Axis descriptors follow the fixed header:
+#   extent[rank] u64 at FIELD_HEADER_SIZE
+#   stride[rank] u64 immediately after extents
 
 .section .text
 .global _start
@@ -180,39 +179,59 @@ _start:
 
 
 # 1.3.56 instance-sized Field runtime storage.  Field and access cardinality are
-# properties of the compiled graph.  Rank remains the WHFLD216 file-format width.
+# properties of the compiled graph.  RankFact is invocation data; no fixed rank width survives.
 field_prepare_instance_arenas:
     push rbx
     push r12
     push r13
     push r14
+    push r15
     mov ebx,dword ptr [rip+field_count_patch]
     mov r12d,dword ptr [rip+access_spec_count_patch]
-    test ebx,ebx
-    jz .fpia_fail
-    test r12d,r12d
-    jz .fpia_fail
+    test ebx,ebx; jz .fpia_fail
+    test r12d,r12d; jz .fpia_fail
     mov rax,qword ptr [rip+field_metadata_va_patch]
-    test rax,rax
-    jz .fpia_fail
-    mov qword ptr [rip+field_mode_ptr],rax
-    lea rcx,[rax+rbx]
-    mov qword ptr [rip+field_rank_ptr],rcx
-    lea rcx,[rcx+rbx]
+    test rax,rax; jz .fpia_fail
+
+    # One invocation-wide RankFact precedes fixed field modes and Rank-N deltas.
+    mov r13,[rax]
+    test r13,r13; jz .fpia_fail
+    mov [rip+g_rank],r13
+    mov r14,r13
+    shl r14,2
+    jc .fpia_fail
+    mov [rip+g_axis_bytes],r14
+    mov [rip+g_access_delta_stride],r14
+    lea rcx,[rax+8]
+    mov qword ptr [rip+field_mode_ptr],rcx
+    add rcx,rbx
     mov qword ptr [rip+access_delta_ptr],rcx
 
-    mov r13,rbx
-    imul r13,r13,113               # six qword + two rank-dword arrays + contig
+    # Fixed field facts + RankFact-derived field/access/axis facts.
+    mov r15,rbx
+    imul r15,r15,49                 # six qwords + contig byte
     jo .fpia_fail
+    mov rax,rbx
+    imul rax,r14                    # one axis table per field
+    jo .fpia_fail
+    add r15,rax; jc .fpia_fail      # extents
+    add r15,rax; jc .fpia_fail      # strides
     mov rax,r12
-    imul rax,rax,40                # normalized rank deltas + linear byte delta
+    imul rax,r14
     jo .fpia_fail
-    add r13,rax
+    add r15,rax; jc .fpia_fail      # normalized access deltas
+    mov rax,r12
+    shl rax,3
     jc .fpia_fail
-    add r13,63
-    jc .fpia_fail
-    and r13,-64
-    mov rsi,r13
+    add r15,rax; jc .fpia_fail      # linear byte deltas
+    mov rax,r14
+    imul rax,5
+    jo .fpia_fail
+    add r15,rax; jc .fpia_fail      # logical stride/shift/mask/min/max
+    add r15,127; jc .fpia_fail
+    and r15,-64
+
+    mov rsi,r15
     mov eax,SYS_mmap
     xor edi,edi
     mov edx,PROT_READ|PROT_WRITE
@@ -220,10 +239,9 @@ field_prepare_instance_arenas:
     mov r8,-1
     xor r9d,r9d
     syscall
-    test rax,rax
-    js .fpia_fail
+    test rax,rax; js .fpia_fail
     mov qword ptr [rip+g_field_arena],rax
-    mov qword ptr [rip+g_field_arena_size],r13
+    mov qword ptr [rip+g_field_arena_size],r15
     mov r14,rax
     mov qword ptr [rip+g_field_map_ptr],r14
     lea r14,[r14+rbx*8]
@@ -237,17 +255,29 @@ field_prepare_instance_arenas:
     lea r14,[r14+rbx*8]
     mov qword ptr [rip+g_field_total_ptr],r14
     lea r14,[r14+rbx*8]
-    mov qword ptr [rip+g_field_extents_ptr],r14
-    mov rax,rbx; shl rax,5; add r14,rax
-    mov qword ptr [rip+g_field_strides_ptr],r14
-    add r14,rax
     mov qword ptr [rip+g_field_contig_ptr],r14
     add r14,rbx
     add r14,7; and r14,-8
+
+    mov qword ptr [rip+g_field_extents_ptr],r14
+    mov rax,rbx; imul rax,qword ptr [rip+g_axis_bytes]; add r14,rax
+    mov qword ptr [rip+g_field_strides_ptr],r14
+    add r14,rax
     mov qword ptr [rip+g_spec_delta_norm_ptr],r14
-    mov rax,r12; shl rax,5; add r14,rax
+    mov rax,r12; imul rax,qword ptr [rip+g_axis_bytes]; add r14,rax
     mov qword ptr [rip+g_spec_linear_delta_bytes_ptr],r14
+    lea r14,[r14+r12*8]
+    mov qword ptr [rip+g_logical_strides_ptr],r14
+    add r14,qword ptr [rip+g_axis_bytes]
+    mov qword ptr [rip+g_stride_shifts_ptr],r14
+    add r14,qword ptr [rip+g_axis_bytes]
+    mov qword ptr [rip+g_extent_masks_ptr],r14
+    add r14,qword ptr [rip+g_axis_bytes]
+    mov qword ptr [rip+g_regular_min_delta_ptr],r14
+    add r14,qword ptr [rip+g_axis_bytes]
+    mov qword ptr [rip+g_regular_max_delta_ptr],r14
     xor eax,eax
+    pop r15
     pop r14
     pop r13
     pop r12
@@ -255,6 +285,7 @@ field_prepare_instance_arenas:
     ret
 .fpia_fail:
     mov eax,1
+    pop r15
     pop r14
     pop r13
     pop r12
@@ -295,16 +326,13 @@ map_one_field:
     syscall
     test rax,rax
     js .mof_close_fail
-    mov rax,[rsp+48]               # struct stat st_size on Linux x86-64
+    mov rax,[rsp+48]
     cmp rax,FIELD_HEADER_SIZE
     jb .mof_close_fail
     mov rcx,[rip+g_field_size_ptr]
     mov [rcx+r12*8],rax
 
-    # Native field alias contract: distinct field declarations are noalias.
-    # Intentional read/write aliasing is represented by one MODE_INOUT field,
-    # never by mapping the same underlying file through two declarations.
-    # Compare (st_dev, st_ino) so hard links cannot bypass the contract.
+    # Distinct declarations are noalias; one inout declaration expresses aliasing.
     mov r8,[rsp+0]
     mov r9,[rsp+8]
     xor ecx,ecx
@@ -357,33 +385,45 @@ map_one_field:
     jne .mof_unmap_fail
     cmp dword ptr [r14+FH_TYPE],FIELD_TYPE_F32
     jne .mof_unmap_fail
-    mov rax,[rip+field_rank_ptr]
-    movzx ecx,byte ptr [rax+r12]
-    cmp dword ptr [r14+FH_RANK],ecx
+    mov rcx,[rip+g_rank]
+    cmp qword ptr [r14+FH_RANK],rcx
     jne .mof_unmap_fail
-    test ecx,ecx
+    test rcx,rcx
     jz .mof_unmap_fail
-    cmp ecx,MAX_RANK
-    ja .mof_unmap_fail
-    mov rax,[r14+FH_DATA_OFF]
-    cmp rax,FIELD_HEADER_SIZE
-    jb .mof_unmap_fail
-    mov rdx,[rip+g_field_size_ptr]
-    cmp rax,[rdx+r12*8]
-    jae .mof_unmap_fail
-    lea rdx,[r14+rax]
-    mov rax,[rip+g_field_data_ptr]
-    mov [rax+r12*8],rdx
+    mov rax,rcx
+    shr rax,32                         # loop-index representation frontier
+    jnz .mof_unmap_fail
 
-    # Validate logical product and physical span. Every extent must fit signed
-    # dword coordinate arithmetic; every byte offset must stay below 2^31.
-    mov r8,1                       # logical total
-    xor r9d,r9d                    # axis
-    xor r10,r10                    # max byte offset
+    # WHFLD217: fixed 64-byte header, then rank extents and rank strides.
+    mov rax,rcx
+    shl rax,4                          # 16 bytes of descriptor facts per axis
+    jc .mof_unmap_fail
+    add rax,FIELD_HEADER_SIZE
+    jc .mof_unmap_fail
+    mov rdx,[r14+FH_DATA_OFF]
+    cmp rdx,rax
+    jb .mof_unmap_fail
+    mov rax,[rip+g_field_size_ptr]
+    cmp rdx,[rax+r12*8]
+    jae .mof_unmap_fail
+    lea rax,[r14+rdx]
+    mov rdx,[rip+g_field_data_ptr]
+    mov [rdx+r12*8],rax
+
+    lea r15,[r14+FIELD_HEADER_SIZE]     # extent[rank]
+    mov rbx,rcx
+    shl rbx,3
+    add rbx,r15                        # stride[rank]
+
+    # Validate logical product and physical span. Coordinate-width aging is a
+    # separate representation frontier; rank cardinality itself is unrestricted.
+    mov r8,1
+    xor r9d,r9d
+    xor r10,r10
 .mof_axis:
-    cmp r9d,ecx
+    cmp r9,rcx
     jae .mof_axes_done
-    mov rax,[r14+FH_EXTENTS+r9*8]
+    mov rax,[r15+r9*8]
     test rax,rax
     jz .mof_unmap_fail
     cmp rax,0x7fffffff
@@ -394,7 +434,7 @@ map_one_field:
     cmp rdx,0x7fffffff
     ja .mof_unmap_fail
     mov r8,rdx
-    mov r11,[r14+FH_STRIDES+r9*8]
+    mov r11,[rbx+r9*8]
     test r11,r11
     jz .mof_unmap_fail
     cmp r11,0x7fffffff
@@ -406,7 +446,7 @@ map_one_field:
     jo .mof_unmap_fail
     cmp r10,0x7ffffffb
     ja .mof_unmap_fail
-    inc r9d
+    inc r9
     jmp .mof_axis
 .mof_axes_done:
     cmp qword ptr [r14+FH_TOTAL],r8
@@ -418,40 +458,29 @@ map_one_field:
     cmp rax,[rdx+r12*8]
     ja .mof_unmap_fail
 
-    # Copy extents and strides into hot compact tables. First field establishes
-    # the logical domain; every subsequent field must share logical extents but
-    # may have an arbitrary valid physical stride layout.
+    # Collapse descriptor spans into one hot RankFact-derived arena.
     xor r9d,r9d
+    mov r11,r12
+    imul r11,qword ptr [rip+g_axis_bytes]
 .mof_copy_axis:
-    cmp r9d,ecx
+    cmp r9,rcx
     jae .mof_copy_done
-    mov rax,[r14+FH_EXTENTS+r9*8]
+    mov rax,[r15+r9*8]
     mov edx,eax
     mov rax,[rip+g_field_extents_ptr]
-    mov r11,r12
-    shl r11,5
-    lea r11,[r11+r9*4]
-    mov [rax+r11],edx
-    mov rax,[r14+FH_STRIDES+r9*8]
+    lea rsi,[r11+r9*4]
+    mov [rax+rsi],edx
+    mov rax,[rbx+r9*8]
     mov edx,eax
     mov rax,[rip+g_field_strides_ptr]
-    mov r11,r12
-    shl r11,5
-    lea r11,[r11+r9*4]
-    mov [rax+r11],edx
-    inc r9d
+    lea rsi,[r11+r9*4]
+    mov [rax+rsi],edx
+    inc r9
     jmp .mof_copy_axis
 .mof_copy_done:
     mov rax,[rip+g_field_total_ptr]
     mov [rax+r12*8],r8
 
-    # 1.3.2 Physical Memory Causality: every mutable affine field must prove
-    # logical-coordinate -> physical-byte injectivity before any executor may
-    # run. Read-only fields may intentionally self-alias (broadcast/views).
-    # The proof sorts non-trivial axes by positive byte stride and requires
-    # each next axis stride to start at or beyond the complete lower-axis span.
-    # This admits contiguous, transposed, and padded layouts without enumerating
-    # elements; an exotic mutable layout that cannot be proven is rejected.
     cmp r13d,FIELD_MODE_INPUT
     je .mof_injective_done
     mov edi,r12d
@@ -461,27 +490,24 @@ map_one_field:
     jnz .mof_unmap_fail
 .mof_injective_done:
 
-    # Contiguous row-major classification is launch-time metadata only.
     mov rax,[rip+g_field_contig_ptr]
     mov byte ptr [rax+r12],1
     mov r11d,4
-    mov r9d,ecx
+    mov r9,[rip+g_rank]
+    mov rdx,r12
+    imul rdx,qword ptr [rip+g_axis_bytes]
 .mof_contig_loop:
     test r9d,r9d
     jz .mof_ok
     dec r9d
     mov rax,[rip+g_field_strides_ptr]
-    mov rdx,r12
-    shl rdx,5
-    lea rdx,[rdx+r9*4]
-    mov eax,[rax+rdx]
+    lea rsi,[rdx+r9*4]
+    mov eax,[rax+rsi]
     cmp eax,r11d
     jne .mof_not_contig
     mov rax,[rip+g_field_extents_ptr]
-    mov rdx,r12
-    shl rdx,5
-    lea rdx,[rdx+r9*4]
-    mov eax,[rax+rdx]
+    lea rsi,[rdx+r9*4]
+    mov eax,[rax+rsi]
     imul r11d,eax
     jo .mof_not_contig
     jmp .mof_contig_loop
@@ -528,9 +554,13 @@ validate_mutable_injective:
     push r14
     push r15
     mov r12d,edi                    # field
-    mov r13d,esi                    # rank
-    xor r14d,r14d                   # selected/trivial axis mask
-    mov r15,4                       # occupied byte span of lower axes
+    mov r13d,esi                    # rank (source-cardinality representation)
+    mov r14,[rip+g_regular_min_delta_ptr] # cold proof scratch: one dword/axis
+    mov rcx,r13
+    mov rdi,r14
+    xor eax,eax
+    rep stosd                        # selected[axis]=0, exact RankFact span
+    mov r15,4                        # occupied byte span of lower axes
 .vmi_mark_trivial:
     xor ebx,ebx
 .vmi_mark_loop:
@@ -538,11 +568,11 @@ validate_mutable_injective:
     jae .vmi_select
     mov r8,[rip+g_field_extents_ptr]
     mov rax,r12
-    shl rax,5
+    imul rax,qword ptr [rip+g_axis_bytes]
     lea rax,[rax+rbx*4]
     cmp dword ptr [r8+rax],1
     jne .vmi_mark_next
-    bts r14d,ebx
+    mov dword ptr [r14+rbx*4],1
 .vmi_mark_next:
     inc ebx
     jmp .vmi_mark_loop
@@ -554,11 +584,11 @@ validate_mutable_injective:
 .vmi_find:
     cmp ebx,r13d
     jae .vmi_found
-    bt r14d,ebx
-    jc .vmi_find_next
+    cmp dword ptr [r14+rbx*4],0
+    jne .vmi_find_next
     mov r8,[rip+g_field_strides_ptr]
     mov rax,r12
-    shl rax,5
+    imul rax,qword ptr [rip+g_axis_bytes]
     lea rax,[rax+rbx*4]
     mov eax,dword ptr [r8+rax]
     cmp eax,r11d
@@ -575,17 +605,17 @@ validate_mutable_injective:
     mov eax,r11d
     cmp rax,r15
     jb .vmi_fail                    # next writable axis overlaps lower span
-    # span += (extent-1)*stride. Existing descriptor span validation proves
+    # span += (extent-1)*stride. Descriptor span validation already proves
     # this remains in the signed 31-bit physical-offset domain.
     mov r8,[rip+g_field_extents_ptr]
     mov rdx,r12
-    shl rdx,5
+    imul rdx,qword ptr [rip+g_axis_bytes]
     lea rdx,[rdx+r10*4]
     mov edx,dword ptr [r8+rdx]
     dec edx
     imul rdx,rax
     add r15,rdx
-    bts r14d,r10d
+    mov dword ptr [r14+r10*4],1
     jmp .vmi_select
 
 .vmi_ok:
@@ -605,9 +635,7 @@ validate_mutable_injective:
 finalize_shape:
     push rbx
     push r12
-    mov rax,[rip+field_rank_ptr]
-    movzx ecx,byte ptr [rax]
-    mov [rip+g_rank],ecx
+    mov rcx,[rip+g_rank]
     mov rax,[rip+g_field_total_ptr]
     mov rax,[rax]
     test rax,rax
@@ -619,9 +647,6 @@ finalize_shape:
 .fs_field_loop:
     cmp ebx,dword ptr [rip+field_count_patch]
     jae .fs_strides
-    mov rdx,[rip+field_rank_ptr]
-    cmp byte ptr [rdx+rbx],cl
-    jne .fs_fail
     mov rdx,[rip+g_field_total_ptr]
     cmp [rdx+rbx*8],rax
     jne .fs_fail
@@ -633,7 +658,7 @@ finalize_shape:
     mov r8d,[r9+rdx*4]
     mov r9,[rip+g_field_extents_ptr]
     mov r10,rbx
-    shl r10,5
+    imul r10,qword ptr [rip+g_axis_bytes]
     lea r10,[r10+rdx*4]
     cmp r8d,[r9+r10]
     jne .fs_fail
@@ -651,7 +676,7 @@ finalize_shape:
     test edx,edx
     jz .fs_chunks
     dec edx
-    lea r8,[rip+g_logical_strides]
+    mov r8,[rip+g_logical_strides_ptr]
     mov [r8+rdx*4],eax
     mov r8,[rip+g_field_extents_ptr]
     imul eax,[r8+rdx*4]
@@ -675,9 +700,9 @@ finalize_shape:
     dec r9d
     test eax,r9d
     jnz .fs_pow2_no
-    lea r8,[rip+g_extent_masks]
+    mov r8,[rip+g_extent_masks_ptr]
     mov [r8+rdx*4],r9d
-    lea r8,[rip+g_logical_strides]
+    mov r8,[rip+g_logical_strides_ptr]
     mov eax,[r8+rdx*4]
     test eax,eax
     jz .fs_pow2_no
@@ -686,7 +711,7 @@ finalize_shape:
     test eax,r9d
     jnz .fs_pow2_no
     bsf eax,eax
-    lea r8,[rip+g_stride_shifts]
+    mov r8,[rip+g_stride_shifts_ptr]
     mov [r8+rdx*4],eax
     inc edx
     jmp .fs_pow2_axis
@@ -717,9 +742,9 @@ finalize_shape:
     cmp edx,ecx
     jae .fs_uniform_find_next
     mov r8,[rip+g_field_strides_ptr]
-    mov r9,r10; shl r9,5; lea r9,[r9+rdx*4]
+    mov r9,r10; imul r9,qword ptr [rip+g_axis_bytes]; lea r9,[r9+rdx*4]
     mov eax,[r8+r9]
-    mov r9,rbx; shl r9,5; lea r9,[r9+rdx*4]
+    mov r9,rbx; imul r9,qword ptr [rip+g_axis_bytes]; lea r9,[r9+rdx*4]
     cmp eax,[r8+r9]
     jne .fs_uniform_no
     inc edx
@@ -916,13 +941,13 @@ validate_parallel_mutable_geometry:
     mov rax,[r8+rbx*8]
     test rax,63
     jnz .vpmg_fail
-    movzx r12d,byte ptr [rip+g_rank]
+    mov r12d,dword ptr [rip+g_rank]
     test r12d,r12d
     jz .vpmg_fail
     mov r13d,r12d
     dec r13d                        # logical innermost axis
     mov r14,rbx
-    shl r14,5
+    imul r14,qword ptr [rip+g_axis_bytes]
     # The innermost logical axis must be the physical f32 stream so a logical
     # The AOT leaf grain is proven in whole 64-byte f32 ownership quanta.
     mov r8,[rip+g_field_strides_ptr]
@@ -987,13 +1012,13 @@ normalize_specs:
     push r13
     push r14
     push r15
-    lea rdi,[rip+g_regular_min_delta]
+    mov rdi,[rip+g_regular_min_delta_ptr]
     xor eax,eax
-    mov ecx,MAX_RANK
+    mov ecx,dword ptr [rip+g_rank]
     rep stosd
-    lea rdi,[rip+g_regular_max_delta]
+    mov rdi,[rip+g_regular_max_delta_ptr]
     xor eax,eax
-    mov ecx,MAX_RANK
+    mov ecx,dword ptr [rip+g_rank]
     rep stosd
     mov rdi,[rip+g_spec_linear_delta_bytes_ptr]
     xor eax,eax
@@ -1004,7 +1029,7 @@ normalize_specs:
 .ns_spec:
     cmp ebx,dword ptr [rip+access_spec_count_patch]
     jae .ns_ok
-    movzx r12d,byte ptr [rip+g_rank]
+    mov r12d,dword ptr [rip+g_rank]
     xor r13d,r13d
     xor r15d,r15d                  # signed logical-element displacement
 .ns_axis:
@@ -1012,7 +1037,7 @@ normalize_specs:
     jae .ns_next
     mov rdx,[rip+access_delta_ptr]
     mov rcx,rbx
-    shl rcx,5
+    imul rcx,qword ptr [rip+g_access_delta_stride]
     lea rcx,[rcx+r13*4]
     movsxd rax,dword ptr [rdx+rcx]
     mov rdx,[rip+g_field_extents_ptr]
@@ -1047,19 +1072,19 @@ normalize_specs:
 .ns_norm_ready:
     mov rdx,[rip+g_spec_delta_norm_ptr]
     mov rcx,rbx
-    shl rcx,5
+    imul rcx,qword ptr [rip+g_access_delta_stride]
     lea rcx,[rcx+r13*4]
     mov [rdx+rcx],eax
 
     # Global minimum/maximum signed delta per axis defines one kernel-wide
     # interior domain.  It is intentionally conservative and workload-name blind.
-    lea rdx,[rip+g_regular_min_delta]
+    mov rdx,[rip+g_regular_min_delta_ptr]
     mov eax,[rdx+r13*4]
     cmp r14d,eax
     jge .ns_min_done
     mov [rdx+r13*4],r14d
 .ns_min_done:
-    lea rdx,[rip+g_regular_max_delta]
+    mov rdx,[rip+g_regular_max_delta_ptr]
     mov eax,[rdx+r13*4]
     cmp r14d,eax
     jle .ns_max_done
@@ -1069,7 +1094,7 @@ normalize_specs:
     # Contiguous row-major physical displacement in elements.  This is used
     # only after a launch-time contiguous-layout proof and an episode interior
     # proof; the general gather authority remains available otherwise.
-    lea rdx,[rip+g_logical_strides]
+    mov rdx,[rip+g_logical_strides_ptr]
     movsxd rax,dword ptr [rdx+r13*4]
     imul rax,r14
     add r15,rax
@@ -1121,7 +1146,7 @@ field_regular_run_end:
     sub rax,r12
     cmp rax,16
     jb .fre81_fail                      # partial tail keeps truthful mask
-    movzx ebx,byte ptr [rip+g_rank]
+    mov ebx,dword ptr [rip+g_rank]
     test ebx,ebx
     jz .fre81_fail
 
@@ -1135,7 +1160,7 @@ field_regular_run_end:
     jz .fre81_fail
     cmp byte ptr [rip+g_shape_pow2],1
     jne .fre81_row_exact
-    lea r8,[rip+g_extent_masks]
+    mov r8,[rip+g_extent_masks_ptr]
     mov eax,r12d
     and eax,[r8+rcx*4]
     mov r15d,eax                        # bit-exact innermost coordinate fact
@@ -1169,7 +1194,7 @@ field_regular_run_end:
     # is not an old compatibility backend; it is the shallowest proof in the
     # same RegionFact lattice.  Only a real periodic boundary descends into the
     # per-access piecewise-affine refinement below.
-    movzx ecx,byte ptr [rip+g_rank]
+    mov ecx,dword ptr [rip+g_rank]
     dec ecx                              # start at innermost axis
     mov r11d,ecx                         # innermost axis identity
     mov r8,[rip+g_field_extents_ptr]
@@ -1182,11 +1207,11 @@ field_regular_run_end:
     # Coordinate identity is a proved bit relation for power-of-two extents.
     # This is one RegionFact realization, not a second execution backend.
     mov ebx,ecx
-    lea rax,[rip+g_stride_shifts]
+    mov rax,[rip+g_stride_shifts_ptr]
     mov ecx,[rax+rbx*4]
     mov rax,r12
     shr rax,cl
-    lea rdx,[rip+g_extent_masks]
+    mov rdx,[rip+g_extent_masks_ptr]
     and eax,[rdx+rbx*4]
     mov esi,eax
     mov edi,eax
@@ -1210,12 +1235,12 @@ field_regular_run_end:
     mov esi,edx
     mov edi,edx
 .fre81_fast_have_coord:
-    lea rax,[rip+g_regular_min_delta]
+    mov rax,[rip+g_regular_min_delta_ptr]
     mov edx,[rax+rcx*4]
     mov eax,esi
     add eax,edx
     js .fre81_fast_boundary
-    lea rax,[rip+g_regular_max_delta]
+    mov rax,[rip+g_regular_max_delta_ptr]
     mov edx,[rax+rcx*4]
     mov eax,edi
     add eax,edx
@@ -1239,9 +1264,9 @@ field_regular_run_end:
 .fre81_fast_bound:
     # Future packets in the row remain interior only until the largest positive
     # innermost displacement would make their final lane leave the extent.
-    movzx ecx,byte ptr [rip+g_rank]
+    mov ecx,dword ptr [rip+g_rank]
     dec ecx
-    lea rax,[rip+g_regular_max_delta]
+    mov rax,[rip+g_regular_max_delta_ptr]
     movsxd rax,dword ptr [rax+rcx*4]
     mov r8,r12
     sub r8,r15                           # row base
@@ -1263,7 +1288,7 @@ field_regular_run_end:
     xor r11d,r11d                       # signed physical delta in elements
     xor r10d,r10d                       # axis
 .fre81_axis:
-    movzx eax,byte ptr [rip+g_rank]
+    mov eax,dword ptr [rip+g_rank]
     cmp r10d,eax
     jae .fre81_store_delta
 
@@ -1276,7 +1301,7 @@ field_regular_run_end:
     # c0 = (q / logical_stride[axis]) mod extent.  Region transition is cold,
     # so exact integer division is preferable to retaining two old pow2/generic
     # proof families.
-    lea r8,[rip+g_logical_strides]
+    mov r8,[rip+g_logical_strides_ptr]
     mov ecx,[r8+r10*4]
     test ecx,ecx
     jz .fre81_fail
@@ -1287,7 +1312,7 @@ field_regular_run_end:
     div r9
     mov esi,edx                         # c0
     mov edi,esi                         # c1
-    movzx eax,byte ptr [rip+g_rank]
+    mov eax,dword ptr [rip+g_rank]
     dec eax
     cmp r10d,eax
     jne .fre81_coord_ready
@@ -1298,7 +1323,7 @@ field_regular_run_end:
     # positive ring delta authority.
     mov r8,[rip+g_spec_delta_norm_ptr]
     mov rax,rbx
-    shl rax,5
+    imul rax,qword ptr [rip+g_access_delta_stride]
     lea rax,[rax+r10*4]
     mov eax,[r8+rax]
     mov edx,r9d
@@ -1323,7 +1348,7 @@ field_regular_run_end:
 
     # On the innermost axis, stop before the first q whose final lane would
     # enter positive wrap for this access.
-    movzx ecx,byte ptr [rip+g_rank]
+    mov ecx,dword ptr [rip+g_rank]
     dec ecx
     cmp r10d,ecx
     jne .fre81_accumulate
@@ -1343,7 +1368,7 @@ field_regular_run_end:
     jns .fre81_fail                     # negative -> interior straddle
     mov eax,edx
     add eax,r9d                         # wrap from low side: d + extent
-    movzx ecx,byte ptr [rip+g_rank]
+    mov ecx,dword ptr [rip+g_rank]
     dec ecx
     cmp r10d,ecx
     jne .fre81_accumulate
@@ -1369,7 +1394,7 @@ field_regular_run_end:
     # Convert axis displacement to flat logical elements using the canonical
     # common-shape stride.  Overflow cannot be silently turned into a direct
     # region; generic topology remains authoritative on failure.
-    lea r8,[rip+g_logical_strides]
+    mov r8,[rip+g_logical_strides_ptr]
     movsxd rcx,dword ptr [r8+r10*4]
     movsxd rax,eax
     imul rax,rcx
@@ -1906,538 +1931,9 @@ vec_divmod_u31:
     ret
 
 # -----------------------------------------------------------------------------
-# 1.3.82 persistent Rank-N CoordinateFact physicalization.
-#
-# Boundary/generic Field episodes used to rediscover q+[lane] and decompose the
-# complete Rank-N coordinate independently for every neighborhood access. The
-# mathematical parent fact is the packet coordinate itself. AVX-512 has eight
-# otherwise helper-private carriers ZMM24..31, exactly the current Rank-8
-# WHFLD216 coordinate width, so one packet materializes canonical coordinates
-# once and every access consumes only its affine delta + field-stride realization.
+# Rank-N coordinates are local facts inside field_compute_offsets_f32.  No
+# persistent register bank owns a semantic axis count.
 # -----------------------------------------------------------------------------
-.macro FPC16_POW2_AXIS idx, reg
-    lea r8,[rip+g_stride_shifts]
-    mov eax,[r8+(\idx)*4]
-    vpbroadcastd zmm23,eax
-    vpsrlvd zmm\reg,zmm16,zmm23
-    lea r8,[rip+g_extent_masks]
-    mov eax,[r8+(\idx)*4]
-    vpbroadcastd zmm23,eax
-    vpandd zmm\reg,zmm\reg,zmm23
-.endm
-
-.macro FPC16_GEN_AXIS idx, reg
-    lea r8,[rip+g_logical_strides]
-    mov eax,[r8+(\idx)*4]
-    call vec_divmod_u31
-    vmovdqa32 zmm16,zmm18
-    mov r8,[rip+g_field_extents_ptr]
-    mov eax,[r8+(\idx)*4]
-    call vec_divmod_u31
-    vmovdqa32 zmm\reg,zmm19
-    mov eax,edx
-    vpbroadcastd zmm16,eax
-    vpaddd zmm16,zmm16,zmmword ptr [rip+lane16_dword]
-.endm
-
-.global field_prepare_coords_f32_r1
-field_prepare_coords_f32_r1:
-    call field_prepare_q16
-    cmp byte ptr [rip+g_shape_pow2],1
-    je .Lfpc16_r1_pow
-    FPC16_GEN_AXIS 0, 24
-    ret
-.Lfpc16_r1_pow:
-    FPC16_POW2_AXIS 0, 24
-    ret
-
-.global field_prepare_coords_f32_r2
-field_prepare_coords_f32_r2:
-    call field_prepare_q16
-    cmp byte ptr [rip+g_shape_pow2],1
-    je .Lfpc16_r2_pow
-    FPC16_GEN_AXIS 0, 24
-    FPC16_GEN_AXIS 1, 25
-    ret
-.Lfpc16_r2_pow:
-    FPC16_POW2_AXIS 0, 24
-    FPC16_POW2_AXIS 1, 25
-    ret
-
-.global field_prepare_coords_f32_r3
-field_prepare_coords_f32_r3:
-    call field_prepare_q16
-    cmp byte ptr [rip+g_shape_pow2],1
-    je .Lfpc16_r3_pow
-    FPC16_GEN_AXIS 0, 24
-    FPC16_GEN_AXIS 1, 25
-    FPC16_GEN_AXIS 2, 26
-    ret
-.Lfpc16_r3_pow:
-    FPC16_POW2_AXIS 0, 24
-    FPC16_POW2_AXIS 1, 25
-    FPC16_POW2_AXIS 2, 26
-    ret
-
-.global field_prepare_coords_f32_r4
-field_prepare_coords_f32_r4:
-    call field_prepare_q16
-    cmp byte ptr [rip+g_shape_pow2],1
-    je .Lfpc16_r4_pow
-    FPC16_GEN_AXIS 0, 24
-    FPC16_GEN_AXIS 1, 25
-    FPC16_GEN_AXIS 2, 26
-    FPC16_GEN_AXIS 3, 27
-    ret
-.Lfpc16_r4_pow:
-    FPC16_POW2_AXIS 0, 24
-    FPC16_POW2_AXIS 1, 25
-    FPC16_POW2_AXIS 2, 26
-    FPC16_POW2_AXIS 3, 27
-    ret
-
-.global field_prepare_coords_f32_r5
-field_prepare_coords_f32_r5:
-    call field_prepare_q16
-    cmp byte ptr [rip+g_shape_pow2],1
-    je .Lfpc16_r5_pow
-    FPC16_GEN_AXIS 0, 24
-    FPC16_GEN_AXIS 1, 25
-    FPC16_GEN_AXIS 2, 26
-    FPC16_GEN_AXIS 3, 27
-    FPC16_GEN_AXIS 4, 28
-    ret
-.Lfpc16_r5_pow:
-    FPC16_POW2_AXIS 0, 24
-    FPC16_POW2_AXIS 1, 25
-    FPC16_POW2_AXIS 2, 26
-    FPC16_POW2_AXIS 3, 27
-    FPC16_POW2_AXIS 4, 28
-    ret
-
-.global field_prepare_coords_f32_r6
-field_prepare_coords_f32_r6:
-    call field_prepare_q16
-    cmp byte ptr [rip+g_shape_pow2],1
-    je .Lfpc16_r6_pow
-    FPC16_GEN_AXIS 0, 24
-    FPC16_GEN_AXIS 1, 25
-    FPC16_GEN_AXIS 2, 26
-    FPC16_GEN_AXIS 3, 27
-    FPC16_GEN_AXIS 4, 28
-    FPC16_GEN_AXIS 5, 29
-    ret
-.Lfpc16_r6_pow:
-    FPC16_POW2_AXIS 0, 24
-    FPC16_POW2_AXIS 1, 25
-    FPC16_POW2_AXIS 2, 26
-    FPC16_POW2_AXIS 3, 27
-    FPC16_POW2_AXIS 4, 28
-    FPC16_POW2_AXIS 5, 29
-    ret
-
-.global field_prepare_coords_f32_r7
-field_prepare_coords_f32_r7:
-    call field_prepare_q16
-    cmp byte ptr [rip+g_shape_pow2],1
-    je .Lfpc16_r7_pow
-    FPC16_GEN_AXIS 0, 24
-    FPC16_GEN_AXIS 1, 25
-    FPC16_GEN_AXIS 2, 26
-    FPC16_GEN_AXIS 3, 27
-    FPC16_GEN_AXIS 4, 28
-    FPC16_GEN_AXIS 5, 29
-    FPC16_GEN_AXIS 6, 30
-    ret
-.Lfpc16_r7_pow:
-    FPC16_POW2_AXIS 0, 24
-    FPC16_POW2_AXIS 1, 25
-    FPC16_POW2_AXIS 2, 26
-    FPC16_POW2_AXIS 3, 27
-    FPC16_POW2_AXIS 4, 28
-    FPC16_POW2_AXIS 5, 29
-    FPC16_POW2_AXIS 6, 30
-    ret
-
-.global field_prepare_coords_f32_r8
-field_prepare_coords_f32_r8:
-    call field_prepare_q16
-    cmp byte ptr [rip+g_shape_pow2],1
-    je .Lfpc16_r8_pow
-    FPC16_GEN_AXIS 0, 24
-    FPC16_GEN_AXIS 1, 25
-    FPC16_GEN_AXIS 2, 26
-    FPC16_GEN_AXIS 3, 27
-    FPC16_GEN_AXIS 4, 28
-    FPC16_GEN_AXIS 5, 29
-    FPC16_GEN_AXIS 6, 30
-    FPC16_GEN_AXIS 7, 31
-    ret
-.Lfpc16_r8_pow:
-    FPC16_POW2_AXIS 0, 24
-    FPC16_POW2_AXIS 1, 25
-    FPC16_POW2_AXIS 2, 26
-    FPC16_POW2_AXIS 3, 27
-    FPC16_POW2_AXIS 4, 28
-    FPC16_POW2_AXIS 5, 29
-    FPC16_POW2_AXIS 6, 30
-    FPC16_POW2_AXIS 7, 31
-    ret
-
-.macro FCO16_COORD_AXIS idx, reg
-    vmovdqa32 zmm22,zmm\reg
-    mov r8,[rip+g_spec_delta_norm_ptr]
-    mov r9,r13
-    shl r9,5
-    add r9,(\idx)*4
-    mov eax,[r8+r9]
-    test eax,eax
-    jz .Lfco16c_stride_\@
-    vpbroadcastd zmm23,eax
-    vpaddd zmm22,zmm22,zmm23
-    mov r8,[rip+g_field_extents_ptr]
-    mov eax,[r8+(\idx)*4]
-    vpbroadcastd zmm23,eax
-    vpcmpd k2,zmm22,zmm23,5
-    vpsubd zmm22{k2},zmm22,zmm23
-.Lfco16c_stride_\@:
-    mov r8,[rip+g_field_strides_ptr]
-    mov r9,r12
-    shl r9,5
-    add r9,(\idx)*4
-    mov eax,[r8+r9]
-    vpbroadcastd zmm23,eax
-    vpmulld zmm22,zmm22,zmm23
-    vpaddd zmm17,zmm17,zmm22
-.endm
-
-.global field_compute_offsets_from_coords_f32_r1
-field_compute_offsets_from_coords_f32_r1:
-    push r12
-    push r13
-    mov r12d,edi
-    mov r13d,esi
-    vpxord zmm17,zmm17,zmm17
-    FCO16_COORD_AXIS 0, 24
-    pop r13
-    pop r12
-    ret
-
-.global field_compute_offsets_from_coords_f32_r2
-field_compute_offsets_from_coords_f32_r2:
-    push r12
-    push r13
-    mov r12d,edi
-    mov r13d,esi
-    vpxord zmm17,zmm17,zmm17
-    FCO16_COORD_AXIS 0, 24
-    FCO16_COORD_AXIS 1, 25
-    pop r13
-    pop r12
-    ret
-
-.global field_compute_offsets_from_coords_f32_r3
-field_compute_offsets_from_coords_f32_r3:
-    push r12
-    push r13
-    mov r12d,edi
-    mov r13d,esi
-    vpxord zmm17,zmm17,zmm17
-    FCO16_COORD_AXIS 0, 24
-    FCO16_COORD_AXIS 1, 25
-    FCO16_COORD_AXIS 2, 26
-    pop r13
-    pop r12
-    ret
-
-.global field_compute_offsets_from_coords_f32_r4
-field_compute_offsets_from_coords_f32_r4:
-    push r12
-    push r13
-    mov r12d,edi
-    mov r13d,esi
-    vpxord zmm17,zmm17,zmm17
-    FCO16_COORD_AXIS 0, 24
-    FCO16_COORD_AXIS 1, 25
-    FCO16_COORD_AXIS 2, 26
-    FCO16_COORD_AXIS 3, 27
-    pop r13
-    pop r12
-    ret
-
-.global field_compute_offsets_from_coords_f32_r5
-field_compute_offsets_from_coords_f32_r5:
-    push r12
-    push r13
-    mov r12d,edi
-    mov r13d,esi
-    vpxord zmm17,zmm17,zmm17
-    FCO16_COORD_AXIS 0, 24
-    FCO16_COORD_AXIS 1, 25
-    FCO16_COORD_AXIS 2, 26
-    FCO16_COORD_AXIS 3, 27
-    FCO16_COORD_AXIS 4, 28
-    pop r13
-    pop r12
-    ret
-
-.global field_compute_offsets_from_coords_f32_r6
-field_compute_offsets_from_coords_f32_r6:
-    push r12
-    push r13
-    mov r12d,edi
-    mov r13d,esi
-    vpxord zmm17,zmm17,zmm17
-    FCO16_COORD_AXIS 0, 24
-    FCO16_COORD_AXIS 1, 25
-    FCO16_COORD_AXIS 2, 26
-    FCO16_COORD_AXIS 3, 27
-    FCO16_COORD_AXIS 4, 28
-    FCO16_COORD_AXIS 5, 29
-    pop r13
-    pop r12
-    ret
-
-.global field_compute_offsets_from_coords_f32_r7
-field_compute_offsets_from_coords_f32_r7:
-    push r12
-    push r13
-    mov r12d,edi
-    mov r13d,esi
-    vpxord zmm17,zmm17,zmm17
-    FCO16_COORD_AXIS 0, 24
-    FCO16_COORD_AXIS 1, 25
-    FCO16_COORD_AXIS 2, 26
-    FCO16_COORD_AXIS 3, 27
-    FCO16_COORD_AXIS 4, 28
-    FCO16_COORD_AXIS 5, 29
-    FCO16_COORD_AXIS 6, 30
-    pop r13
-    pop r12
-    ret
-
-.global field_compute_offsets_from_coords_f32_r8
-field_compute_offsets_from_coords_f32_r8:
-    push r12
-    push r13
-    mov r12d,edi
-    mov r13d,esi
-    vpxord zmm17,zmm17,zmm17
-    FCO16_COORD_AXIS 0, 24
-    FCO16_COORD_AXIS 1, 25
-    FCO16_COORD_AXIS 2, 26
-    FCO16_COORD_AXIS 3, 27
-    FCO16_COORD_AXIS 4, 28
-    FCO16_COORD_AXIS 5, 29
-    FCO16_COORD_AXIS 6, 30
-    FCO16_COORD_AXIS 7, 31
-    pop r13
-    pop r12
-    ret
-
-# Advance one already-live canonical CoordinateFact bundle by one AVX-512
-# packet. This is exact Rank-N induction, not a guessed tile/window policy.
-# Input scalar q/end in rdx/rcx names the new packet only for mask refresh;
-# coordinate values themselves advance from their previous physical carriers.
-.macro FAC16_GEN_AXIS axis, reg
-    vmovdqa32 zmm16,zmm\reg
-    vpaddd zmm16,zmm16,zmm18
-    mov r8,[rip+g_field_extents_ptr]
-    mov eax,[r8+(\axis)*4]
-    call vec_divmod_u31
-    vmovdqa32 zmm\reg,zmm19
-    vmovdqa32 zmm16,zmm18
-.endm
-
-.macro FAC16_POW2_AXIS axis, reg
-    vmovdqa32 zmm16,zmm\reg
-    vpaddd zmm16,zmm16,zmm18
-    lea r8,[rip+g_stride_shifts]
-    # logical-stride shift is not the extent shift. For power-of-two extent,
-    # derive log2(extent) from mask+1 once here with scalar bsf.
-    lea r8,[rip+g_extent_masks]
-    mov eax,[r8+(\axis)*4]
-    inc eax
-    bsf eax,eax
-    vpbroadcastd zmm23,eax
-    vpsrlvd zmm18,zmm16,zmm23
-    lea r8,[rip+g_extent_masks]
-    mov eax,[r8+(\axis)*4]
-    vpbroadcastd zmm23,eax
-    vpandd zmm\reg,zmm16,zmm23
-.endm
-
-.global field_advance_coords_f32_r1
-field_advance_coords_f32_r1:
-    mov eax,16
-    vpbroadcastd zmm18,eax
-    cmp byte ptr [rip+g_shape_pow2],1
-    je .Lfac16_r1_pow
-    FAC16_GEN_AXIS 0, 24
-    jmp .Lfac16_r1_mask
-.Lfac16_r1_pow:
-    FAC16_POW2_AXIS 0, 24
-.Lfac16_r1_mask:
-    call field_prepare_q16
-    ret
-
-.global field_advance_coords_f32_r2
-field_advance_coords_f32_r2:
-    mov eax,16
-    vpbroadcastd zmm18,eax
-    cmp byte ptr [rip+g_shape_pow2],1
-    je .Lfac16_r2_pow
-    FAC16_GEN_AXIS 1, 25
-    FAC16_GEN_AXIS 0, 24
-    jmp .Lfac16_r2_mask
-.Lfac16_r2_pow:
-    FAC16_POW2_AXIS 1, 25
-    FAC16_POW2_AXIS 0, 24
-.Lfac16_r2_mask:
-    call field_prepare_q16
-    ret
-
-.global field_advance_coords_f32_r3
-field_advance_coords_f32_r3:
-    mov eax,16
-    vpbroadcastd zmm18,eax
-    cmp byte ptr [rip+g_shape_pow2],1
-    je .Lfac16_r3_pow
-    FAC16_GEN_AXIS 2, 26
-    FAC16_GEN_AXIS 1, 25
-    FAC16_GEN_AXIS 0, 24
-    jmp .Lfac16_r3_mask
-.Lfac16_r3_pow:
-    FAC16_POW2_AXIS 2, 26
-    FAC16_POW2_AXIS 1, 25
-    FAC16_POW2_AXIS 0, 24
-.Lfac16_r3_mask:
-    call field_prepare_q16
-    ret
-
-.global field_advance_coords_f32_r4
-field_advance_coords_f32_r4:
-    mov eax,16
-    vpbroadcastd zmm18,eax
-    cmp byte ptr [rip+g_shape_pow2],1
-    je .Lfac16_r4_pow
-    FAC16_GEN_AXIS 3, 27
-    FAC16_GEN_AXIS 2, 26
-    FAC16_GEN_AXIS 1, 25
-    FAC16_GEN_AXIS 0, 24
-    jmp .Lfac16_r4_mask
-.Lfac16_r4_pow:
-    FAC16_POW2_AXIS 3, 27
-    FAC16_POW2_AXIS 2, 26
-    FAC16_POW2_AXIS 1, 25
-    FAC16_POW2_AXIS 0, 24
-.Lfac16_r4_mask:
-    call field_prepare_q16
-    ret
-
-.global field_advance_coords_f32_r5
-field_advance_coords_f32_r5:
-    mov eax,16
-    vpbroadcastd zmm18,eax
-    cmp byte ptr [rip+g_shape_pow2],1
-    je .Lfac16_r5_pow
-    FAC16_GEN_AXIS 4, 28
-    FAC16_GEN_AXIS 3, 27
-    FAC16_GEN_AXIS 2, 26
-    FAC16_GEN_AXIS 1, 25
-    FAC16_GEN_AXIS 0, 24
-    jmp .Lfac16_r5_mask
-.Lfac16_r5_pow:
-    FAC16_POW2_AXIS 4, 28
-    FAC16_POW2_AXIS 3, 27
-    FAC16_POW2_AXIS 2, 26
-    FAC16_POW2_AXIS 1, 25
-    FAC16_POW2_AXIS 0, 24
-.Lfac16_r5_mask:
-    call field_prepare_q16
-    ret
-
-.global field_advance_coords_f32_r6
-field_advance_coords_f32_r6:
-    mov eax,16
-    vpbroadcastd zmm18,eax
-    cmp byte ptr [rip+g_shape_pow2],1
-    je .Lfac16_r6_pow
-    FAC16_GEN_AXIS 5, 29
-    FAC16_GEN_AXIS 4, 28
-    FAC16_GEN_AXIS 3, 27
-    FAC16_GEN_AXIS 2, 26
-    FAC16_GEN_AXIS 1, 25
-    FAC16_GEN_AXIS 0, 24
-    jmp .Lfac16_r6_mask
-.Lfac16_r6_pow:
-    FAC16_POW2_AXIS 5, 29
-    FAC16_POW2_AXIS 4, 28
-    FAC16_POW2_AXIS 3, 27
-    FAC16_POW2_AXIS 2, 26
-    FAC16_POW2_AXIS 1, 25
-    FAC16_POW2_AXIS 0, 24
-.Lfac16_r6_mask:
-    call field_prepare_q16
-    ret
-
-.global field_advance_coords_f32_r7
-field_advance_coords_f32_r7:
-    mov eax,16
-    vpbroadcastd zmm18,eax
-    cmp byte ptr [rip+g_shape_pow2],1
-    je .Lfac16_r7_pow
-    FAC16_GEN_AXIS 6, 30
-    FAC16_GEN_AXIS 5, 29
-    FAC16_GEN_AXIS 4, 28
-    FAC16_GEN_AXIS 3, 27
-    FAC16_GEN_AXIS 2, 26
-    FAC16_GEN_AXIS 1, 25
-    FAC16_GEN_AXIS 0, 24
-    jmp .Lfac16_r7_mask
-.Lfac16_r7_pow:
-    FAC16_POW2_AXIS 6, 30
-    FAC16_POW2_AXIS 5, 29
-    FAC16_POW2_AXIS 4, 28
-    FAC16_POW2_AXIS 3, 27
-    FAC16_POW2_AXIS 2, 26
-    FAC16_POW2_AXIS 1, 25
-    FAC16_POW2_AXIS 0, 24
-.Lfac16_r7_mask:
-    call field_prepare_q16
-    ret
-
-.global field_advance_coords_f32_r8
-field_advance_coords_f32_r8:
-    mov eax,16
-    vpbroadcastd zmm18,eax
-    cmp byte ptr [rip+g_shape_pow2],1
-    je .Lfac16_r8_pow
-    FAC16_GEN_AXIS 7, 31
-    FAC16_GEN_AXIS 6, 30
-    FAC16_GEN_AXIS 5, 29
-    FAC16_GEN_AXIS 4, 28
-    FAC16_GEN_AXIS 3, 27
-    FAC16_GEN_AXIS 2, 26
-    FAC16_GEN_AXIS 1, 25
-    FAC16_GEN_AXIS 0, 24
-    jmp .Lfac16_r8_mask
-.Lfac16_r8_pow:
-    FAC16_POW2_AXIS 7, 31
-    FAC16_POW2_AXIS 6, 30
-    FAC16_POW2_AXIS 5, 29
-    FAC16_POW2_AXIS 4, 28
-    FAC16_POW2_AXIS 3, 27
-    FAC16_POW2_AXIS 2, 26
-    FAC16_POW2_AXIS 1, 25
-    FAC16_POW2_AXIS 0, 24
-.Lfac16_r8_mask:
-    call field_prepare_q16
-    ret
-
-# Integer index algebra for field-source procedural expressions.  Two sovereign
-# u31 carriers (zmm13/zmm14) are kept outside the field-address scratch bank
-# zmm16..zmm23.  All operations stay 16-lane; no scalar lane fallback exists.
 .global field_iindex_0
 field_iindex_0:
     call field_prepare_q16
@@ -2524,143 +2020,102 @@ field_itof32_1:
     ret
 
 # -----------------------------------------------------------------------------
-# 1.3.1 fixed-Rank physical address episodes.  Source rank is known by fieldc,
-# so these entry points contain no runtime axis counter/branch. GAS macros are
-# compile-time text expansion only; every admitted rank becomes straight native
-# ISA.  Only AOT rank-specialized entry points exist; there is no generic backward ABI.
+# One runtime-rank address relation. RankFact controls loop geometry; no r1..r8
+# family, persistent-axis register contract, or rank selector survives.
 # -----------------------------------------------------------------------------
-.macro FCO16_GEN_AXIS idx
-    lea r8,[rip+g_logical_strides]
-    mov eax,[r8+(\idx)*4]
-    call vec_divmod_u31
-    vmovdqa32 zmm16,zmm18
-    mov r8,[rip+g_field_extents_ptr]
-    mov eax,[r8+(\idx)*4]
-    call vec_divmod_u31
-    vmovdqa32 zmm22,zmm19
-    mov r8,[rip+g_spec_delta_norm_ptr]
-    mov r9,r13
-    shl r9,5
-    add r9,(\idx)*4
-    mov eax,[r8+r9]
-    test eax,eax
-    jz .Lfco16_coord_\@
-    vpbroadcastd zmm23,eax
-    vpaddd zmm22,zmm22,zmm23
-    mov r8,[rip+g_field_extents_ptr]
-    mov eax,[r8+(\idx)*4]
-    vpbroadcastd zmm23,eax
-    vpcmpd k2,zmm22,zmm23,5
-    vpsubd zmm22{k2},zmm22,zmm23
-.Lfco16_coord_\@:
-    mov r8,[rip+g_field_strides_ptr]
-    mov r9,r12
-    shl r9,5
-    add r9,(\idx)*4
-    mov eax,[r8+r9]
-    vpbroadcastd zmm23,eax
-    vpmulld zmm22,zmm22,zmm23
-    vpaddd zmm17,zmm17,zmm22
-    mov eax,edx
-    vpbroadcastd zmm16,eax
-    vpaddd zmm16,zmm16,zmmword ptr [rip+lane16_dword]
-.endm
-
-.macro FCO16_POW2_AXIS idx
-    lea r8,[rip+g_stride_shifts]
-    mov eax,[r8+(\idx)*4]
-    vpbroadcastd zmm23,eax
-    vpsrlvd zmm22,zmm16,zmm23
-    lea r8,[rip+g_extent_masks]
-    mov eax,[r8+(\idx)*4]
-    vpbroadcastd zmm23,eax
-    vpandd zmm22,zmm22,zmm23
-    mov r8,[rip+g_spec_delta_norm_ptr]
-    mov r9,r13
-    shl r9,5
-    add r9,(\idx)*4
-    mov eax,[r8+r9]
-    test eax,eax
-    jz .Lfco16_powstride_\@
-    vpbroadcastd zmm23,eax
-    vpaddd zmm22,zmm22,zmm23
-    mov r8,[rip+g_field_extents_ptr]
-    mov eax,[r8+(\idx)*4]
-    vpbroadcastd zmm23,eax
-    vpcmpd k2,zmm22,zmm23,5
-    vpsubd zmm22{k2},zmm22,zmm23
-.Lfco16_powstride_\@:
-    mov r8,[rip+g_field_strides_ptr]
-    mov r9,r12
-    shl r9,5
-    add r9,(\idx)*4
-    mov eax,[r8+r9]
-    vpbroadcastd zmm23,eax
-    vpmulld zmm22,zmm22,zmm23
-    vpaddd zmm17,zmm17,zmm22
-.endm
-
-.macro DEFINE_FCO16_RANK rank
-.global field_compute_offsets_f32_r\rank
-field_compute_offsets_f32_r\rank:
+.global field_compute_offsets_f32
+field_compute_offsets_f32:
     push rbx
     push r12
     push r13
-    mov r12d,edi
-    mov r13d,esi
+    push r14
+    push r15
+    mov r12d,edi                         # field
+    mov r13d,esi                         # access
+    mov r14,rdx                          # q
     call field_prepare_q16
     vpxord zmm17,zmm17,zmm17
+    xor r15d,r15d
     cmp byte ptr [rip+g_shape_pow2],1
-    je .Lfco16_r\rank\()_pow
-    .set .Lfco16_ax,0
-    .rept \rank
-      FCO16_GEN_AXIS .Lfco16_ax
-      .set .Lfco16_ax,.Lfco16_ax+1
-    .endr
-    jmp .Lfco16_r\rank\()_done
-.Lfco16_r\rank\()_pow:
-    .set .Lfco16_axp,0
-    .rept \rank
-      FCO16_POW2_AXIS .Lfco16_axp
-      .set .Lfco16_axp,.Lfco16_axp+1
-    .endr
-.Lfco16_r\rank\()_done:
+    je .Lfco16_dynamic_pow
+.Lfco16_dynamic_gen:
+    cmp r15d,dword ptr [rip+g_rank]
+    jae .Lfco16_dynamic_done
+    # Restore q+[lane] for this axis.
+    mov eax,r14d
+    vpbroadcastd zmm16,eax
+    vpaddd zmm16,zmm16,zmmword ptr [rip+lane16_dword]
+    mov r8,[rip+g_logical_strides_ptr]
+    mov eax,[r8+r15*4]
+    call vec_divmod_u31
+    vmovdqa32 zmm16,zmm18
+    mov r8,[rip+g_field_extents_ptr]
+    mov eax,[r8+r15*4]
+    call vec_divmod_u31
+    vmovdqa32 zmm22,zmm19
+    jmp .Lfco16_dynamic_realize
+.Lfco16_dynamic_pow:
+    cmp r15d,dword ptr [rip+g_rank]
+    jae .Lfco16_dynamic_done
+    mov eax,r14d
+    vpbroadcastd zmm16,eax
+    vpaddd zmm16,zmm16,zmmword ptr [rip+lane16_dword]
+    mov r8,[rip+g_stride_shifts_ptr]
+    mov eax,[r8+r15*4]
+    vpbroadcastd zmm23,eax
+    vpsrlvd zmm22,zmm16,zmm23
+    mov r8,[rip+g_extent_masks_ptr]
+    mov eax,[r8+r15*4]
+    vpbroadcastd zmm23,eax
+    vpandd zmm22,zmm22,zmm23
+.Lfco16_dynamic_realize:
+    mov r8,[rip+g_spec_delta_norm_ptr]
+    mov r9,r13
+    imul r9,qword ptr [rip+g_access_delta_stride]
+    lea r9,[r9+r15*4]
+    mov eax,[r8+r9]
+    test eax,eax
+    jz .Lfco16_dynamic_stride
+    vpbroadcastd zmm23,eax
+    vpaddd zmm22,zmm22,zmm23
+    mov r8,[rip+g_field_extents_ptr]
+    mov eax,[r8+r15*4]
+    vpbroadcastd zmm23,eax
+    vpcmpd k2,zmm22,zmm23,5
+    vpsubd zmm22{k2},zmm22,zmm23
+.Lfco16_dynamic_stride:
+    mov r8,[rip+g_field_strides_ptr]
+    mov r9,r12
+    imul r9,qword ptr [rip+g_axis_bytes]
+    lea r9,[r9+r15*4]
+    mov eax,[r8+r9]
+    vpbroadcastd zmm23,eax
+    vpmulld zmm22,zmm22,zmm23
+    vpaddd zmm17,zmm17,zmm22
+    inc r15d
+    cmp byte ptr [rip+g_shape_pow2],1
+    je .Lfco16_dynamic_pow
+    jmp .Lfco16_dynamic_gen
+.Lfco16_dynamic_done:
+    mov rdx,r14
+    call field_prepare_q16                 # restore k1 and canonical q vector
+    pop r15
+    pop r14
     pop r13
     pop r12
     pop rbx
     ret
-.endm
-DEFINE_FCO16_RANK 1
-DEFINE_FCO16_RANK 2
-DEFINE_FCO16_RANK 3
-DEFINE_FCO16_RANK 4
-DEFINE_FCO16_RANK 5
-DEFINE_FCO16_RANK 6
-DEFINE_FCO16_RANK 7
-DEFINE_FCO16_RANK 8
 
-.macro LOAD16_DELTA_ZERO idx, badlabel
-    mov rax,[rip+g_spec_delta_norm_ptr]
-    mov r10,rsi
-    shl r10,5
-    add r10,(\idx)*4
-    cmp dword ptr [rax+r10],0
-    jne \badlabel
-.endm
-
-.macro DEFINE_LOAD16_RANK rank
-.global field_load_f32_r\rank
-field_load_f32_r\rank:
+.global field_load_f32
+field_load_f32:
     push r12
     mov r12d,edi
     mov rax,[rip+g_field_contig_ptr]
     cmp byte ptr [rax+r12],1
-    jne .Lfl16_r\rank\()_gather
-    .set .Lfl16_ax,0
-    .rept \rank
-      LOAD16_DELTA_ZERO .Lfl16_ax,.Lfl16_r\rank\()_gather
-      .set .Lfl16_ax,.Lfl16_ax+1
-    .endr
+    jne .Lfl16_dynamic_gather
+    mov rax,[rip+g_spec_linear_delta_bytes_ptr]
+    cmp qword ptr [rax+rsi*8],0
+    jne .Lfl16_dynamic_gather
     call field_prepare_q16
     mov rax,[rip+g_field_data_ptr]
     mov rax,[rax+r12*8]
@@ -2668,8 +2123,8 @@ field_load_f32_r\rank:
     vmovups zmm0{k1}{z},zmmword ptr [rax]
     pop r12
     ret
-.Lfl16_r\rank\()_gather:
-    call field_compute_offsets_f32_r\rank
+.Lfl16_dynamic_gather:
+    call field_compute_offsets_f32
     mov rax,[rip+g_field_data_ptr]
     mov rax,[rax+r12*8]
     vxorps zmm0,zmm0,zmm0
@@ -2677,31 +2132,18 @@ field_load_f32_r\rank:
     call field_prepare_q16
     pop r12
     ret
-.endm
-DEFINE_LOAD16_RANK 1
-DEFINE_LOAD16_RANK 2
-DEFINE_LOAD16_RANK 3
-DEFINE_LOAD16_RANK 4
-DEFINE_LOAD16_RANK 5
-DEFINE_LOAD16_RANK 6
-DEFINE_LOAD16_RANK 7
-DEFINE_LOAD16_RANK 8
 
-.macro DEFINE_STORE16_RANK rank
-.global field_store_f32_r\rank
-field_store_f32_r\rank:
+.global field_store_f32
+field_store_f32:
     push r12
     mov r12d,edi
     mov rax,[rip+g_field_contig_ptr]
     cmp byte ptr [rax+r12],1
-    jne .Lfs16_r\rank\()_scatter
+    jne .Lfs16_dynamic_scatter
     call field_prepare_q16
     mov rax,[rip+g_field_data_ptr]
     mov rax,[rax+r12*8]
     lea rax,[rax+rdx*4]
-    # 1.3.2 Memory ISA Override: a large pure-output full vector is one-shot
-    # streaming data, so bypass cache allocation. Inout/tails/small hot outputs
-    # retain normal coherent masked stores.
     mov r11,[rip+field_mode_ptr]
     cmp byte ptr [r11+r12],FIELD_MODE_OUTPUT
     jne 1f
@@ -2716,24 +2158,15 @@ field_store_f32_r\rank:
     vmovups zmmword ptr [rax]{k1},zmm0
     pop r12
     ret
-.Lfs16_r\rank\()_scatter:
+.Lfs16_dynamic_scatter:
     xor esi,esi
-    call field_compute_offsets_f32_r\rank
+    call field_compute_offsets_f32
     mov rax,[rip+g_field_data_ptr]
     mov rax,[rax+r12*8]
     vscatterdps dword ptr [rax+zmm17]{k1},zmm0
     call field_prepare_q16
     pop r12
     ret
-.endm
-DEFINE_STORE16_RANK 1
-DEFINE_STORE16_RANK 2
-DEFINE_STORE16_RANK 3
-DEFINE_STORE16_RANK 4
-DEFINE_STORE16_RANK 5
-DEFINE_STORE16_RANK 6
-DEFINE_STORE16_RANK 7
-DEFINE_STORE16_RANK 8
 
 print_checksum_f32:
     # eax=f32 bits
@@ -2810,7 +2243,6 @@ field_fabric_activation_abi_version_patch: .long 1
 g_field_arena: .skip 8
 g_field_arena_size: .skip 8
 field_mode_ptr: .skip 8
-field_rank_ptr: .skip 8
 access_delta_ptr: .skip 8
 g_field_map_ptr: .skip 8
 g_field_size_ptr: .skip 8
@@ -2823,10 +2255,10 @@ g_field_extents_ptr: .skip 8
 g_field_strides_ptr: .skip 8
 .global g_field_contig_ptr
 g_field_contig_ptr: .skip 8
-g_logical_strides: .skip MAX_RANK*4
+g_logical_strides_ptr: .skip 8
 # Launch-time caretaker proof for division-free dynamic Rank-N coordinates.
-g_stride_shifts: .skip MAX_RANK*4
-g_extent_masks: .skip MAX_RANK*4
+g_stride_shifts_ptr: .skip 8
+g_extent_masks_ptr: .skip 8
 .global g_input_uniform_layout
 g_shape_pow2: .skip 1
 g_input_uniform_layout: .skip 1
@@ -2837,12 +2269,14 @@ g_spec_delta_norm_ptr: .skip 8
 .global g_launch_direct_layout
 g_launch_direct_layout: .skip 1
 .p2align 2
-g_regular_min_delta: .skip MAX_RANK*4
-g_regular_max_delta: .skip MAX_RANK*4
+g_regular_min_delta_ptr: .skip 8
+g_regular_max_delta_ptr: .skip 8
 .p2align 3
 .global g_spec_linear_delta_bytes_ptr
 g_spec_linear_delta_bytes_ptr: .skip 8
-g_rank: .skip 1
+g_rank: .skip 8
+g_axis_bytes: .skip 8
+g_access_delta_stride: .skip 8
 .p2align 3
 g_total: .skip 8
 # 1.3.3 immutable launch-time memory profitability facts.

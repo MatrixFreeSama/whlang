@@ -7,6 +7,7 @@ sym() { nm -n "$BIN" | awk -v n="$1" '$3==n {print "0x" $1; exit}'; }
 need() { v=$(sym "$1"); [ -n "$v" ] || { echo "missing symbol: $1" >&2; exit 1; }; printf '%s' "$v"; }
 va_in_count=$(need input_count_patch)
 va_out_count=$(need output_count_patch)
+va_rankn_type_count=$(need rankn_type_count_patch)
 va_dynamic_arena_bytes=$(need dynamic_arena_bytes_patch)
 va_trailer_file_offset=$(need program_trailer_file_offset_patch)
 va_trailer_size=$(need program_trailer_size_patch)
@@ -41,6 +42,7 @@ cat > "$OUT" <<EOT
 .equ GENERAL_RUNTIME_SIZE, $size
 .equ GENERAL_INPUT_COUNT_OFF, $(to_off "$va_in_count")
 .equ GENERAL_OUTPUT_COUNT_OFF, $(to_off "$va_out_count")
+.equ GENERAL_RANKN_TYPE_COUNT_OFF, $(to_off "$va_rankn_type_count")
 .equ GENERAL_DYNAMIC_ARENA_BYTES_OFF, $(to_off "$va_dynamic_arena_bytes")
 .equ GENERAL_PROGRAM_TRAILER_FILE_OFFSET_OFF, $(to_off "$va_trailer_file_offset")
 .equ GENERAL_PROGRAM_TRAILER_SIZE_OFF, $(to_off "$va_trailer_size")

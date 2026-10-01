@@ -63,8 +63,8 @@
 # Structured matrix/vector families encode their dimension in the tag.
 # matrix2/3/4 and vec2/3/4 are legacy surface aliases only; the algorithms
 # consume one dimension-bearing family rather than three named species.
-.equ STF_MATRIX_BASE,0x100
-.equ STF_VECTOR_BASE,0x200
+.equ STF_MATRIX_BASE,0x40000000
+.equ STF_VECTOR_BASE,0x80000000
 .equ STF_MAT2,STF_MATRIX_BASE+2
 .equ STF_MAT3,STF_MATRIX_BASE+3
 .equ STF_MAT4,STF_MATRIX_BASE+4
@@ -3239,13 +3239,14 @@ s_parse_matrix_relation_call:
     xor edi,edi; call s_parse_expr; test rax,rax; jz .spmrc_fail
     mov rdi,rax; call s_eval_static_u64; test edx,edx; jnz .spmrc_fail
     test rax,rax; jz .spmrc_fail
-    cmp rax,255; ja .spmrc_fail              # tag-family representation boundary
-    mov r14d,eax
-    mov edi,r14d; call s_matrix_tag_from_n; test eax,eax; jz .spmrc_fail
+    mov r14,rax
+    mov rax,r14; mul r14
+    test rdx,rdx; jnz .spmrc_fail
+    test rax,rax; jz .spmrc_fail
+    mov edx,eax; shr rax,32; jnz .spmrc_fail # component cardinality is the dword Structured-Fact frontier
+    mov dword ptr [rsp+8],edx                # expected component count
+    mov rdi,r14; call s_matrix_tag_from_n; test eax,eax; jz .spmrc_fail
     mov dword ptr [rsp],eax                  # matrix family tag
-    mov eax,r14d; imul eax,r14d
-    test eax,eax; jz .spmrc_fail
-    mov dword ptr [rsp+8],eax                # expected component count
     mov qword ptr [rsp+16],0                 # head
     mov qword ptr [rsp+24],0                 # tail
     xor r15d,r15d
@@ -3409,17 +3410,17 @@ s_parse_static_axis_reduce_call:
     add rsp,48
     pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
-# rdi=base AST, esi=positive integer exponent -> existing multiply DAG.
+# rdi=base AST, rsi=positive u64 exponent -> existing multiply DAG.
 # Exponentiation by squaring minimizes emitted multiplication structure.
 s_expand_pow_u64:
     push rbx; push r12; push r13; push r14
-    mov r12,rdi; mov r13d,esi
+    mov r12,rdi; mov r13,rsi
     test r12,r12; jz .sepu_fail
-    test r13d,r13d; jz .sepu_fail      # zero needs type-preserving one_like; do not fake it
+    test r13,r13; jz .sepu_fail        # zero needs type-preserving one_like; do not fake it
     mov r14,r12                        # current squared factor
     xor ebx,ebx                        # accumulator AST / none
 .sepu_loop:
-    test r13d,1; jz .sepu_no_acc
+    test r13,1; jz .sepu_no_acc
     test rbx,rbx; jnz .sepu_mul_acc
     mov rbx,r14; jmp .sepu_no_acc
 .sepu_mul_acc:
@@ -3427,7 +3428,7 @@ s_expand_pow_u64:
     test rax,rax; jz .sepu_fail
     mov rbx,rax
 .sepu_no_acc:
-    shr r13d,1; jz .sepu_ok
+    shr r13,1; jz .sepu_ok
     mov edi,OP_SQUARE; mov rsi,r14; call s_ast_unary_new
     test rax,rax; jz .sepu_fail
     mov r14,rax; jmp .sepu_loop
@@ -3444,7 +3445,7 @@ s_expand_pow_ast:
     mov rdi,r12; call s_eval_static_u64
     test edx,edx; jnz .sepa_real
     test rax,rax; jz .sepa_real
-    mov esi,eax; mov rdi,rbx; call s_expand_pow_u64
+    mov rsi,rax; mov rdi,rbx; call s_expand_pow_u64
     jmp .sepa_done
 .sepa_real:
     mov rdi,rbx; call s_expand_log_ast; test rax,rax; jz .sepa_fail
@@ -3536,9 +3537,26 @@ s_ast_unary_new:
 s_math_const_bits:
     jmp s_ast_f64_bits_imm
 
-# rdi=small exact integer -> f64 immediate AST; compile-time only.
+# rdi=u64 -> f64 immediate AST; compile-time only.  The high-bit path folds
+# unsigned conversion from the same shift/double identity instead of imposing a
+# signed-small source ceiling.
 s_math_small_u64_f64:
+    test rdi,rdi
+    jns .smsu64_direct
+    mov rax,rdi
+    and eax,1
+    shr rdi,1
     cvtsi2sd xmm0,rdi
+    addsd xmm0,xmm0
+    test eax,eax
+    jz .smsu64_bits
+    mov ecx,1
+    cvtsi2sd xmm1,rcx
+    addsd xmm0,xmm1
+    jmp .smsu64_bits
+.smsu64_direct:
+    cvtsi2sd xmm0,rdi
+.smsu64_bits:
     movq rdi,xmm0
     jmp s_ast_f64_bits_imm
 
@@ -4136,12 +4154,12 @@ s_expand_zeta_ast:
     mov r12,rdi; mov [rsp+16],rsi
     cmp qword ptr [rsp+16],2; jb .seza_fail
     mov rdi,r12; call s_eval_static_u64; test edx,edx; jnz .seza_fail
-    cmp rax,2; jb .seza_fail; cmp rax,32; ja .seza_fail; mov r14d,eax
+    cmp rax,2; jb .seza_fail; mov r14,rax
     xor ebx,ebx; mov r15,1
 .seza_sum_loop:
     cmp r15,[rsp+16]; jae .seza_tail
-    mov rdi,r15; call s_math_small_u64_f64; mov r13,rax
-    mov rdi,r13; mov esi,r14d; call s_expand_pow_u64; test rax,rax; jz .seza_fail; mov r13,rax
+    mov rdi,r15; call s_math_small_u64_f64; test rax,rax; jz .seza_fail; mov r13,rax
+    mov rdi,r13; mov rsi,r14; call s_expand_pow_u64; test rax,rax; jz .seza_fail; mov r13,rax
     mov rdi,0x3ff0000000000000; call s_math_const_bits
     mov edi,OP_DIV; mov rsi,rax; mov rdx,r13; call s_ast_binary_new; test rax,rax; jz .seza_fail; mov r13,rax
     test rbx,rbx; jz .seza_sum_first
@@ -4152,8 +4170,8 @@ s_expand_zeta_ast:
 .seza_tail:
     # N^(1-s)/(s-1) = 1 / ((s-1)*16^(s-1))
     mov rdi,[rsp+16]; call s_math_small_u64_f64; mov r13,rax
-    lea esi,[r14d-1]; mov rdi,r13; call s_expand_pow_u64; test rax,rax; jz .seza_fail; mov r13,rax
-    mov edi,r14d; dec edi; mov rdi,rdi; call s_math_small_u64_f64
+    lea rsi,[r14-1]; mov rdi,r13; call s_expand_pow_u64; test rax,rax; jz .seza_fail; mov r13,rax
+    lea rdi,[r14-1]; call s_math_small_u64_f64
     mov edi,OP_MUL; mov rsi,r13; mov rdx,rax; call s_ast_binary_new; mov r13,rax
     mov rdi,0x3ff0000000000000; call s_math_const_bits
     mov edi,OP_DIV; mov rsi,rax; mov rdx,r13; call s_ast_binary_new; mov r13,rax
@@ -4161,23 +4179,25 @@ s_expand_zeta_ast:
 
     # + 1/(2*N^s)
     mov rdi,[rsp+16]; call s_math_small_u64_f64; mov r13,rax
-    mov rdi,r13; mov esi,r14d; call s_expand_pow_u64; test rax,rax; jz .seza_fail; mov r13,rax
+    mov rdi,r13; mov rsi,r14; call s_expand_pow_u64; test rax,rax; jz .seza_fail; mov r13,rax
     mov rdi,0x3fe0000000000000; call s_math_const_bits
     mov edi,OP_DIV; mov rsi,rax; mov rdx,r13; call s_ast_binary_new; mov r13,rax
     mov edi,OP_ADD; mov rsi,rbx; mov rdx,r13; call s_ast_binary_new; mov rbx,rax
 
     # Bernoulli correction k=1..6:
     # B_2k/(2k)! * (s)_(2k-1) / N^(s+2k-1)
-    mov r15,r14                         # rising=(s)_1
-    mov dword ptr [rsp],1               # k
+    mov rdi,r14; call s_math_small_u64_f64; test rax,rax; jz .seza_fail
+    mov r15,rax                          # rising AST=(s)_1
+    mov dword ptr [rsp],1                # k
 .seza_corr_loop:
     mov eax,dword ptr [rsp]; cmp eax,6; ja .seza_ok
     mov ecx,eax; shl ecx,1
-    mov esi,r14d; add esi,ecx; dec esi
+    mov rdx,r14; add rdx,rcx; jc .seza_fail; dec rdx
+    mov [rsp+24],rdx                    # denominator exponent
     mov rdi,[rsp+16]; call s_math_small_u64_f64; mov r13,rax
-    mov rdi,r13; call s_expand_pow_u64; test rax,rax; jz .seza_fail
+    mov rdi,r13; mov rsi,[rsp+24]; call s_expand_pow_u64; test rax,rax; jz .seza_fail
     mov [rsp+8],rax                     # denominator power
-    mov rdi,r15; call s_math_small_u64_f64; mov r13,rax
+    mov r13,r15                         # rising is already an f64 AST
     mov eax,dword ptr [rsp]; dec eax
     lea rdx,[rip+s_math_zeta_em_coeff]
     mov rdi,[rdx+rax*8]; call s_math_const_bits
@@ -4185,10 +4205,18 @@ s_expand_zeta_ast:
     mov edi,OP_DIV; mov rsi,r13; mov rdx,[rsp+8]; call s_ast_binary_new; mov r13,rax
     mov edi,OP_ADD; mov rsi,rbx; mov rdx,r13; call s_ast_binary_new; mov rbx,rax
     mov eax,dword ptr [rsp]; cmp eax,6; jae .seza_corr_next
-    # rising *= (s+2k-1)*(s+2k)
+    # rising *= (s+2k-1)*(s+2k), represented in the mathematical AST so
+    # compiler-host integer width cannot become a zeta semantic ceiling.
     mov ecx,eax; shl ecx,1
-    mov eax,r14d; add eax,ecx; dec eax; imul r15,rax
-    mov eax,r14d; add eax,ecx; imul r15,rax
+    mov rdi,r14; add rdi,rcx; jc .seza_fail; dec rdi
+    call s_math_small_u64_f64; test rax,rax; jz .seza_fail
+    mov edi,OP_MUL; mov rsi,r15; mov rdx,rax; call s_ast_binary_new; test rax,rax; jz .seza_fail
+    mov r15,rax
+    mov eax,dword ptr [rsp]; lea ecx,[eax+eax]
+    mov rdi,r14; add rdi,rcx; jc .seza_fail
+    call s_math_small_u64_f64; test rax,rax; jz .seza_fail
+    mov edi,OP_MUL; mov rsi,r15; mov rdx,rax; call s_ast_binary_new; test rax,rax; jz .seza_fail
+    mov r15,rax
 .seza_corr_next:
     inc dword ptr [rsp]; jmp .seza_corr_loop
 .seza_ok:
@@ -4205,12 +4233,12 @@ s_expand_polylog_ast:
     push rbx; push r12; push r13; push r14; push r15
     mov r12,rdi; mov r13,rsi; mov r15,rdx
     mov rdi,r12; call s_eval_static_u64; test edx,edx; jnz .sepl_fail
-    test rax,rax; jz .sepl_fail; cmp rax,16; ja .sepl_fail; mov r14d,eax
+    test rax,rax; jz .sepl_fail; mov r14,rax
     xor ebx,ebx
     test r15,r15; jz .sepl_zero
 .sepl_loop:
     mov rdi,r15; call s_math_small_u64_f64; mov r12,rax
-    mov rdi,r12; mov esi,r14d; call s_expand_pow_u64; test rax,rax; jz .sepl_fail; mov r12,rax
+    mov rdi,r12; mov rsi,r14; call s_expand_pow_u64; test rax,rax; jz .sepl_fail; mov r12,rax
     mov rdi,0x3ff0000000000000; call s_math_const_bits
     mov edi,OP_DIV; mov rsi,rax; mov rdx,r12; call s_ast_binary_new; mov r12,rax
     test rbx,rbx; jz .sepl_seed
@@ -4537,11 +4565,11 @@ s_expand_math_builtin:
     mov edi,OP_MUL; mov rsi,r14; mov rdx,rax; call s_ast_binary_new; jmp .semb_done
 .semb_tetration:
     mov rdi,r13; call s_eval_static_u64; test edx,edx; jnz .semb_fail
-    test rax,rax; jz .semb_fail; cmp rax,8; ja .semb_fail
-    mov r14d,eax; mov r15,r12; dec r14d; jz .semb_tetration_done
+    test rax,rax; jz .semb_fail
+    mov r14,rax; mov r15,r12; dec r14; jz .semb_tetration_done
 .semb_tetration_loop:
     mov rdi,r12; mov rsi,r15; call s_expand_pow_ast; test rax,rax; jz .semb_fail
-    mov r15,rax; dec r14d; jnz .semb_tetration_loop
+    mov r15,rax; dec r14; jnz .semb_tetration_loop
 .semb_tetration_done: mov rax,r15; jmp .semb_done
 .semb_det2:
     mov rax,[rip+s_math_call_args]
@@ -5404,20 +5432,24 @@ s_complex_binary:
     pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
 s_matrix_dim:
-    # edi=dimension-bearing matrix tag -> eax dimension /0.  There is one
-    # matrix family; named 2/3/4 tags are aliases, never algorithm branches.
+    # edi=dimension-bearing matrix tag -> eax dimension /0.  Matrix/vector
+    # identity occupies a structural tag domain; dimension is no longer squeezed
+    # into the historical 8-bit family window.
     mov eax,edi
+    cmp eax,STF_MATRIX_BASE+2; jb .smd_bad
+    cmp eax,STF_VECTOR_BASE; jae .smd_bad
     sub eax,STF_MATRIX_BASE
-    cmp eax,2; jb .smd_bad
-    cmp eax,255; ja .smd_bad
     ret
 .smd_bad: xor eax,eax; ret
 
 s_matrix_tag_from_n:
-    # edi=n>=2 -> eax matrix tag /0.
+    # edi=n>=2 -> eax matrix tag /0.  The caller's component-cardinality
+    # representation proves the practical bound; no independent dimension cap.
     cmp edi,2; jb .smtfn_bad
-    cmp edi,255; ja .smtfn_bad
-    lea eax,[rdi+STF_MATRIX_BASE]
+    mov eax,edi
+    add eax,STF_MATRIX_BASE
+    jc .smtfn_bad
+    cmp eax,STF_VECTOR_BASE; jae .smtfn_bad
     ret
 .smtfn_bad: xor eax,eax; ret
 
@@ -6044,9 +6076,11 @@ s_matrix_sqrt_struct:
 
 s_vector_tag_from_n:
     # One dimension-bearing vector family, parallel to Structured Matrix.
+    # Dimension comes from the matrix structural fact that births the vector.
     cmp edi,2; jb .svtn_bad
-    cmp edi,255; ja .svtn_bad
-    lea eax,[rdi+STF_VECTOR_BASE]
+    mov eax,edi
+    add eax,STF_VECTOR_BASE
+    jc .svtn_bad
     ret
 .svtn_bad: xor eax,eax; ret
 
@@ -6799,9 +6833,10 @@ s_item_prefix:
 # -----------------------------------------------------------------------------
 # Type parser/serializer
 # -----------------------------------------------------------------------------
-# rdi=name ptr,rsi=len -> eax=parameterized floating precision, or 0.
+# rdi=name ptr,rsi=len -> rax=parameterized floating precision, or 0.
 # The only non-native spelling is fp<decimal-bits>. Native fp32/fp64 aliases
-# are consumed earlier; every value >64 is one generic Rank-N precision fact.
+# are consumed earlier. Precision is a machine-size Physical Fact, never a bit
+# field inside a semantic type ID; unsigned overflow is the sole parser frontier.
 s_parse_param_fp_span:
     cmp rsi,3
     jb .sppfs_bad
@@ -6814,23 +6849,22 @@ s_parse_param_fp_span:
 .sppfs_loop:
     cmp rcx,rsi
     jae .sppfs_done
-    movzx edx,byte ptr [rdi+rcx]
-    cmp dl,'0'
+    movzx r8d,byte ptr [rdi+rcx]
+    cmp r8b,'0'
     jb .sppfs_bad
-    cmp dl,'9'
+    cmp r8b,'9'
     ja .sppfs_bad
-    # Keep the precision payload inside the generic encoded-type mask.
-    cmp eax,107374182
-    ja .sppfs_bad
-    imul eax,eax,10
-    sub edx,'0'
-    add eax,edx
-    cmp eax,0x3fffffff
-    ja .sppfs_bad
+    sub r8d,'0'
+    mov r9,10
+    mul r9
+    test rdx,rdx
+    jnz .sppfs_bad
+    add rax,r8
+    jc .sppfs_bad
     inc rcx
     jmp .sppfs_loop
 .sppfs_done:
-    cmp eax,64
+    cmp rax,64
     jbe .sppfs_bad
     ret
 .sppfs_bad:
@@ -6860,7 +6894,7 @@ s_parse_type_emit:
     mov rdi,r12; mov rsi,rbx; lea rdx,[rip+ty_double]; mov ecx,6; call s_span_eq; test eax,eax; jz 5f
 .spte_f64:
     lea r12,[rip+ty_f64]; mov ebx,3; mov r10d,5; jmp .spte_base
-5:  mov rdi,r12; mov rsi,rbx; call s_parse_param_fp_span; test eax,eax; jz 6f
+5:  mov rdi,r12; mov rsi,rbx; call s_parse_param_fp_span; test rax,rax; jz 6f
     mov r10d,7; jmp .spte_base
 6:  mov rdi,r12; mov rsi,rbx; lea rdx,[rip+ty_string]; mov ecx,6; call s_span_eq; test eax,eax; jz .spte_fail; mov r10d,6
 .spte_base:

@@ -8,8 +8,6 @@
 # scheduling policy.
 # -----------------------------------------------------------------------------
 
-.include "compiler/field_runtime_capacity.inc"
-.equ SFH_MAX_RANK,FIELD_RUNTIME_RANK_CAP
 .equ SFH_MODE_INPUT,0
 .equ SFH_MODE_OUTPUT,1
 .equ SFH_MODE_INOUT,2
@@ -51,35 +49,53 @@ surface_field_lower_to_json:
     # Scalar extent names and reduction declarations are compile-time Surface
     # metadata, not Field runtime records.  Size them from this source instance
     # instead of preserving the historical 32/8 parser ceilings.
+    # Fixed per-fact surface metadata. Rank-N axis storage is a separate
+    # RankFact-derived arena, so source cardinality never implies an axis cap.
     mov eax,dword ptr [rip+s_fact_cap]
-    mov rsi,rax; imul rsi,112
+    mov rsi,rax; imul rsi,72
     jo .sfh_lower_alloc_fail
     mov eax,SYS_mmap; xor edi,edi; mov edx,PROT_READ_WRITE
     mov r10d,MAP_PRIVATE_ANON; mov r8,-1; xor r9d,r9d; syscall
     test rax,rax; js .sfh_lower_alloc_fail
     mov [rip+sfh_meta_arena],rax
-    mov rcx,[rip+sfh_meta_arena]
-    mov [rip+sfh_scalar_ptr],rcx
+    mov rcx,rax
     mov eax,dword ptr [rip+s_fact_cap]
     mov rdx,rax; shl rdx,3
-    add rcx,rdx; mov [rip+sfh_scalar_len],rcx
-    add rcx,rdx; mov [rip+sfh_reduce_name_ptr],rcx
-    add rcx,rdx; mov [rip+sfh_reduce_name_len],rcx
-    add rcx,rdx; mov [rip+sfh_reduce_expr],rcx
-    add rcx,rdx; mov [rip+sfh_field_name_ptr_ptr],rcx
-    add rcx,rdx; mov [rip+sfh_field_name_len_ptr],rcx
+    mov [rip+sfh_scalar_ptr],rcx; add rcx,rdx
+    mov [rip+sfh_scalar_len],rcx; add rcx,rdx
+    mov [rip+sfh_reduce_name_ptr],rcx; add rcx,rdx
+    mov [rip+sfh_reduce_name_len],rcx; add rcx,rdx
+    mov [rip+sfh_reduce_expr],rcx; add rcx,rdx
+    mov [rip+sfh_field_name_ptr_ptr],rcx; add rcx,rdx
+    mov [rip+sfh_field_name_len_ptr],rcx; add rcx,rdx
     mov rdx,rax
-    add rcx,rdx; mov [rip+sfh_field_mode_ptr],rcx
-    add rcx,rdx; mov [rip+sfh_field_rank_ptr],rcx
-    add rcx,rdx
+    mov [rip+sfh_field_mode_ptr],rcx; add rcx,rdx
     mov rdx,rax; shl rdx,3
     mov [rip+sfh_field_expr_ptr],rcx; add rcx,rdx
-    mov rdx,rax; imul rdx,SFH_MAX_RANK
-    mov [rip+sfh_field_periodic_ptr],rcx; add rcx,rdx
     mov rdx,rax
-    mov [rip+sfh_access_field_ptr],rcx; add rcx,rdx
-    mov rdx,rax; imul rdx,SFH_MAX_RANK*4
-    mov [rip+sfh_access_delta_ptr],rcx
+    mov [rip+sfh_access_field_ptr],rcx
+
+    # Common-domain axis names/extents and one temporary delta/periodic vector.
+    mov rsi,rax; imul rsi,40
+    jo .sfh_lower_alloc_fail
+    add rsi,63; and rsi,-64
+    mov eax,SYS_mmap; xor edi,edi; mov edx,PROT_READ_WRITE
+    mov r10d,MAP_PRIVATE_ANON; mov r8,-1; xor r9d,r9d; syscall
+    test rax,rax; js .sfh_lower_alloc_fail
+    mov [rip+sfh_axis_arena],rax
+    mov rcx,rax
+    mov eax,dword ptr [rip+s_fact_cap]
+    mov rdx,rax; shl rdx,3
+    mov [rip+sfh_axis_ptr],rcx; add rcx,rdx
+    mov [rip+sfh_axis_len],rcx; add rcx,rdx
+    mov [rip+sfh_extent_ptr],rcx; add rcx,rdx
+    mov [rip+sfh_extent_len],rcx; add rcx,rdx
+    mov rdx,rax; shl rdx,2
+    mov [rip+sfh_delta_temp],rcx; add rcx,rdx
+    mov [rip+sfh_periodic_temp],rcx
+    mov qword ptr [rip+sfh_field_periodic_ptr],0
+    mov qword ptr [rip+sfh_access_delta_ptr],0
+    mov qword ptr [rip+sfh_access_delta_stride],0
 
     # Reset shared lexer/AST state without touching the ordinary tensor buffers.
     mov dword ptr [rip+s_error],0
@@ -321,16 +337,16 @@ sfh_parse_reduce_decl:
     cmp r14d,dword ptr [rip+sfh_domain_rank]; jae .sfh_prd_fail
     call s_parse_name; test edx,edx; jnz .sfh_prd_fail
     mov r12,rax; mov r13,rcx
-    lea rax,[rip+sfh_axis_ptr]; mov rdi,[rax+r14*8]
-    lea rax,[rip+sfh_axis_len]; mov rsi,[rax+r14*8]
+    mov rax,[rip+sfh_axis_ptr]; mov rdi,[rax+r14*8]
+    mov rax,[rip+sfh_axis_len]; mov rsi,[rax+r14*8]
     mov rdx,r12; mov rcx,r13; call s_span_eq; test eax,eax; jz .sfh_prd_domain
     lea rdi,[rip+sfh_kw_in]; mov esi,2; mov edx,1; call s_expect_token
     cmp dword ptr [rip+s_error],0; jne .sfh_prd_fail
     call s_parse_name; test edx,edx; jnz .sfh_prd_fail
     mov r12,rax; mov r13,rcx
 .sfh_prd_extent_ready:
-    lea rax,[rip+sfh_extent_ptr]; mov rdi,[rax+r14*8]
-    lea rax,[rip+sfh_extent_len]; mov rsi,[rax+r14*8]
+    mov rax,[rip+sfh_extent_ptr]; mov rdi,[rax+r14*8]
+    mov rax,[rip+sfh_extent_len]; mov rsi,[rax+r14*8]
     mov rdx,r12; mov rcx,r13; call s_span_eq; test eax,eax; jz .sfh_prd_domain
     inc r14d
     lea rdi,[rip+tok_comma]; mov esi,1; xor edx,edx; call s_match_token
@@ -410,7 +426,7 @@ sfh_parse_field_decl:
     cmp dword ptr [rip+s_error],0; jne .sfh_pfd_fail
     xor r14d,r14d
 .sfh_pfd_axis:
-    cmp r14d,SFH_MAX_RANK; jae .sfh_pfd_fail
+    cmp r14d,dword ptr [rip+s_fact_cap]; jae .sfh_pfd_fail
     call s_parse_name; test edx,edx; jnz .sfh_pfd_fail
     mov [rip+sfh_tmp_axis_ptr],rax
     mov [rip+sfh_tmp_axis_len],rcx
@@ -429,31 +445,41 @@ sfh_parse_field_decl:
     # First field establishes the common logical domain and axis scope.
     mov r8,[rip+sfh_tmp_axis_ptr]; mov r9,[rip+sfh_tmp_axis_len]
     mov r10,[rip+sfh_tmp_extent_ptr]; mov r11,[rip+sfh_tmp_extent_len]
-    lea rax,[rip+sfh_axis_ptr]; mov [rax+r14*8],r8
-    lea rax,[rip+sfh_axis_len]; mov [rax+r14*8],r9
-    lea rax,[rip+sfh_extent_ptr]; mov [rax+r14*8],r10
-    lea rax,[rip+sfh_extent_len]; mov [rax+r14*8],r11
+    mov rax,[rip+sfh_axis_ptr]; mov [rax+r14*8],r8
+    mov rax,[rip+sfh_axis_len]; mov [rax+r14*8],r9
+    mov rax,[rip+sfh_extent_ptr]; mov [rax+r14*8],r10
+    mov rax,[rip+sfh_extent_len]; mov [rax+r14*8],r11
     mov rdi,r8; mov rsi,r9; call s_axis_add
     jmp .sfh_pfd_store_boundary
 .sfh_pfd_compare_axis:
     cmp r14d,dword ptr [rip+sfh_domain_rank]; jb 1f
     mov dword ptr [rip+surface_field_error_code],SFH_ERR_DOMAIN; jmp .sfh_pfd_fail
 1:
-    lea rax,[rip+sfh_axis_ptr]; mov rdi,[rax+r14*8]
-    lea rax,[rip+sfh_axis_len]; mov rsi,[rax+r14*8]
+    mov rax,[rip+sfh_axis_ptr]; mov rdi,[rax+r14*8]
+    mov rax,[rip+sfh_axis_len]; mov rsi,[rax+r14*8]
     mov rdx,[rip+sfh_tmp_axis_ptr]; mov rcx,[rip+sfh_tmp_axis_len]
     call s_span_eq; test eax,eax; jnz 1f
     mov dword ptr [rip+surface_field_error_code],SFH_ERR_DOMAIN; jmp .sfh_pfd_fail
-1:  lea rax,[rip+sfh_extent_ptr]; mov rdi,[rax+r14*8]
-    lea rax,[rip+sfh_extent_len]; mov rsi,[rax+r14*8]
+1:  mov rax,[rip+sfh_extent_ptr]; mov rdi,[rax+r14*8]
+    mov rax,[rip+sfh_extent_len]; mov rsi,[rax+r14*8]
     mov rdx,[rip+sfh_tmp_extent_ptr]; mov rcx,[rip+sfh_tmp_extent_len]
     call s_span_eq; test eax,eax; jnz 1f
     mov dword ptr [rip+surface_field_error_code],SFH_ERR_DOMAIN; jmp .sfh_pfd_fail
 1:
 .sfh_pfd_store_boundary:
+    cmp dword ptr [rip+sfh_domain_rank],0
+    jne .sfh_pfd_store_periodic
+    mov rax,[rip+sfh_periodic_temp]
+    mov cl,byte ptr [rip+sfh_tmp_periodic]
+    mov [rax+r14],cl
+    jmp .sfh_pfd_boundary_done
+.sfh_pfd_store_periodic:
     mov rax,[rip+sfh_field_periodic_ptr]
-    mov edx,ebx; shl edx,3; add edx,r14d
+    mov edx,ebx
+    imul rdx,qword ptr [rip+sfh_periodic_stride]
+    add rdx,r14
     mov cl,byte ptr [rip+sfh_tmp_periodic]; mov [rax+rdx],cl
+.sfh_pfd_boundary_done:
     inc r14d
     lea rdi,[rip+tok_comma]; mov esi,1; xor edx,edx; call s_match_token
     test eax,eax; jnz .sfh_pfd_axis
@@ -462,10 +488,17 @@ sfh_parse_field_decl:
     test r14d,r14d; jz .sfh_pfd_fail
     cmp dword ptr [rip+sfh_domain_rank],0; jne .sfh_pfd_rank_known
     mov [rip+sfh_domain_rank],r14d
+    call sfh_prepare_rank_arena
+    test eax,eax; jnz .sfh_pfd_fail
+    # First field periodic facts were accumulated before RankFact existed.
+    mov rdi,[rip+sfh_field_periodic_ptr]
+    mov rsi,[rip+sfh_periodic_temp]
+    mov ecx,dword ptr [rip+sfh_domain_rank]
+    rep movsb
 .sfh_pfd_rank_known:
     cmp r14d,dword ptr [rip+sfh_domain_rank]; je 1f
     mov dword ptr [rip+surface_field_error_code],SFH_ERR_DOMAIN; jmp .sfh_pfd_fail
-1:  mov rax,[rip+sfh_field_rank_ptr]; mov [rax+rbx],r14b
+1:
 
     lea rdi,[rip+tok_colon]; mov esi,1; xor edx,edx; call s_expect_token
     call s_parse_name; test edx,edx; jnz .sfh_pfd_fail
@@ -517,16 +550,16 @@ sfh_parse_for:
     cmp r14d,dword ptr [rip+sfh_domain_rank]; jae .sfh_pf_fail
     call s_parse_name; test edx,edx; jnz .sfh_pf_fail
     mov r12,rax; mov r13,rcx
-    lea rax,[rip+sfh_axis_ptr]; mov rdi,[rax+r14*8]
-    lea rax,[rip+sfh_axis_len]; mov rsi,[rax+r14*8]
+    mov rax,[rip+sfh_axis_ptr]; mov rdi,[rax+r14*8]
+    mov rax,[rip+sfh_axis_len]; mov rsi,[rax+r14*8]
     mov rdx,r12; mov rcx,r13; call s_span_eq; test eax,eax; jz .sfh_pf_fail
     lea rdi,[rip+sfh_kw_in]; mov esi,2; mov edx,1; call s_expect_token
     cmp dword ptr [rip+s_error],0; jne .sfh_pf_fail
     call s_parse_name; test edx,edx; jnz .sfh_pf_fail
     mov r12,rax; mov r13,rcx
 .sfh_pf_extent_ready:
-    lea rax,[rip+sfh_extent_ptr]; mov rdi,[rax+r14*8]
-    lea rax,[rip+sfh_extent_len]; mov rsi,[rax+r14*8]
+    mov rax,[rip+sfh_extent_ptr]; mov rdi,[rax+r14*8]
+    mov rax,[rip+sfh_extent_len]; mov rsi,[rax+r14*8]
     mov rdx,r12; mov rcx,r13; call s_span_eq; test eax,eax; jz .sfh_pf_fail
     inc r14d
     lea rdi,[rip+tok_comma]; mov esi,1; xor edx,edx; call s_match_token
@@ -620,8 +653,8 @@ sfh_index_delta:
     cmp dword ptr [rbx+SN_OP],OP_MOD; jne .sfh_id_affine
     mov r14,[rbx+SN_B]
     cmp dword ptr [r14+SN_KIND],NK_VAR; jne .sfh_id_affine
-    lea rax,[rip+sfh_extent_ptr]; mov rdi,[rax+r12*8]
-    lea rax,[rip+sfh_extent_len]; mov rsi,[rax+r12*8]
+    mov rax,[rip+sfh_extent_ptr]; mov rdi,[rax+r12*8]
+    mov rax,[rip+sfh_extent_len]; mov rsi,[rax+r12*8]
     mov rdx,[r14+SN_PTR]; mov rcx,[r14+SN_LEN]; call s_span_eq
     test eax,eax; jz .sfh_id_affine
     mov rbx,[rbx+SN_A]; mov r13d,1
@@ -695,10 +728,48 @@ sfh_node_matches_axis:
     # rdi=node, esi=axis -> eax bool
     cmp dword ptr [rdi+SN_KIND],NK_AXIS; jne .sfh_nma_no
     mov r8,rdi
-    lea rax,[rip+sfh_axis_ptr]; mov rdi,[rax+rsi*8]
-    lea rax,[rip+sfh_axis_len]; mov rsi,[rax+rsi*8]
+    mov rax,[rip+sfh_axis_ptr]; mov rdi,[rax+rsi*8]
+    mov rax,[rip+sfh_axis_len]; mov rsi,[rax+rsi*8]
     mov rdx,[r8+SN_PTR]; mov rcx,[r8+SN_LEN]; jmp s_span_eq
 .sfh_nma_no: xor eax,eax; ret
+
+# Allocate exactly the axis facts demanded by the first field's RankFact.
+# One arena owns periodic[field,axis] and delta[access,axis]; no fixed rank width.
+sfh_prepare_rank_arena:
+    push rbx
+    mov ebx,dword ptr [rip+sfh_domain_rank]
+    test ebx,ebx; jz .sfh_pra_fail
+    mov eax,dword ptr [rip+s_fact_cap]
+    mov rcx,rbx
+    imul rcx,rax                       # field/access capacity * rank
+    jo .sfh_pra_fail
+    mov [rip+sfh_periodic_bytes],rcx
+    mov [rip+sfh_periodic_stride],rbx
+    mov rdx,rbx; shl rdx,2
+    jc .sfh_pra_fail
+    mov [rip+sfh_access_delta_stride],rdx
+    mov rax,rcx
+    mov rsi,rcx; shl rsi,2
+    jc .sfh_pra_fail
+    add rax,rsi
+    jc .sfh_pra_fail
+    add rax,63; and rax,-64
+    mov [rip+sfh_rank_arena_bytes],rax
+    mov rsi,rax
+    mov eax,SYS_mmap; xor edi,edi; mov edx,PROT_READ_WRITE
+    mov r10d,MAP_PRIVATE_ANON; mov r8,-1; xor r9d,r9d; syscall
+    test rax,rax; js .sfh_pra_fail
+    mov [rip+sfh_rank_arena],rax
+    mov [rip+sfh_field_periodic_ptr],rax
+    add rax,[rip+sfh_periodic_bytes]
+    mov [rip+sfh_access_delta_ptr],rax
+    xor eax,eax
+    pop rbx
+    ret
+.sfh_pra_fail:
+    mov eax,1
+    pop rbx
+    ret
 
 # -----------------------------------------------------------------------------
 # Access discovery and AST -> canonical op lowering
@@ -862,9 +933,9 @@ sfh_access_for_load:
     mov rdi,[rbx+SN_PTR]; mov rsi,[rbx+SN_LEN]; call sfh_find_field
     cmp eax,-1; je .sfh_afl_fail
     mov r12d,eax
-    mov rax,[rip+sfh_field_rank_ptr]; movzx r13d,byte ptr [rax+r12]
+    mov r13d,dword ptr [rip+sfh_domain_rank]
     mov r14,[rbx+SN_A]; xor r15d,r15d
-    lea rdi,[rip+sfh_delta_temp]; xor eax,eax; mov ecx,SFH_MAX_RANK; rep stosd
+    mov rdi,[rip+sfh_delta_temp]; xor eax,eax; mov ecx,r13d; rep stosd
 .sfh_afl_idx:
     cmp r15d,r13d; jae .sfh_afl_idx_done
     test r14,r14; jz .sfh_afl_fail
@@ -875,12 +946,14 @@ sfh_access_for_load:
     test r10d,r10d; jz .sfh_afl_boundary_ok
     test r11d,r11d; jnz .sfh_afl_boundary_ok
     mov rax,[rip+sfh_field_periodic_ptr]
-    mov edx,r12d; shl edx,3; add edx,r15d
+    mov edx,r12d
+    imul rdx,qword ptr [rip+sfh_periodic_stride]
+    add rdx,r15
     cmp byte ptr [rax+rdx],0; jne .sfh_afl_boundary_ok
     mov dword ptr [rip+surface_field_error_code],SFH_ERR_BOUNDARY
     jmp .sfh_afl_fail
 .sfh_afl_boundary_ok:
-    lea rax,[rip+sfh_delta_temp]; mov [rax+r15*4],r10d
+    mov rax,[rip+sfh_delta_temp]; mov [rax+r15*4],r10d
     mov r14,[r14+SN_NEXT]; inc r15d; jmp .sfh_afl_idx
 .sfh_afl_idx_done:
     test r14,r14; jnz .sfh_afl_fail
@@ -894,9 +967,9 @@ sfh_access_for_load:
 .sfh_afl_cmp_axis:
     cmp ecx,r13d; jae .sfh_afl_found
     mov rax,[rip+sfh_access_delta_ptr]
-    mov edx,r15d; shl edx,5; lea rdx,[rdx+rcx*4]
+    mov edx,r15d; imul rdx,qword ptr [rip+sfh_access_delta_stride]; lea rdx,[rdx+rcx*4]
     mov eax,[rax+rdx]
-    lea rdx,[rip+sfh_delta_temp]; cmp eax,[rdx+rcx*4]; jne .sfh_afl_find_next
+    mov rdx,[rip+sfh_delta_temp]; cmp eax,[rdx+rcx*4]; jne .sfh_afl_find_next
     inc ecx; jmp .sfh_afl_cmp_axis
 .sfh_afl_find_next: inc r15d; jmp .sfh_afl_find
 .sfh_afl_found: mov eax,r15d; xor edx,edx; jmp .sfh_afl_done
@@ -907,9 +980,9 @@ sfh_access_for_load:
     xor ecx,ecx
 .sfh_afl_copy:
     cmp ecx,r13d; jae .sfh_afl_added
-    lea rax,[rip+sfh_delta_temp]; mov r10d,[rax+rcx*4]
+    mov rax,[rip+sfh_delta_temp]; mov r10d,[rax+rcx*4]
     mov rax,[rip+sfh_access_delta_ptr]
-    mov edx,r15d; shl edx,5; lea rdx,[rdx+rcx*4]
+    mov edx,r15d; imul rdx,qword ptr [rip+sfh_access_delta_stride]; lea rdx,[rdx+rcx*4]
     mov [rax+rdx],r10d
     inc ecx; jmp .sfh_afl_copy
 .sfh_afl_added:
@@ -1061,7 +1134,7 @@ sfh_emit_final_json:
     lea rdi,[rip+sfh_j_field_type]; call s_out_cstr
     lea rdi,[rip+sfh_s_f32]; mov esi,3; call s_out_quote_span
     lea rdi,[rip+sfh_j_field_rank]; call s_out_cstr
-    mov rax,[rip+sfh_field_rank_ptr]; movzx edi,byte ptr [rax+rbx]; call s_emit_u64_decimal
+    mov edi,dword ptr [rip+sfh_domain_rank]; call s_emit_u64_decimal
     mov dil,'}'; call s_out_byte
     inc ebx; jmp .sfh_efj_fields
 .sfh_efj_fields_done:
@@ -1082,7 +1155,7 @@ sfh_emit_final_json:
     mov dil,','; call s_out_byte
 .sfh_efj_delta_nocomma:
     mov rax,[rip+sfh_access_delta_ptr]
-    mov edx,ebx; shl edx,5; lea rdx,[rdx+r12*4]
+    mov edx,ebx; imul rdx,qword ptr [rip+sfh_access_delta_stride]; lea rdx,[rdx+r12*4]
     mov edi,[rax+rdx]; call sfh_emit_i32
     inc r12d; jmp .sfh_efj_delta_axis
 .sfh_efj_delta_done:
@@ -1199,17 +1272,22 @@ sfh_meta_arena:.skip 8
 sfh_field_name_ptr_ptr:.skip 8
 sfh_field_name_len_ptr:.skip 8
 sfh_field_mode_ptr:.skip 8
-sfh_field_rank_ptr:.skip 8
 sfh_field_expr_ptr:.skip 8
 sfh_field_periodic_ptr:.skip 8
 sfh_access_field_ptr:.skip 8
 sfh_access_delta_ptr:.skip 8
-sfh_axis_ptr:.skip SFH_MAX_RANK*8
-sfh_axis_len:.skip SFH_MAX_RANK*8
-sfh_extent_ptr:.skip SFH_MAX_RANK*8
-sfh_extent_len:.skip SFH_MAX_RANK*8
-.p2align 4
-sfh_delta_temp:.skip SFH_MAX_RANK*4
+sfh_axis_arena:.skip 8
+sfh_axis_ptr:.skip 8
+sfh_axis_len:.skip 8
+sfh_extent_ptr:.skip 8
+sfh_extent_len:.skip 8
+sfh_delta_temp:.skip 8
+sfh_periodic_temp:.skip 8
+sfh_rank_arena:.skip 8
+sfh_rank_arena_bytes:.skip 8
+sfh_periodic_bytes:.skip 8
+sfh_periodic_stride:.skip 8
+sfh_access_delta_stride:.skip 8
 .p2align 6
 sfh_ops_buf:.skip 8
 sfh_ops_cap:.skip 8

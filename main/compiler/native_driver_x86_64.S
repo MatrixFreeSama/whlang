@@ -6,6 +6,7 @@
 .equ SYS_close,3
 .equ SYS_lseek,8
 .equ SYS_mmap,9
+.equ SYS_munmap,11
 .equ SYS_execve,59
 .equ SYS_exit,60
 .equ SYS_readlink,89
@@ -14,7 +15,9 @@
 .equ SEEK_END,2
 .equ SEEK_SET,0
 .equ PROT_READ,1
+.equ PROT_READ_WRITE,3
 .equ MAP_PRIVATE,2
+.equ MAP_PRIVATE_ANON,0x22
 
 .section .bss
 .align 16
@@ -22,9 +25,9 @@
 .global source_length
 source_ptr: .quad 0
 source_length: .quad 0
-exe_path: .skip 4096
-selected_path: .skip 4096
-argv_copy: .skip 2056
+exec_path_ptr: .quad 0
+exec_path_bytes: .quad 0
+selected_path_ptr: .quad 0
 dir_len: .quad 0
 source_len: .quad 0
 
@@ -37,15 +40,40 @@ _start:
     lea r13,[r15+8]
     lea r12,[r13+r14*8+8]
 
+    # /proc/self/exe is a host path fact.  The page-sized first probe is only an
+    # allocation seed; exact storage grows until readlink proves the path fits.
+    mov rbx,4096
+.nd_path_probe:
+    mov eax,SYS_mmap
+    xor edi,edi
+    mov rsi,rbx
+    mov edx,PROT_READ_WRITE
+    mov r10d,MAP_PRIVATE_ANON
+    mov r8,-1
+    xor r9d,r9d
+    syscall
+    test rax,rax
+    js .fail
+    mov [rip+exec_path_ptr],rax
+    mov [rip+exec_path_bytes],rbx
+    mov rsi,rax
     mov eax,SYS_readlink
     lea rdi,[rip+proc_self_exe]
-    lea rsi,[rip+exe_path]
-    mov edx,4095
+    mov rdx,rbx
     syscall
     test rax,rax
     jle .fail
-    lea rbx,[rip+exe_path]
-    mov byte ptr [rbx+rax],0
+    cmp rax,rbx
+    jb .nd_path_ready
+    mov rdi,[rip+exec_path_ptr]
+    mov rsi,rbx
+    mov eax,SYS_munmap
+    syscall
+    shl rbx,1
+    jc .fail
+    jmp .nd_path_probe
+.nd_path_ready:
+    mov rbx,[rip+exec_path_ptr]
     mov rcx,rax
 .find_slash:
     test rcx,rcx
@@ -189,8 +217,32 @@ _start:
     lea rsi,[rip+name_base]
     mov edx,name_base_end-name_base
 .select:
-    lea rdi,[rip+selected_path]
-    lea rbx,[rip+exe_path]
+    # Materialize exactly the selected sibling path.  No PATH_MAX clone and no
+    # argv mirror exist: argv already lives in writable process-start storage,
+    # so only argv[0] changes before execve.
+    push rsi
+    push rdx
+    mov r11,[rip+dir_len]
+    mov eax,edx
+    add r11,rax
+    jc .fail
+    inc r11
+    jz .fail
+    mov eax,SYS_mmap
+    xor edi,edi
+    mov rsi,r11
+    mov edx,PROT_READ_WRITE
+    mov r10d,MAP_PRIVATE_ANON
+    mov r8,-1
+    xor r9d,r9d
+    syscall
+    test rax,rax
+    js .fail
+    pop rdx
+    pop rsi
+    mov [rip+selected_path_ptr],rax
+    mov rdi,rax
+    mov rbx,[rip+exec_path_ptr]
     xor r8d,r8d
     mov rcx,[rip+dir_len]
 .copy_dir:
@@ -213,22 +265,11 @@ _start:
 .name_done:
     mov byte ptr [rdi+r8],0
 
-    lea rbx,[rip+argv_copy]
-    lea rax,[rip+selected_path]
-    mov [rbx],rax
-    mov rcx,1
-.argv_loop:
-    cmp rcx,r14
-    jae .argv_done
-    mov rax,[r13+rcx*8]
-    mov [rbx+rcx*8],rax
-    inc rcx
-    jmp .argv_loop
-.argv_done:
-    mov qword ptr [rbx+rcx*8],0
+    mov rax,[rip+selected_path_ptr]
+    mov [r13],rax
     mov eax,SYS_execve
-    lea rdi,[rip+selected_path]
-    lea rsi,[rip+argv_copy]
+    mov rdi,[rip+selected_path_ptr]
+    mov rsi,r13
     mov rdx,r12
     syscall
     jmp .fail

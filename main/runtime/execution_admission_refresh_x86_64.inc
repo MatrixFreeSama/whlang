@@ -1,10 +1,10 @@
-# Wheelchair 1.3.102 invocation-bound execution admission.
+# Wheelchair invocation-bound execution admission.
 #
-# External affinity is a launch fact, not a compiler-host lifetime fact.  Read it
-# once after any proved static placement has been inherited, count the admitted
-# CPU set, then forget the mask.  This is not an idle-resource query: no load,
-# availability, recipient, worker or CPU choice is observed.
-.equ RUNTIME_AFFINITY_MASK_BYTES,128
+# External affinity is a launch fact, not a compiler-host lifetime fact. The
+# kernel-owned cpuset width is discovered by retrying sched_getaffinity on
+# EINVAL; 128 bytes is only the first stack probe, never a machine ceiling.
+.equ RUNTIME_AFFINITY_SEED_BYTES,128
+.equ ERRNO_EINVAL,22
 
 # Optional AOT locality may narrow the invocation domain, never widen it.
 # Intersect the current external affinity with the proved static-placement mask.
@@ -12,91 +12,109 @@
 .macro CONSTRAIN_STATIC_PLACEMENT_WITHIN_INVOCATION required, mask_bytes, mask
     cmp dword ptr [rip+\required],0
     je .csp_done\@
-    mov r10d,dword ptr [rip+\mask_bytes]
-    test r10d,r10d
+    mov r8d,dword ptr [rip+\mask_bytes]     # materialized placement-mask bytes
+    test r8d,r8d
     jz .csp_done\@
-    cmp r10d,RUNTIME_AFFINITY_MASK_BYTES
-    jbe .csp_size_ok\@
-    mov r10d,RUNTIME_AFFINITY_MASK_BYTES
-.csp_size_ok\@:
-    sub rsp,RUNTIME_AFFINITY_MASK_BYTES
-    mov eax,204                         # sched_getaffinity
+    mov r10,r8
+    mov eax,RUNTIME_AFFINITY_SEED_BYTES
+    cmp r10,rax
+    cmovb r10,rax
+.csp_probe\@:
+    sub rsp,r10
+    mov eax,204                             # sched_getaffinity
     xor edi,edi
-    mov esi,RUNTIME_AFFINITY_MASK_BYTES
+    mov rsi,r10
     mov rdx,rsp
     syscall
     test rax,rax
-    js .csp_release\@
-    mov r8,rax
-    cmp r8,r10
-    jbe .csp_have_span\@
-    mov r8,r10
-.csp_have_span\@:
-    lea rdx,[rip+\mask]
-    xor r9d,r9d
-    xor r11d,r11d                       # nonzero intersection witness
-.csp_and\@:
+    jns .csp_have_affinity\@
+    cmp eax,-ERRNO_EINVAL
+    jne .csp_release\@
+    add rsp,r10
+    shl r10,1
+    jc .csp_done\@
+    jmp .csp_probe\@
+.csp_have_affinity\@:
+    mov r9,rax
     cmp r9,r8
+    cmova r9,r8
+    lea rdx,[rip+\mask]
+    xor ecx,ecx
+    xor r11d,r11d                           # nonzero intersection witness
+.csp_and\@:
+    cmp rcx,r9
     jae .csp_and_done\@
-    mov al,byte ptr [rsp+r9]
-    and al,byte ptr [rdx+r9]
-    mov byte ptr [rsp+r9],al
+    mov al,byte ptr [rsp+rcx]
+    and al,byte ptr [rdx+rcx]
+    mov byte ptr [rsp+rcx],al
     or r11b,al
-    inc r9
+    inc rcx
     jmp .csp_and\@
 .csp_and_done\@:
-    # The syscall accepts the full local buffer; erase every byte outside the
-    # proved intersection span so no stale stack bit can escape the invocation.
+    # sched_setaffinity receives the discovered kernel width. Erase every byte
+    # outside the proved placement span so no stale bit can escape invocation.
 .csp_zero_tail\@:
-    cmp r9,RUNTIME_AFFINITY_MASK_BYTES
+    cmp rcx,r10
     jae .csp_maybe_set\@
-    mov byte ptr [rsp+r9],0
-    inc r9
+    mov byte ptr [rsp+rcx],0
+    inc rcx
     jmp .csp_zero_tail\@
 .csp_maybe_set\@:
     test r11d,r11d
     jz .csp_release\@
-    mov eax,203                         # sched_setaffinity
+    mov eax,203                             # sched_setaffinity
     xor edi,edi
-    mov esi,RUNTIME_AFFINITY_MASK_BYTES
+    mov rsi,r10
     mov rdx,rsp
     syscall
 .csp_release\@:
-    add rsp,RUNTIME_AFFINITY_MASK_BYTES
+    add rsp,r10
 .csp_done\@:
 .endm
 
 .macro REFRESH_EXECUTION_ADMISSION target
-    sub rsp,RUNTIME_AFFINITY_MASK_BYTES
-    mov eax,204                         # sched_getaffinity
-    xor edi,edi                         # current process
-    mov esi,RUNTIME_AFFINITY_MASK_BYTES
+    mov r10d,RUNTIME_AFFINITY_SEED_BYTES
+.rea_probe\@:
+    sub rsp,r10
+    mov eax,204                             # sched_getaffinity
+    xor edi,edi                             # current process
+    mov rsi,r10
     mov rdx,rsp
     syscall
     test rax,rax
-    js .rea_fallback\@
+    jns .rea_have_affinity\@
+    cmp eax,-ERRNO_EINVAL
+    jne .rea_fallback_release\@
+    add rsp,r10
+    shl r10,1
+    jc .rea_fallback_noalloc\@
+    jmp .rea_probe\@
+.rea_have_affinity\@:
     mov r8,rax
-    xor r9d,r9d                         # byte index
-    xor ecx,ecx                         # admitted CPU count
+    xor r9d,r9d                             # byte index
+    xor ecx,ecx                             # admitted CPU count
 .rea_byte\@:
     cmp r9,r8
     jae .rea_count_done\@
-    movzx r10d,byte ptr [rsp+r9]
-    mov r11d,8
+    movzx eax,byte ptr [rsp+r9]
+    mov edx,8
 .rea_bit\@:
-    shr r10b,1
+    shr al,1
     adc ecx,0
-    dec r11d
+    dec edx
     jnz .rea_bit\@
     inc r9
     jmp .rea_byte\@
 .rea_count_done\@:
     test ecx,ecx
-    jnz .rea_store\@
-.rea_fallback\@:
-    # Failure may not resurrect compile-host width as runtime authority.
+    jnz .rea_store_release\@
+.rea_fallback_release\@:
     mov ecx,1
-.rea_store\@:
+.rea_store_release\@:
     mov dword ptr [rip+\target],ecx
-    add rsp,RUNTIME_AFFINITY_MASK_BYTES
+    add rsp,r10
+    jmp .rea_done\@
+.rea_fallback_noalloc\@:
+    mov dword ptr [rip+\target],1
+.rea_done\@:
 .endm

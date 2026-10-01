@@ -189,7 +189,7 @@ tensor_prepare_optimizer_arena:
     ja .tpoa_fail
     mov dword ptr [rip+tensor_optimizer_capacity],r12d
     mov rsi,r12
-    imul rsi,rsi,80                  # ten naturally aligned 8-byte lanes/fact
+    imul rsi,rsi,136                 # seventeen instance-derived 8-byte lanes/fact
     jo .tpoa_fail
     add rsi,4095
     jc .tpoa_fail
@@ -227,6 +227,20 @@ tensor_prepare_optimizer_arena:
     mov qword ptr [rip+vec_linear_coeff_ptr],rax
     add rax,rdx
     mov qword ptr [rip+vec_linear_mode_ptr],rax
+    add rax,rdx
+    mov qword ptr [rip+vec_cache_binding_ptr],rax
+    add rax,rdx
+    mov qword ptr [rip+vec_cache_gen_ptr],rax
+    add rax,rdx
+    mov qword ptr [rip+vec_cache_reg_ptr],rax
+    add rax,rdx
+    mov qword ptr [rip+vec_cache_kind_ptr],rax
+    add rax,rdx
+    mov qword ptr [rip+vec_cache_key_a_ptr],rax
+    add rax,rdx
+    mov qword ptr [rip+vec_cache_key_b_ptr],rax
+    add rax,rdx
+    mov qword ptr [rip+vec_cache_key_c_ptr],rax
     xor eax,eax
     pop r12
     pop rbx
@@ -5433,13 +5447,13 @@ vec_cache_lookup:
     jz .vcl_no
     dec ecx
     mov edx,dword ptr [rip+vec_current_gen]
-    lea r8,[rip+vec_cache_binding]
-    lea r9,[rip+vec_cache_gen]
-    lea r10,[rip+vec_cache_reg]
+    mov r8,qword ptr [rip+vec_cache_binding_ptr]
+    mov r9,qword ptr [rip+vec_cache_gen_ptr]
+    mov r10,qword ptr [rip+vec_cache_reg_ptr]
 .vcl_loop:
     cmp dword ptr [r9+rcx*4],edx
     jne .vcl_next
-    lea r11,[rip+vec_cache_kind]
+    mov r11,qword ptr [rip+vec_cache_kind_ptr]
     cmp dword ptr [r11+rcx*4],0
     jne .vcl_next
     cmp qword ptr [r8+rcx*8],rdi
@@ -5457,16 +5471,16 @@ vec_cache_lookup:
 
 vec_cache_add:
     mov eax,dword ptr [rip+vec_cache_count]
-    cmp eax,64
+    cmp eax,dword ptr [rip+tensor_optimizer_capacity]
     jae .vca_fail
-    lea rcx,[rip+vec_cache_binding]
+    mov rcx,qword ptr [rip+vec_cache_binding_ptr]
     mov qword ptr [rcx+rax*8],rdi
-    lea rcx,[rip+vec_cache_kind]
+    mov rcx,qword ptr [rip+vec_cache_kind_ptr]
     mov dword ptr [rcx+rax*4],0
-    lea rcx,[rip+vec_cache_gen]
+    mov rcx,qword ptr [rip+vec_cache_gen_ptr]
     mov edx,dword ptr [rip+vec_current_gen]
     mov dword ptr [rcx+rax*4],edx
-    lea rcx,[rip+vec_cache_reg]
+    mov rcx,qword ptr [rip+vec_cache_reg_ptr]
     mov dword ptr [rcx+rax*4],esi
     inc eax
     mov dword ptr [rip+vec_cache_count],eax
@@ -5486,23 +5500,23 @@ vec_index_cache_lookup:
     jz .vicl_no
     dec ecx
     mov r11d,dword ptr [rip+vec_current_gen]
-    lea r8,[rip+vec_cache_gen]
-    lea r9,[rip+vec_cache_kind]
+    mov r8,qword ptr [rip+vec_cache_gen_ptr]
+    mov r9,qword ptr [rip+vec_cache_kind_ptr]
 .vicl_loop:
     cmp dword ptr [r8+rcx*4],r11d
     jne .vicl_next
     cmp dword ptr [r9+rcx*4],1
     jne .vicl_next
-    lea r10,[rip+vec_cache_key_a]
+    mov r10,qword ptr [rip+vec_cache_key_a_ptr]
     cmp qword ptr [r10+rcx*8],rdi
     jne .vicl_next
-    lea r10,[rip+vec_cache_key_b]
+    mov r10,qword ptr [rip+vec_cache_key_b_ptr]
     cmp qword ptr [r10+rcx*8],rsi
     jne .vicl_next
-    lea r10,[rip+vec_cache_key_c]
+    mov r10,qword ptr [rip+vec_cache_key_c_ptr]
     cmp qword ptr [r10+rcx*8],rdx
     jne .vicl_next
-    lea r10,[rip+vec_cache_reg]
+    mov r10,qword ptr [rip+vec_cache_reg_ptr]
     mov eax,dword ptr [r10+rcx*4]
     ret
 .vicl_next:
@@ -5517,22 +5531,22 @@ vec_index_cache_lookup:
 # add(rdi=c,rsi=d,rdx=modtoken,ecx=reg) -> eax=0/1
 vec_index_cache_add:
     mov eax,dword ptr [rip+vec_cache_count]
-    cmp eax,64
+    cmp eax,dword ptr [rip+tensor_optimizer_capacity]
     jae .vica_fail
-    lea r8,[rip+vec_cache_binding]
+    mov r8,qword ptr [rip+vec_cache_binding_ptr]
     mov qword ptr [r8+rax*8],0
-    lea r8,[rip+vec_cache_kind]
+    mov r8,qword ptr [rip+vec_cache_kind_ptr]
     mov dword ptr [r8+rax*4],1
-    lea r8,[rip+vec_cache_gen]
+    mov r8,qword ptr [rip+vec_cache_gen_ptr]
     mov r9d,dword ptr [rip+vec_current_gen]
     mov dword ptr [r8+rax*4],r9d
-    lea r8,[rip+vec_cache_key_a]
+    mov r8,qword ptr [rip+vec_cache_key_a_ptr]
     mov qword ptr [r8+rax*8],rdi
-    lea r8,[rip+vec_cache_key_b]
+    mov r8,qword ptr [rip+vec_cache_key_b_ptr]
     mov qword ptr [r8+rax*8],rsi
-    lea r8,[rip+vec_cache_key_c]
+    mov r8,qword ptr [rip+vec_cache_key_c_ptr]
     mov qword ptr [r8+rax*8],rdx
-    lea r8,[rip+vec_cache_reg]
+    mov r8,qword ptr [rip+vec_cache_reg_ptr]
     mov dword ptr [r8+rax*4],ecx
     inc eax
     mov dword ptr [rip+vec_cache_count],eax
@@ -5554,19 +5568,19 @@ vec_index_value_cache_lookup:
     dec ecx
     mov r11d,dword ptr [rip+vec_current_gen]
 .vivcl_loop:
-    lea r8,[rip+vec_cache_gen]
+    mov r8,qword ptr [rip+vec_cache_gen_ptr]
     cmp dword ptr [r8+rcx*4],r11d; jne .vivcl_next
-    lea r8,[rip+vec_cache_kind]
+    mov r8,qword ptr [rip+vec_cache_kind_ptr]
     cmp dword ptr [r8+rcx*4],2; jne .vivcl_next
-    lea r8,[rip+vec_cache_binding]
+    mov r8,qword ptr [rip+vec_cache_binding_ptr]
     cmp qword ptr [r8+rcx*8],rdi; jne .vivcl_next
-    lea r8,[rip+vec_cache_key_a]
+    mov r8,qword ptr [rip+vec_cache_key_a_ptr]
     cmp qword ptr [r8+rcx*8],rsi; jne .vivcl_next
-    lea r8,[rip+vec_cache_key_b]
+    mov r8,qword ptr [rip+vec_cache_key_b_ptr]
     cmp qword ptr [r8+rcx*8],rdx; jne .vivcl_next
-    lea r8,[rip+vec_cache_key_c]
+    mov r8,qword ptr [rip+vec_cache_key_c_ptr]
     cmp qword ptr [r8+rcx*8],r10; jne .vivcl_next
-    lea r8,[rip+vec_cache_reg]
+    mov r8,qword ptr [rip+vec_cache_reg_ptr]
     mov eax,dword ptr [r8+rcx*4]
     ret
 .vivcl_next:
@@ -5581,14 +5595,14 @@ vec_index_value_cache_add:
     mov r10,rcx
     mov r11d,r8d
     mov eax,dword ptr [rip+vec_cache_count]
-    cmp eax,64; jae .vivca_fail
-    lea r8,[rip+vec_cache_binding]; mov qword ptr [r8+rax*8],rdi
-    lea r8,[rip+vec_cache_kind]; mov dword ptr [r8+rax*4],2
-    lea r8,[rip+vec_cache_gen]; mov ecx,dword ptr [rip+vec_current_gen]; mov dword ptr [r8+rax*4],ecx
-    lea r8,[rip+vec_cache_key_a]; mov qword ptr [r8+rax*8],rsi
-    lea r8,[rip+vec_cache_key_b]; mov qword ptr [r8+rax*8],rdx
-    lea r8,[rip+vec_cache_key_c]; mov qword ptr [r8+rax*8],r10
-    lea r8,[rip+vec_cache_reg]; mov dword ptr [r8+rax*4],r11d
+    cmp eax,dword ptr [rip+tensor_optimizer_capacity]; jae .vivca_fail
+    mov r8,qword ptr [rip+vec_cache_binding_ptr]; mov qword ptr [r8+rax*8],rdi
+    mov r8,qword ptr [rip+vec_cache_kind_ptr]; mov dword ptr [r8+rax*4],2
+    mov r8,qword ptr [rip+vec_cache_gen_ptr]; mov ecx,dword ptr [rip+vec_current_gen]; mov dword ptr [r8+rax*4],ecx
+    mov r8,qword ptr [rip+vec_cache_key_a_ptr]; mov qword ptr [r8+rax*8],rsi
+    mov r8,qword ptr [rip+vec_cache_key_b_ptr]; mov qword ptr [r8+rax*8],rdx
+    mov r8,qword ptr [rip+vec_cache_key_c_ptr]; mov qword ptr [r8+rax*8],r10
+    mov r8,qword ptr [rip+vec_cache_reg_ptr]; mov dword ptr [r8+rax*4],r11d
     inc eax; mov dword ptr [rip+vec_cache_count],eax
     xor eax,eax; ret
 .vivca_fail:
@@ -7795,11 +7809,11 @@ vec_cache_free_current:
     test eax,eax
     jz .vcf_done
     dec eax
-    lea rcx,[rip+vec_cache_gen]
+    mov rcx,qword ptr [rip+vec_cache_gen_ptr]
     cmp dword ptr [rcx+rax*4],ebx
     jne .vcf_done
     mov r12d,eax
-    lea rcx,[rip+vec_cache_reg]
+    mov rcx,qword ptr [rip+vec_cache_reg_ptr]
     mov edi,dword ptr [rcx+r12*4]
     call vec_cache_reg_free
     mov dword ptr [rip+vec_cache_count],r12d
@@ -11339,13 +11353,13 @@ vec_gen_counter:.skip 4
 vec_interior_mode:.skip 4
 vec_axis_reg:.skip 4
 .p2align 3
-vec_cache_binding:.skip 64*8
-vec_cache_gen:.skip 64*4
-vec_cache_reg:.skip 64*4
-vec_cache_kind:.skip 64*4
-vec_cache_key_a:.skip 64*8
-vec_cache_key_b:.skip 64*8
-vec_cache_key_c:.skip 64*8
+vec_cache_binding_ptr:.skip 8
+vec_cache_gen_ptr:.skip 8
+vec_cache_reg_ptr:.skip 8
+vec_cache_kind_ptr:.skip 8
+vec_cache_key_a_ptr:.skip 8
+vec_cache_key_b_ptr:.skip 8
+vec_cache_key_c_ptr:.skip 8
 .p2align 3
 vec_txn_emit_ptr:.skip 8
 vec_txn_init_ptr:.skip 8
