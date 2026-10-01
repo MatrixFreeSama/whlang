@@ -19,3 +19,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash .github/release-timeline-1.3.111.sh
+
+# retry after digest-only validation repair
