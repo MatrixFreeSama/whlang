@@ -1,0 +1,111 @@
+name: release-1.3.112
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/release-1.3.112.yml
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Publish 1.3.112
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          archive="dist/Wheelchair-1.3.112.zip"
+          checksum="c979e7486d931d9608b6aa99adad2f508fca77457477663ac000a4fe14c667ef"
+          echo "$checksum  $archive" | sha256sum -c -
+
+          work="$RUNNER_TEMP/wheelchair-1.3.112"
+          rm -rf "$work"
+          mkdir -p "$work"
+          unzip -q "$archive" -d "$work"
+          src="$work/Wheelchair-1.3.112"
+
+          test -f "$src/README.md"
+          test -f "$src/build.sh"
+          test -d "$src/bin"
+          test -d "$src/compiler"
+          test -d "$src/runtime"
+          test -d "$src/surface"
+          test -d "$src/tools"
+
+          rm -rf main/bin main/compiler main/runtime main/surface main/tools
+          cp -a "$src/bin" main/bin
+          cp -a "$src/compiler" main/compiler
+          cp -a "$src/runtime" main/runtime
+          cp -a "$src/surface" main/surface
+          cp -a "$src/tools" main/tools
+          cp -a "$src/build.sh" main/build.sh
+          cp -a "$src/README.md" main/README.md
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('README.md')
+          s = p.read_text(encoding='utf-8')
+
+          s = s.replace('> Current release: **1.3.111**', '> Current release: **1.3.112**', 1)
+          s = s.replace('[Download Wheelchair 1.3.111](./dist/Wheelchair-1.3.111.zip)', '[Download Wheelchair 1.3.112](./dist/Wheelchair-1.3.112.zip)', 1)
+          s = s.replace('e05a66e4f586c4fcb3a6b1e10b379f1ecfddbcff0392ab34773d91800000957d', 'c979e7486d931d9608b6aa99adad2f508fca77457477663ac000a4fe14c667ef', 1)
+
+          start = s.index('## Current release: 1.3.111')
+          end = s.index('## Features', start)
+          current = '''## Current release: 1.3.112
+
+Wheelchair 1.3.112 extends the existing whole-program `tolerance N` contract into `P > 64` Rank-N mathematics as one conservative `ToleranceFact`. Basic `add/sub/mul/div` remain the same strict P-bit operations and still close through the single Strict/RNE authority. Tolerance changes only the stopping proof of convergent relations: `sqrt` uses its Newton update bound, `exp` and `log` use conservative series-tail bounds, and the shared `sin/cos` relation closes only when both propagated tails fit the admitted budget. If no safe proof is available, execution retains the existing Strict convergence rule.
+
+This is not a second fast-math backend. Precision is not silently reduced, primitive arithmetic is not reassociated, and no tolerant add/mul/div family, named-width backend, precision selector, JIT, kernel-offload route, scheduler, worker pool, or source-visible parallel construct is introduced. The historical local type form `fpP ~(abs=...,rel=...)` is rejected rather than accepted with a discarded error object; program-level `tolerance N` is the admitted high-precision tolerance authority.
+
+At `tolerance 1e-10`, fixed-CPU A/B against 1.3.111 measures about **5.0x-5.6x** for 4096-bit `exp/log/sin/cos`, **12.6x-17.2x** at 8192 bits, and **31.1x-43.1x** at 16384 bits. `sqrt` improves about **1.11x / 1.49x / 1.81x**. The gains come from terminating iterations whose remaining contribution is proved irrelevant, not from reducing precision. Strict outputs remain bit-identical on the retained fp127/fp521/fp4096/fp8192 advanced-math probes, and a 240-case exact-rational tolerance grid records zero bound violations.
+
+The preceding 1.3.111 release compacted big/big Rank-N division to real base-2^32 `u32` recurrence digits, reused quotient high-water facts at the same Strict/RNE closure, and removed the historical `512*N+4096` object envelope in favor of live spans derived from PrecisionFact and Fourier TypePhysicalFact geometry.
+
+'''
+          s = s[:start] + current + s[end:]
+
+          s = s.replace('unzip Wheelchair-1.3.111.zip', 'unzip Wheelchair-1.3.112.zip')
+          s = s.replace('cd Wheelchair-1.3.111', 'cd Wheelchair-1.3.112')
+          s = s.replace('[current archive](./dist/Wheelchair-1.3.111.zip)', '[current archive](./dist/Wheelchair-1.3.112.zip)')
+
+          row111 = '| **1.3.111** | Big/big Rank-N division uses compact u32 digits, exact live object spans replace the old envelope, and quotient high-water facts feed the existing closure without rediscovery. |'
+          row112 = '| **1.3.112** | Program-level `tolerance N` becomes one conservative `ToleranceFact` for `P > 64` Rank-N convergent mathematics; Strict/RNE primitive arithmetic remains the only high-precision arithmetic authority. |'
+          if row112 not in s:
+              if row111 not in s:
+                  raise SystemExit('1.3.111 landmark row not found')
+              s = s.replace(row111, row111 + '\n' + row112, 1)
+
+          assert '> Current release: **1.3.112**' in s
+          assert './dist/Wheelchair-1.3.112.zip' in s
+          assert '## Current release: 1.3.112' in s
+          assert row112 in s
+          p.write_text(s, encoding='utf-8')
+          PY
+
+          rm -f .github/workflows/release-1.3.112.yml
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "Release Wheelchair 1.3.112"
+          git push origin HEAD:main
+
+          if gh release view v1.3.112 >/dev/null 2>&1; then
+            gh release edit v1.3.112 --title "Wheelchair 1.3.112" --notes-file "$src/RELEASE_NOTES_1_3_112.md" --target main
+            gh release upload v1.3.112 "$archive" "dist/Wheelchair-1.3.112.zip.sha256" --clobber
+          else
+            gh release create v1.3.112 "$archive" "dist/Wheelchair-1.3.112.zip.sha256" --target main --title "Wheelchair 1.3.112" --notes-file "$src/RELEASE_NOTES_1_3_112.md"
+          fi
