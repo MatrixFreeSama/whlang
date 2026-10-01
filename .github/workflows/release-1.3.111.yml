@@ -21,7 +21,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sha256sum -c dist/Wheelchair-1.3.111.zip.sha256
+          (cd dist && sha256sum -c Wheelchair-1.3.111.zip.sha256)
           rm -rf /tmp/wheelchair-1.3.111
           mkdir -p /tmp/wheelchair-1.3.111
           unzip -q dist/Wheelchair-1.3.111.zip -d /tmp/wheelchair-1.3.111
