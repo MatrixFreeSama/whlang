@@ -1,6 +1,6 @@
-# Wheelchair 1.3.111
+# Wheelchair 1.3.112
 
-![Build](https://img.shields.io/badge/build-29%2F29%20PASS-brightgreen) ![Release](https://img.shields.io/badge/release-1.3.111-blue)
+![Build](https://img.shields.io/badge/build-29%2F29%20PASS-brightgreen) ![Release](https://img.shields.io/badge/release-1.3.112-blue)
 
 Wheelchair is an HPC- and simulation-first general-purpose AOT language built around Rank-N semantics, matrix-free execution, ValueFacts, StateFacts, AddressFacts, RegionFacts, CoordinateFacts, GroupFact, Physical Reality, Traffic Reality, Silicon Domain Graphs, and Physical DAG execution.
 
@@ -12,6 +12,14 @@ physical work / mathematical-physical lower bound -> 1
 
 Idle silicon is valid whenever another materialization costs more than the remaining necessary work.
 
+
+## 1.3.112: tolerance becomes a proof bound, not a fast mode
+
+For `P > 64`, the existing program-level `tolerance N` contract now reaches Rank-N mathematics as one conservative `ToleranceFact`. Basic `add/sub/mul/div` remain the same strict P-bit operations and still close through the single Strict/RNE authority. Tolerance changes only the stopping proof of convergent relations: `sqrt` uses its Newton update bound, `exp` and `log` use contracted series-tail bounds, and the shared `sin/cos` relation requires both alternating tails to fit a conservatively back-propagated budget before double-angle restoration. If a proof is unavailable, execution falls back to the existing strict convergence condition.
+
+This is not `fast-math`: no precision is silently reduced, no primitive is reassociated, and no tolerant arithmetic backend or selector exists. The previously accepted parameterized type-local form `fpP ~(abs=...,rel=...)` is now rejected because General did not preserve that local error object; the release does not keep a syntax that silently means Strict. Program-level `tolerance N` is the single admitted high-precision tolerance authority in 1.3.112.
+
+Against 1.3.111, whose high-precision tolerant programs were effectively strict, the retained fixed-CPU A/B at tolerance `1e-10` measures about **5.0x-5.6x** for 4096-bit `exp/log/sin/cos`, **12.6x-17.2x** at 8192 bits, and **31.1x-43.1x** at 16384 bits. `sqrt` improves more moderately, about **1.11x / 1.49x / 1.81x** at those precisions. A 240-case exact-rational validation grid has zero bound violations. A longer Strict recheck resolves the earlier short-run noise: representative 4096- and 16384-bit probes remain essentially at 1.3.111 speed while retaining bit-identical results.
 
 ## 1.3.111: high precision carries facts, not empty storage
 

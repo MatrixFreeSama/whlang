@@ -6902,6 +6902,9 @@ s_parse_type_emit:
     lea rdi,[rip+tok_tilde]; mov esi,1; xor edx,edx; call s_match_token
     test eax,eax; jz .spte_simple
     cmp r10d,4; jb .spte_fail
+    # Parameterized fpP tolerance is governed by the program ToleranceFact.
+    # Do not accept a type-local abs/rel object that General cannot preserve.
+    cmp r10d,7; je .spte_fail
     lea rdi,[rip+js_type_obj_base]; call s_out_cstr
     mov rdi,r12; mov rsi,rbx; call s_out_quote_span
     lea rdi,[rip+js_tol_mid_abs]; call s_out_cstr
@@ -9685,6 +9688,14 @@ s_finalize_json:
     lea rdi,[rip+cv_tolerant]; mov esi,8; call s_out_quote_span; jmp .sfj_fp_done
 .sfj_fp_strict: lea rdi,[rip+cv_strict]; mov esi,17; call s_out_quote_span
 .sfj_fp_done:
+    # A tolerant whole-program contract carries its numeric bound as a fact.
+    # The value is not a fast-mode selector: consumers may use it only when a
+    # relation can prove that the unpropagated remainder stays inside the bound.
+    cmp dword ptr [rip+s_fp_tolerant],0; je .sfj_fp_tol_done
+    mov rdi,[rip+s_tol_ptr]; mov rsi,[rip+s_tol_len]; test rdi,rdi; jz .sfj_fail
+    lea rdi,[rip+js_fp_tol_mid]; call s_out_cstr
+    mov rdi,[rip+s_tol_ptr]; mov rsi,[rip+s_tol_len]; call s_out_span
+.sfj_fp_tol_done:
     # Mixed-precision policy is a first-class compile-time contract for every
     # source surface. Tensor/Field may ignore it until multiple FP widths meet.
     lea rdi,[rip+js_mixed_mid]; call s_out_cstr
@@ -10678,6 +10689,7 @@ js_root_format:.asciz "{\"format\":\"wheelchair.tensor/1\",\"program\":"
 js_contract_prefix:.asciz ",\"contracts\":{\"deterministic\":"
 js_overflow_mid:.asciz ",\"integer_overflow\":"
 js_fp_mid:.asciz ",\"floating_point\":"
+js_fp_tol_mid:.asciz ",\"floating_tolerance\":"
 js_mixed_mid:.asciz ",\"mixed_precision\":"
 cv_mixed_low:.asciz "\"lower_precision_dominates\""
 cv_mixed_high:.asciz "\"higher_precision_dominates\""

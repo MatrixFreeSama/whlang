@@ -122,6 +122,8 @@ compile_general_source:
     mov dword ptr [rip+g_cached_binding_slot],PR_FACT_INVALID
     mov dword ptr [rip+g_overflow_wrap],0
     mov dword ptr [rip+g_precision_propagation],0
+    mov dword ptr [rip+g_fp_tolerance_active],0
+    mov qword ptr [rip+g_fp_tolerance_exp2],0
     mov dword ptr [rip+g_rankn_type_count],0
     mov qword ptr [rip+g_runtime_temp_bytes_used],0
     mov dword ptr [rip+g_fragment_count],0
@@ -206,8 +208,29 @@ compile_general_source:
 .set_wrap:
     mov dword ptr [rip+g_overflow_wrap],1
 .parse_mixed_precision:
-    # Optional for backward-compatible canonical JSON.  Source surfaces always
-    # emit it.  This flag changes only the existing numeric meet authority.
+    # Floating tolerance is an error-bound fact, never a fast-math switch.
+    # Strict/absent contracts keep the exact Rank-N path. A tolerant contract
+    # carries one numeric bound; we conservatively project it to a power-of-two
+    # bound no larger than the source value. Relations may stop local propagation
+    # only after proving their unpropagated remainder lies below that bound.
+    mov rdi,r13; lea rsi,[rip+gk_floating_point]; mov edx,gk_floating_point_end-gk_floating_point; call obj_get
+    test rax,rax; jz .parse_mixed_precision_policy
+    cmp qword ptr [rax],J_STRING; jne .bad
+    mov rbx,rax
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_fp_strict]; mov ecx,gv_fp_strict_end-gv_fp_strict; call span_eq
+    test eax,eax; jnz .parse_mixed_precision_policy
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_fp_tolerant]; mov ecx,gv_fp_tolerant_end-gv_fp_tolerant; call span_eq
+    test eax,eax; jz .bad
+    mov rdi,r13; lea rsi,[rip+gk_floating_tolerance]; mov edx,gk_floating_tolerance_end-gk_floating_tolerance; call obj_get
+    test rax,rax; jz .bad
+    call node_parse_f64_bits
+    test edx,edx; jnz .parse_mixed_precision_policy
+    call g_tolerance_exp_from_f64_bits
+    test edx,edx; jnz .parse_mixed_precision_policy
+    mov qword ptr [rip+g_fp_tolerance_exp2],rax
+    mov dword ptr [rip+g_fp_tolerance_active],1
+.parse_mixed_precision_policy:
+    # Mixed precision remains the existing consumer-edge numeric meet authority.
     mov rdi,r13; lea rsi,[rip+gk_mixed_precision]; mov edx,gk_mixed_precision_end-gk_mixed_precision; call obj_get
     test rax,rax; jz .contracts_ok
     cmp qword ptr [rax],J_STRING; jne .bad
@@ -718,6 +741,41 @@ g_is_rankn_fp:
     ret
 .girf_no:
     xor eax,eax
+    ret
+
+# rax=positive finite f64 tolerance bits -> rax conservative binary exponent k,
+# edx=0 success / 1 cannot exploit. The returned fact guarantees 2^k <= the
+# source tolerance even if decimal->f64 rounded upward: one full binary exponent
+# of slack is reserved. Zero/NaN/Inf/negative values fall back to strict.
+g_tolerance_exp_from_f64_bits:
+    mov rcx,rax
+    bt rcx,63
+    jc .gtefb_bad
+    mov rdx,rcx
+    shr rdx,52
+    and edx,0x7ff
+    cmp edx,0x7ff
+    je .gtefb_bad
+    mov r8,rcx
+    mov rax,0x000fffffffffffff
+    and r8,rax
+    test edx,edx
+    jz .gtefb_subnormal
+    sub edx,1023
+    movsxd rax,edx
+    dec rax
+    xor edx,edx
+    ret
+.gtefb_subnormal:
+    test r8,r8
+    jz .gtefb_bad
+    bsr rcx,r8
+    lea rax,[rcx-1075]
+    xor edx,edx
+    ret
+.gtefb_bad:
+    xor eax,eax
+    mov edx,1
     ret
 
 # g_type_from_node(rdi=node) -> eax type/0. Object tolerant types use base.
@@ -2800,6 +2858,17 @@ g_emit_mov_edx_imm32:
     push rdi; mov edi,0xBA; call g_emit_u8; pop rdi; jmp g_emit_u32
 g_emit_mov_ecx_imm32:
     push rdi; mov edi,0xB9; call g_emit_u8; pop rdi; jmp g_emit_u32
+# ToleranceFact transport for Rank-N mathematical relations.  These registers
+# carry only a proof bound; they do not select another arithmetic implementation.
+g_emit_mov_r8d_imm32:
+    push rdi; mov edi,0xB841; call g_emit_u16; pop rdi; jmp g_emit_u32
+g_emit_mov_r9_imm64:
+    push rdi; mov edi,0xB949; call g_emit_u16; pop rdi; jmp g_emit_u64
+g_emit_clear_r8d:
+    mov edi,0x3145; call g_emit_u16
+    test eax,eax; jnz .gecr8_done
+    mov edi,0xC0; call g_emit_u8
+.gecr8_done: ret
 g_emit_call_abs:
     call g_emit_mov_rax_imm64
     test eax,eax; jnz .geca_done
@@ -2959,6 +3028,13 @@ g_emit_rankn_fp_math_unary_top:
     test eax,eax; jnz .gerfmu_bad
     mov rdi,rbx; call g_emit_mov_rdi_imm64
     mov edi,r13d; call g_emit_mov_edx_imm32
+    cmp dword ptr [rip+g_fp_tolerance_active],0; je .gerfmu_strict_fact
+    mov edi,1; call g_emit_mov_r8d_imm32
+    mov rdi,qword ptr [rip+g_fp_tolerance_exp2]; call g_emit_mov_r9_imm64
+    jmp .gerfmu_tol_ready
+.gerfmu_strict_fact:
+    call g_emit_clear_r8d
+.gerfmu_tol_ready:
     mov rdi,r12; call g_emit_call_abs
     test eax,eax; jnz .gerfmu_bad
     mov edi,1; call g_emit_rankn_fp_status_check
@@ -10128,6 +10204,8 @@ gk_program:.ascii "program"; gk_program_end:
 gk_contracts:.ascii "contracts"; gk_contracts_end:
 gk_deterministic:.ascii "deterministic"; gk_deterministic_end:
 gk_integer_overflow:.ascii "integer_overflow"; gk_integer_overflow_end:
+gk_floating_point:.ascii "floating_point"; gk_floating_point_end:
+gk_floating_tolerance:.ascii "floating_tolerance"; gk_floating_tolerance_end:
 gk_mixed_precision:.ascii "mixed_precision"; gk_mixed_precision_end:
 gk_inputs:.ascii "inputs"; gk_inputs_end:
 gk_bindings:.ascii "bindings"; gk_bindings_end:
@@ -10175,6 +10253,8 @@ gk_segments:.ascii "segments"; gk_segments_end:
 gv_format:.ascii "wheelchair.tensor/1"; gv_format_end:
 gv_trap:.ascii "trap"; gv_trap_end:
 gv_wrap:.ascii "wrap"; gv_wrap_end:
+gv_fp_strict:.ascii "strict_by_default"; gv_fp_strict_end:
+gv_fp_tolerant:.ascii "tolerant"; gv_fp_tolerant_end:
 gv_mixed_low:.ascii "lower_precision_dominates"; gv_mixed_low_end:
 gv_mixed_high:.ascii "higher_precision_dominates"; gv_mixed_high_end:
 gv_bool:.ascii "bool"; gv_bool_end:
@@ -10250,6 +10330,9 @@ g_runtime_state_capacity:.skip 4
 g_state_local_frame_bytes:.skip 4
 g_overflow_wrap:.skip 4
 g_precision_propagation:.skip 4
+g_fp_tolerance_active:.skip 4
+.p2align 3
+g_fp_tolerance_exp2:.skip 8
 g_runtime_temp_bytes_used:.skip 8
 .p2align 3
 g_io_meta_arena_ptr:.skip 8

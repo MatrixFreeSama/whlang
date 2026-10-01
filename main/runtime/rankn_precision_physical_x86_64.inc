@@ -2316,12 +2316,41 @@ rpf_copy_object:
     pop r12
     ret
 
-# rdi=workspace base,rsi=src,edx=type -> eax status.
+# Local tolerance proof helpers.  The compiler supplies a conservative binary
+# exponent k with 2^k <= the user contract.  These helpers never modify a
+# ValueFact and never choose another arithmetic implementation.
+# rdi=value,rsi=k -> eax=1 only when |value| < 2^k is proven from normalized E.
+rpf_abs_lt_pow2:
+    mov rax,[rdi+RPF_EXP]
+    cmp rax,rsi
+    setl al
+    movzx eax,al
+    ret
+
+# rdi=numerator,rsi=denominator,rdx=k -> eax=1 only when |num/den| < 2^k.
+# For normalized nonzero values, num < 2^(En+1), den >= 2^Ed.
+rpf_abs_ratio_lt_pow2:
+    mov rax,[rdi+RPF_EXP]
+    sub rax,[rsi+RPF_EXP]
+    jo .rpfar_no
+    inc rax
+    jo .rpfar_no
+    cmp rax,rdx
+    setle al
+    movzx eax,al
+    ret
+.rpfar_no:
+    xor eax,eax
+    ret
+
+# rdi=workspace base,rsi=src,edx=type,r8d=tolerance-active,r9=tolerance exponent.
 .global rankn_fp_sqrt
 rankn_fp_sqrt:
     RPF_SAVE
-    sub rsp,48
+    sub rsp,64
     mov r12,rdi; mov r13,rsi; mov r14d,edx
+    mov r11d,r8d
+    mov [rsp+40],r9
     mov edi,r14d; call rpf_object_span; test rax,rax; jz .rpfsq_bad
     mov r15,rax
     cmp dword ptr [r13+RPF_TYPE],r14d; jne .rpfsq_bad
@@ -2338,6 +2367,8 @@ rankn_fp_sqrt:
     mov rdi,r12; mov rsi,r15; mov edx,2; call rpf_math_slot; mov [rsp+16],rax
     mov rdi,r12; mov rsi,r15; mov edx,3; call rpf_math_slot; mov [rsp+24],rax
     mov rdi,r12; mov rsi,r15; mov edx,4; call rpf_math_slot; mov [rsp+32],rax
+    # slot6 is a relation-local delta carrier used only when tolerance is active.
+    mov rdi,r12; mov rsi,r15; mov edx,6; call rpf_math_slot; mov [rsp+48],rax
     mov ebp,[r13+RPF_PREC]; add ebp,4
 .rpfsq_loop:
     test ebp,ebp; jz .rpfsq_cap
@@ -2350,6 +2381,11 @@ rankn_fp_sqrt:
     mov rdi,[rsp+32]; call rpf_object_is_zero; test eax,eax; jnz .rpfsq_next_ready
     mov rax,[rsp+32]; dec qword ptr [rax+RPF_EXP]
 .rpfsq_next_ready:
+    # Newton gives next=(g+x/g)/2.  For positive x and g, |next-sqrt(x)| is
+    # bounded by |next-g|.  A tolerant relation may therefore close early only
+    # after that local delta itself is proved below the conservative ToleranceFact.
+    test r11d,r11d; jnz .rpfsq_tol_check
+.rpfsq_rep_silence:
     mov rdi,[rsp+32]; mov rsi,[rsp]; call rpf_value_equal; test eax,eax; jnz .rpfsq_use_next
     mov rdi,[rsp+32]; mov rsi,[rsp+8]; call rpf_value_equal; test eax,eax; jnz .rpfsq_cycle
     # prev2 <- g ; g <- next.  Until ValueFact/scratch are separated, keeping
@@ -2358,6 +2394,12 @@ rankn_fp_sqrt:
     mov rdi,[rsp+8]; mov rsi,[rsp]; mov edx,r14d; call rpf_copy_object; test eax,eax; jnz .rpfsq_bad
     mov rdi,[rsp]; mov rsi,[rsp+32]; mov edx,r14d; call rpf_copy_object; test eax,eax; jnz .rpfsq_bad
     dec ebp; jmp .rpfsq_loop
+.rpfsq_tol_check:
+    mov rdi,[rsp+48]; mov rsi,[rsp+32]; mov rdx,[rsp]; mov ecx,r14d; call rankn_fp_sub; test eax,eax; jnz .rpfsq_bad
+    mov rdi,[rsp+48]; mov rsi,[rsp+48]; call rankn_fp_abs; test edx,edx; jnz .rpfsq_bad
+    mov rdi,[rsp+48]; mov rsi,[rsp+40]; call rpf_abs_lt_pow2
+    test eax,eax; jnz .rpfsq_use_next
+    jmp .rpfsq_rep_silence
 .rpfsq_cycle:
     # Two representable neighbours can form a Newton 2-cycle. Pick the one with
     # the smaller |g^2-x| evidence rather than inventing an epsilon.
@@ -2386,16 +2428,18 @@ rankn_fp_sqrt:
     mov rdi,r12; mov rsi,r13; mov edx,r14d; call rpf_copy_object; jmp .rpfsq_done
 .rpfsq_bad: mov eax,1
 .rpfsq_done:
-    add rsp,48
+    add rsp,64
     RPF_RESTORE
     ret
 
-# rdi=workspace base,rsi=src,edx=type -> eax status.
+# rdi=workspace base,rsi=src,edx=type,r8d=tolerance-active,r9=tolerance exponent -> eax status.
 .global rankn_fp_exp
 rankn_fp_exp:
     RPF_SAVE
-    sub rsp,80
+    sub rsp,96
     mov r12,rdi; mov r13,rsi; mov r14d,edx
+    mov r11d,r8d
+    mov [rsp+72],r9
     mov edi,r14d; call rpf_object_span; test rax,rax; jz .rpfex_bad
     mov r15,rax
     cmp dword ptr [r13+RPF_TYPE],r14d; jne .rpfex_bad
@@ -2410,6 +2454,25 @@ rankn_fp_exp:
     xor ebx,ebx
 .rpfex_have_m:
     mov [rsp+48],rbx
+    # Series-tail proof uses a relative local budget.  y is contracted below 2,
+    # and repeated squaring can amplify relative error by roughly 2^m; reserve
+    # additional binary slack (and one more bit for reciprocal restoration).
+    test r11d,r11d; jz .rpfex_tol_ready
+    mov rax,[rsp+72]
+    sub rax,rbx
+    jo .rpfex_tol_disable
+    sub rax,3
+    jo .rpfex_tol_disable
+    cmp qword ptr [rsp+56],0
+    je .rpfex_tol_store
+    dec rax
+    jo .rpfex_tol_disable
+.rpfex_tol_store:
+    mov [rsp+80],rax
+    jmp .rpfex_tol_ready
+.rpfex_tol_disable:
+    xor r11d,r11d
+.rpfex_tol_ready:
     mov rdi,[rsp]; call rpf_object_is_zero; test eax,eax; jnz .rpfex_y_ready
     mov rax,[rsp]; sub qword ptr [rax+RPF_EXP],rbx
 .rpfex_y_ready:
@@ -2433,10 +2496,22 @@ rankn_fp_exp:
     mov rdi,[rsp+24]; mov rsi,[rsp+32]; mov rdx,[rsp+64]; mov ecx,r14d; call rankn_fp_div_u64; test eax,eax; jnz .rpfex_bad
     # nextsum uses the alternate sum carrier; silence is checked before role rotation.
     mov rdi,[rsp+40]; mov rsi,[rsp+16]; mov rdx,[rsp+24]; mov ecx,r14d; call rankn_fp_add; test eax,eax; jnz .rpfex_bad
+    # For y<2 and n>=3, the positive Taylor tail after term_n is smaller than
+    # term_n.  Proving term_n/sum below the contracted relative ToleranceFact
+    # therefore permits semantic closure without changing any arithmetic op.
+    test r11d,r11d; jnz .rpfex_tol_check
+.rpfex_rep_silence:
     mov rdi,[rsp+40]; mov rsi,[rsp+16]; call rpf_value_equal; test eax,eax; jnz .rpfex_series_done
     mov rdi,[rsp+16]; mov rsi,[rsp+40]; mov edx,r14d; call rpf_copy_object; test eax,eax; jnz .rpfex_bad
     inc qword ptr [rsp+64]
     dec ebp; jmp .rpfex_series
+.rpfex_tol_check:
+    cmp qword ptr [rsp+64],3; jb .rpfex_rep_silence
+    mov rdi,[rsp+24]; mov rsi,[rsp+40]; mov rdx,[rsp+80]; call rpf_abs_ratio_lt_pow2
+    test eax,eax; jnz .rpfex_accept_next
+    jmp .rpfex_rep_silence
+.rpfex_accept_next:
+    mov rdi,[rsp+16]; mov rsi,[rsp+40]; mov edx,r14d; call rpf_copy_object; test eax,eax; jnz .rpfex_bad
 .rpfex_series_done:
     mov rdi,r12; mov rsi,[rsp+16]; mov edx,r14d; call rpf_copy_object; test eax,eax; jnz .rpfex_bad
     # Undo local contraction by repeated squaring.
@@ -2458,16 +2533,18 @@ rankn_fp_exp:
 .rpfex_ok: xor eax,eax; jmp .rpfex_done
 .rpfex_bad: mov eax,1
 .rpfex_done:
-    add rsp,80
+    add rsp,96
     RPF_RESTORE
     ret
 
-# rdi=workspace base,rsi=src,edx=type -> eax status.
+# rdi=workspace base,rsi=src,edx=type,r8d=tolerance-active,r9=tolerance exponent -> eax status.
 .global rankn_fp_log
 rankn_fp_log:
     RPF_SAVE
-    sub rsp,96
+    sub rsp,128
     mov r12,rdi; mov r13,rsi; mov r14d,edx
+    mov r11d,r8d
+    mov [rsp+96],r9
     mov edi,r14d; call rpf_object_span; test rax,rax; jz .rpflg_bad
     mov r15,rax
     cmp dword ptr [r13+RPF_TYPE],r14d; jne .rpflg_bad
@@ -2487,12 +2564,28 @@ rankn_fp_log:
     cmp rcx,-1; jl .rpflg_do_sqrt
     jmp .rpflg_contract_done
 .rpflg_do_sqrt:
-    # Nested sqrt workspace starts at slot16 and therefore owns slots16..31.
+    # Nested sqrt is an internal contraction, not an observable tolerance
+    # boundary. Keep it strict so the outer log relation owns the sole error fact.
+    xor r8d,r8d; xor r9d,r9d
     mov rdi,[rsp+64]; mov rsi,[rsp]; mov edx,r14d; call rankn_fp_sqrt; test eax,eax; jnz .rpflg_bad
     mov rdi,[rsp]; mov rsi,[rsp+64]; mov edx,r14d; call rpf_copy_object; test eax,eax; jnz .rpflg_bad
     inc ebx; jmp .rpflg_contract
 .rpflg_contract_done:
     mov [rsp+72],rbx
+    # atanh(u) has |u|<=1/3 after contraction.  The tail after a retained odd
+    # term is below term/8; restoring log(x) multiplies by 2^(contractions+1).
+    # Therefore term < tolerance*2^(2-contractions) proves the final abs tail.
+    test r11d,r11d; jz .rpflg_tol_ready
+    mov rax,[rsp+96]
+    sub rax,[rsp+72]
+    jo .rpflg_tol_disable
+    add rax,2
+    jo .rpflg_tol_disable
+    mov [rsp+104],rax
+    jmp .rpflg_tol_ready
+.rpflg_tol_disable:
+    xor r11d,r11d
+.rpflg_tol_ready:
     # u=(z-1)/(z+1)
     mov rdi,r12; mov rsi,r15; mov edx,3; call rpf_math_slot; mov [rsp+16],rax
     mov rdi,rax; mov rsi,[rsp]; mov rdx,[rsp+8]; mov ecx,r14d; call rankn_fp_sub; test eax,eax; jnz .rpflg_bad
@@ -2521,10 +2614,18 @@ rankn_fp_log:
     # fraction = power / odd_integer.  The denominator stays a scalar fact.
     mov rdi,[rsp+24]; mov rsi,[rsp+48]; mov rdx,[rsp+80]; mov ecx,r14d; call rankn_fp_div_u64; test eax,eax; jnz .rpflg_bad
     mov rdi,[rsp+88]; mov rsi,[rsp+56]; mov rdx,[rsp+24]; mov ecx,r14d; call rankn_fp_add; test eax,eax; jnz .rpflg_bad
+    test r11d,r11d; jnz .rpflg_tol_check
+.rpflg_rep_silence:
     mov rdi,[rsp+88]; mov rsi,[rsp+56]; call rpf_value_equal; test eax,eax; jnz .rpflg_series_done
     mov rdi,[rsp+56]; mov rsi,[rsp+88]; mov edx,r14d; call rpf_copy_object; test eax,eax; jnz .rpflg_bad
     add qword ptr [rsp+80],2
     dec ebp; jmp .rpflg_series
+.rpflg_tol_check:
+    mov rdi,[rsp+24]; mov rsi,[rsp+104]; call rpf_abs_lt_pow2
+    test eax,eax; jnz .rpflg_accept_next
+    jmp .rpflg_rep_silence
+.rpflg_accept_next:
+    mov rdi,[rsp+56]; mov rsi,[rsp+88]; mov edx,r14d; call rpf_copy_object; test eax,eax; jnz .rpflg_bad
 .rpflg_series_done:
     mov rdi,r12; mov rsi,[rsp+56]; mov edx,r14d; call rpf_copy_object; test eax,eax; jnz .rpflg_bad
     # log(x)=2^(k+1)*atanh(u). Exact power-of-two restoration only touches E.
@@ -2533,18 +2634,20 @@ rankn_fp_log:
 .rpflg_ok: xor eax,eax; jmp .rpflg_done
 .rpflg_bad: mov eax,1
 .rpflg_done:
-    add rsp,96
+    add rsp,128
     RPF_RESTORE
     ret
 
 # Shared local-propagation sine/cosine authority. ecx=0 sine,1 cosine.
 rpf_sincos_core:
     RPF_SAVE
-    sub rsp,128
+    sub rsp,160
     mov r12,rdi
     mov r13,rsi
     mov r14d,edx
     mov dword ptr [rsp+120],ecx
+    mov r11d,r8d
+    mov [rsp+128],r9
     mov edi,r14d
     call rpf_object_span
     test rax,rax
@@ -2563,6 +2666,23 @@ rpf_sincos_core:
     xor eax,eax
 .rpfsc_have_m:
     mov [rsp+104],rax
+    # The coupled double-angle map can amplify an absolute pair error.  A factor
+    # of eight per restoration step is a conservative envelope for values inside
+    # the unit pair, so the local series budget is tolerance/8^m with extra slack.
+    test r11d,r11d; jz .rpfsc_tol_ready
+    mov rax,[rsp+104]
+    imul rax,rax,3
+    jo .rpfsc_tol_disable
+    mov rcx,[rsp+128]
+    sub rcx,rax
+    jo .rpfsc_tol_disable
+    dec rcx
+    jo .rpfsc_tol_disable
+    mov [rsp+136],rcx
+    jmp .rpfsc_tol_ready
+.rpfsc_tol_disable:
+    xor r11d,r11d
+.rpfsc_tol_ready:
     mov rdi,[rsp]; call rpf_object_is_zero; test eax,eax; jnz .rpfsc_y_ready
     mov rax,[rsp]
     mov rcx,[rsp+104]
@@ -2621,6 +2741,11 @@ rpf_sincos_core:
     mov rdi,[rsp+48]; mov rsi,[rsp+80]; mov ecx,r14d; call rankn_fp_div_u64; test eax,eax; jnz .rpfsc_bad
     mov rdi,[rsp+96]; mov rsi,[rsp+40]; mov rdx,[rsp+48]; mov ecx,r14d; call rankn_fp_add; test eax,eax; jnz .rpfsc_bad
 
+    # For |y|<2 the sine terms decrease from j=1 and cosine terms from j=2.
+    # Once j>=2, each alternating Taylor tail is bounded by the retained term.
+    # Only then may the coupled relation consume the conservative local budget.
+    test r11d,r11d; jnz .rpfsc_tol_check
+.rpfsc_rep_silence:
     # Representation-local termination: once neither sum changes in the
     # current P-bit representation, additional local propagation is silent.
     mov rdi,[rsp+88]; mov rsi,[rsp+24]; call rpf_value_equal; mov ebx,eax
@@ -2633,6 +2758,16 @@ rpf_sincos_core:
     dec ebp
     jmp .rpfsc_series
 
+.rpfsc_tol_check:
+    cmp qword ptr [rsp+112],2; jb .rpfsc_rep_silence
+    mov rdi,[rsp+32]; mov rsi,[rsp+136]; call rpf_abs_lt_pow2
+    test eax,eax; jz .rpfsc_rep_silence
+    mov rdi,[rsp+48]; mov rsi,[rsp+136]; call rpf_abs_lt_pow2
+    test eax,eax; jnz .rpfsc_accept_next
+    jmp .rpfsc_rep_silence
+.rpfsc_accept_next:
+    mov rdi,[rsp+24]; mov rsi,[rsp+88]; mov edx,r14d; call rpf_copy_object; test eax,eax; jnz .rpfsc_bad
+    mov rdi,[rsp+40]; mov rsi,[rsp+96]; mov edx,r14d; call rpf_copy_object; test eax,eax; jnz .rpfsc_bad
 .rpfsc_series_done:
     # Undo contraction by the coupled double-angle map.  The pair propagates
     # together, so no independent phase-reduction branch is introduced.
@@ -2668,7 +2803,7 @@ rpf_sincos_core:
 .rpfsc_bad:
     mov eax,1
 .rpfsc_done:
-    add rsp,128
+    add rsp,160
     RPF_RESTORE
     ret
 

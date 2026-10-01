@@ -13,28 +13,28 @@
 
 Wheelchair targets the same broad numerical-computing territory as C and Fortran, but it does not start from a mandatory sequential instruction stream and then try to recover parallelism afterward. Its compiler treats mathematical structure, value identity, causal dependence, precision, locality, and physical realization as first-class compile-time information.
 
-> Current release: **1.3.111**  
+> Current release: **1.3.112**  
 > Target: **Linux x86-64, static ELF64**  
 > Source surfaces: **WH (`.wh`)** and **WHEX (`.whex`)**  
-> [Download Wheelchair 1.3.111](./dist/Wheelchair-1.3.111.zip)
+> [Download Wheelchair 1.3.112](./dist/Wheelchair-1.3.112.zip)
 
 Archive SHA-256:
 
 ```text
-e05a66e4f586c4fcb3a6b1e10b379f1ecfddbcff0392ab34773d91800000957d
+c979e7486d931d9608b6aa99adad2f508fca77457477663ac000a4fe14c667ef
 ```
 
 ---
 
-## Current release: 1.3.111
+## Current release: 1.3.112
 
-Wheelchair 1.3.111 continues the same convergence direction instead of adding another numerical backend. For `P > 64`, high precision remains one Rank-N / PrecisionFact system. Big/big division now uses real base-2^32 `u32` recurrence digits, reuses its existing quotient high-water fact at the single Strict/RNE closure, and no longer pays for zero-extended qword slots. The historical `512*N+4096` object envelope is removed: PrecisionFact plus the existing Fourier TypePhysicalFact geometry derives the live add/mul/div span.
+Wheelchair 1.3.112 extends the existing whole-program `tolerance N` contract into `P > 64` Rank-N mathematics as one conservative `ToleranceFact`. Basic `add/sub/mul/div` remain the same strict P-bit operations and still close through the single Strict/RNE authority. Tolerance changes only the stopping proof of convergent relations: `sqrt` uses its Newton update bound, `exp` and `log` use conservative series-tail bounds, and the shared `sin/cos` relation closes only when both propagated tails fit the admitted budget. If no safe proof is available, execution retains the existing Strict convergence rule.
 
-Across the retained 4096-262144-bit A/B set, direct big/big division measured about **1.17x-1.34x** faster than 1.3.110. `sqrt`, which consumes that division path, improves about **1.10x** at 4096 bits and **1.16x** at 8192 bits. Correct experiments that regressed physical performance were removed rather than retained as alternate paths.
+This is not a second fast-math backend. Precision is not silently reduced, primitive arithmetic is not reassociated, and no tolerant add/mul/div family, named-width backend, precision selector, JIT, kernel-offload route, scheduler, worker pool, or source-visible parallel construct is introduced. The historical local type form `fpP ~(abs=...,rel=...)` is rejected rather than accepted with a discarded error object; program-level `tolerance N` is the admitted high-precision tolerance authority.
 
-The preceding 1.3.110 release also removed Field's historical semantic Rank-8 ceiling. `WHFLD217` carries one `u64` RankFact followed by exactly `rank` extent and stride facts; Surface, canonical Field metadata, AddressFact deltas, and runtime tables derive axis storage from that same RankFact. Native256 and Native512 use one runtime-rank address relation. Old `WHFLD216` input is rejected rather than translated. Rank 9, 17, and 33 execute through the same production path.
+At `tolerance 1e-10`, fixed-CPU A/B against 1.3.111 measures about **5.0x-5.6x** for 4096-bit `exp/log/sin/cos`, **12.6x-17.2x** at 8192 bits, and **31.1x-43.1x** at 16384 bits. `sqrt` improves about **1.11x / 1.49x / 1.81x**. The gains come from terminating iterations whose remaining contribution is proved irrelevant, not from reducing precision. Strict outputs remain bit-identical on the retained fp127/fp521/fp4096/fp8192 advanced-math probes, and a 240-case exact-rational tolerance grid records zero bound violations.
 
-No named-width high-precision backend, precision selector, workload route, JIT, kernel-offload surface, scheduler, worker pool, source-visible parallel directive, or old-format compatibility reader is added.
+The preceding 1.3.111 release compacted big/big Rank-N division to real base-2^32 `u32` recurrence digits, reused quotient high-water facts at the same Strict/RNE closure, and removed the historical `512*N+4096` object envelope in favor of live spans derived from PrecisionFact and Fourier TypePhysicalFact geometry.
 
 ## Features
 
@@ -310,8 +310,8 @@ WH is the friendlier surface; WHEX is the more explicit structural surface. Both
 The release archive ships prebuilt static compiler binaries under `bin/`.
 
 ```sh
-unzip Wheelchair-1.3.111.zip
-cd Wheelchair-1.3.111
+unzip Wheelchair-1.3.112.zip
+cd Wheelchair-1.3.112
 
 ./bin/wheelchairc surface/examples/equivalent_en.wh -o demo
 ./demo 4
@@ -895,7 +895,7 @@ The 1.3 series moved more decisions into shared semantic and physical facts: whi
 
 ### Historical evidence
 
-The pre-version account comes from the recovered archive's `README.md`, `SPECIFICATION.md`, and compiler sources. The 1.0.0 package's `RELEASE.md` identifies the first public version baseline without claiming architecture completion. Early numbered milestones are retained in `RELEASE_NOTES.md` inside [1.2.0](./dist/Wheelchair-1.2.0.zip) and in `worktree/` inside [1.2.8](./dist/Wheelchair-1.2.8.zip). Later notes and proofs are preserved under `devtrash/history/` and `devtrash/release_history/` in the [current archive](./dist/Wheelchair-1.3.111.zip). This is a reconstruction from surviving artifacts; the date in the pre-version filename does not establish the project's creation date.
+The pre-version account comes from the recovered archive's `README.md`, `SPECIFICATION.md`, and compiler sources. The 1.0.0 package's `RELEASE.md` identifies the first public version baseline without claiming architecture completion. Early numbered milestones are retained in `RELEASE_NOTES.md` inside [1.2.0](./dist/Wheelchair-1.2.0.zip) and in `worktree/` inside [1.2.8](./dist/Wheelchair-1.2.8.zip). Later notes and proofs are preserved under `devtrash/history/` and `devtrash/release_history/` in the [current archive](./dist/Wheelchair-1.3.112.zip). This is a reconstruction from surviving artifacts; the date in the pre-version filename does not establish the project's creation date.
 
 ## Landmark architecture releases
 
@@ -939,6 +939,7 @@ These milestones record changes in semantics, execution, and release verificatio
 | **1.3.105–1.3.109** | PrecisionFact and Local Propagation aged Rank-N high precision: exact decimal ingress, scalar series quotients, geometry reuse, and dead carrier work converged around one Strict/RNE authority. |
 | **1.3.110** | Field rank became a RankFact rather than `rank <= 8`; fixed axis tables and `r1..r8` runtime families disappeared. |
 | **1.3.111** | Big/big Rank-N division uses compact u32 digits, exact live object spans replace the old envelope, and quotient high-water facts feed the existing closure without rediscovery. |
+| **1.3.112** | Program-level `tolerance N` becomes one conservative `ToleranceFact` for `P > 64` Rank-N convergent mathematics; Strict/RNE primitive arithmetic remains the only high-precision arithmetic authority. |
 
 The table selects turning points rather than listing every patch. Versioned benchmark results above remain observations of their original releases and hosts, not measurements of the current compiler unless explicitly labeled as the current snapshot.
 
