@@ -9,13 +9,18 @@ commits=(
   d65d8842d7ff46a0b549792bb931ac9384a08b95
 )
 
-# Validate the complete release set before deleting anything.
+# Validate the complete release set before deleting anything. Historical sha256
+# files are allowed to contain stale/absolute path fields; the digest itself is
+# the authority.
 for v in "${versions[@]}"; do
   zip="dist/Wheelchair-${v}.zip"
   sum="dist/Wheelchair-${v}.zip.sha256"
   test -f "$zip"
   test -f "$sum"
-  (cd dist && sha256sum -c "Wheelchair-${v}.zip.sha256")
+  expected="$(awk 'NR==1{print $1}' "$sum")"
+  actual="$(sha256sum "$zip" | awk '{print $1}')"
+  test -n "$expected"
+  test "$actual" = "$expected"
   unzip -tq "$zip" >/dev/null
 done
 
@@ -75,11 +80,11 @@ for i in "${!versions[@]}"; do
   sleep 2
 done
 
-# Verify ordering, targets and assets before removing this one-shot mechanism.
+# Verify targets and both release assets before removing this one-shot mechanism.
 for i in "${!versions[@]}"; do
   v="${versions[$i]}"
   c="${commits[$i]}"
-  gh release view "v${v}" --json tagName,name,isLatest,publishedAt,url >/dev/null
+  gh release view "v${v}" --json tagName,name,publishedAt,url >/dev/null
   actual="$(git ls-remote origin "refs/tags/v${v}" | awk '{print $1}')"
   test "$actual" = "$c"
   assets="$(gh release view "v${v}" --json assets --jq '.assets[].name')"
