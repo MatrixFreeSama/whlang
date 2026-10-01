@@ -17,25 +17,22 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Verify archive
+      - name: Verify and unpack release
         shell: bash
         run: |
           set -euo pipefail
           (cd dist && sha256sum -c Wheelchair-1.3.111.zip.sha256)
-          rm -rf /tmp/wheelchair-1.3.111
-          mkdir -p /tmp/wheelchair-1.3.111
-          unzip -q dist/Wheelchair-1.3.111.zip -d /tmp/wheelchair-1.3.111
-          test -d /tmp/wheelchair-1.3.111/Wheelchair-1.3.111/compiler
-          test "$(cat /tmp/wheelchair-1.3.111/Wheelchair-1.3.111/VERSION)" = "1.3.111"
+          rm -rf /tmp/wc111 && mkdir -p /tmp/wc111
+          unzip -q dist/Wheelchair-1.3.111.zip -d /tmp/wc111
+          test "$(cat /tmp/wc111/Wheelchair-1.3.111/VERSION)" = 1.3.111
 
       - name: Synchronize production main
         shell: bash
         run: |
           set -euo pipefail
-          src=/tmp/wheelchair-1.3.111/Wheelchair-1.3.111
+          src=/tmp/wc111/Wheelchair-1.3.111
           rm -rf main/bin main/compiler main/runtime main/surface main/tools
           rm -f main/build.sh main/README.md
-          mkdir -p main
           cp -a "$src/bin" "$src/compiler" "$src/runtime" "$src/surface" "$src/tools" main/
           cp -a "$src/build.sh" "$src/README.md" main/
           chmod +x main/build.sh main/bin/* main/tools/*.sh || true
@@ -46,30 +43,57 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          p = Path('README.md')
-          s = p.read_text()
-          old = "> Current release: **1.3.102**  \n> Target: **Linux x86-64, static ELF64**  \n> Source surfaces: **WH (`.wh`)** and **WHEX (`.whex`)**  \n> [Download Wheelchair 1.3.102](./dist/Wheelchair-1.3.102.zip)\n\nArchive SHA-256:\n\n```text\ne569f0b4c988467658402561f4b993325d9727dc4e59e61322d247591b079bf1\n```"
-          new = "> Current release: **1.3.111**  \n> Target: **Linux x86-64, static ELF64**  \n> Source surfaces: **WH (`.wh`)** and **WHEX (`.whex`)**  \n> [Download Wheelchair 1.3.111](./dist/Wheelchair-1.3.111.zip)\n\nArchive SHA-256:\n\n```text\ne05a66e4f586c4fcb3a6b1e10b379f1ecfddbcff0392ab34773d91800000957d\n```"
-          if old not in s:
-              raise SystemExit('current-release block not found')
-          s = s.replace(old, new, 1)
+          p=Path('README.md')
+          s=p.read_text()
+          old='''> Current release: **1.3.102**  
+> Target: **Linux x86-64, static ELF64**  
+> Source surfaces: **WH (`.wh`)** and **WHEX (`.whex`)**  
+> [Download Wheelchair 1.3.102](./dist/Wheelchair-1.3.102.zip)
 
-          marker = "\n---\n\n## Features\n"
-          section = '''\n---\n\n## Current release: 1.3.111\n\nWheelchair 1.3.111 continues the same convergence direction rather than adding another numerical backend. For `P > 64`, high precision remains one Rank-N/PrecisionFact system. Big/big division now stores its base-2^32 recurrence in real `u32` digits, reuses the quotient high-water fact at the existing Strict/RNE closure, and no longer pays for zero-extended qword slots. The historical `512*N+4096` object envelope is gone; PrecisionFact plus the existing Fourier TypePhysicalFact geometry determines the live add/mul/div span.\n\nDirect big/big division measured roughly **1.17x-1.34x** faster than 1.3.110 across the sampled 4096-262144-bit range. `sqrt`, which directly consumes big/big division, improves about **1.10x** at 4096 bits and **1.16x** at 8192 bits in the retained A/B. Experiments that were mathematically correct but physically regressive were removed rather than retained as alternate paths.\n\nThe preceding 1.3.110 release also removes Field's historical semantic Rank-8 ceiling. `WHFLD217` carries one `u64` RankFact followed by exactly `rank` extent and stride facts; Surface, canonical Field metadata, AddressFact deltas, and runtime tables derive axis storage from that same RankFact. Native256 and Native512 use one runtime-rank address relation. Old `WHFLD216` input is rejected rather than translated. Rank 9, 17, and 33 execute through the same production path.\n\nNo named-width high-precision backend, precision selector, workload route, JIT, kernel-offload surface, scheduler, worker pool, source-visible parallel directive, or old-format compatibility reader is added.\n\n## Features\n'''
-          if marker not in s:
-              raise SystemExit('features marker not found')
-          s = s.replace(marker, section, 1)
+Archive SHA-256:
 
-          s = s.replace('unzip Wheelchair-1.3.102.zip\ncd Wheelchair-1.3.102', 'unzip Wheelchair-1.3.111.zip\ncd Wheelchair-1.3.111')
-          s = s.replace('[current archive](./dist/Wheelchair-1.3.102.zip)', '[current archive](./dist/Wheelchair-1.3.111.zip)')
-          s = s.replace('Current limits such as Tensor\'s single runtime extent and the Field Rank-8/four-logical-VREG representation remain explicit. Instance-sized storage does not imply unrestricted execution support.', 'Current frontiers such as Tensor\'s single-runtime-extent realization and Field\'s signed-dword coordinate/stride/span geometry remain explicit. Field rank itself is no longer a fixed-width language limit. Instance-sized storage does not imply unrestricted execution support.')
-          s = s.replace('Wheelchair-1.3.79/\n├── README.md                         # release-internal engineering notes\n├── VERSION\n├── SHA256SUMS\n├── build.sh\n├── test.sh                           # current release verification entry\n├── TESTING_1_3_79.md\n├── RELEASE_NOTES_1_3_79.md\n├── WHEELCHAIR_CHARTER_1_3_78.md\n├── PURE_ASSEMBLY_RELEASE_PROOF_1_3_78.md\n├── PRODUCTION_BIN_SHA256_1_3_79.txt', 'Wheelchair-1.3.111/\n├── README.md                         # release-internal engineering notes\n├── VERSION\n├── SHA256SUMS\n├── build.sh\n├── test.sh                           # current release verification entry\n├── TESTING_1_3_111.md\n├── RELEASE_NOTES_1_3_111.md\n├── WHEELCHAIR_CHARTER_1_3_111.md\n├── PURE_ASSEMBLY_RELEASE_PROOF_1_3_111.md\n├── PRODUCTION_BIN_SHA256_1_3_111.txt')
+```text
+e569f0b4c988467658402561f4b993325d9727dc4e59e61322d247591b079bf1
+```'''
+          new='''> Current release: **1.3.111**  
+> Target: **Linux x86-64, static ELF64**  
+> Source surfaces: **WH (`.wh`)** and **WHEX (`.whex`)**  
+> [Download Wheelchair 1.3.111](./dist/Wheelchair-1.3.111.zip)
 
-          landmark_anchor = '| **1.3.96–1.3.97** | General scalar Physical Reality absorbed the wide scalar register file, removed fixed candidate/resident cliffs, and then erased proved whole-generation next-to-old state transport without adding workload-specific scheduling. |'
-          landmark_new = landmark_anchor + '''\n| **1.3.103–1.3.104** | Dead StateFact authority reuse and program-derived capacity aging removed redundant transport and several historical fixed-capacity walls without introducing scheduler or workload routes. |\n| **1.3.105–1.3.109** | `PrecisionFact(P)` replaced packed precision identity; Rank-N high precision absorbed Local Propagation, exact decimal ingress, scalar series quotients, redundant geometry scans, and obsolete carrier helpers while retaining one Strict/RNE authority. |\n| **1.3.110** | Field rank became a runtime/AOT RankFact rather than `rank <= 8`; fixed `extent[8]/stride[8]`, fixed access-delta width, and `r1..r8` runtime families disappeared. |\n| **1.3.111** | Big/big Rank-N division uses compact u32 digits, exact live object spans replace the `512*N+4096` envelope, and quotient high-water facts feed the existing closure without rediscovery. |'''
-          if landmark_anchor in s and '| **1.3.111** |' not in s:
-              s = s.replace(landmark_anchor, landmark_new, 1)
+Archive SHA-256:
 
+```text
+e05a66e4f586c4fcb3a6b1e10b379f1ecfddbcff0392ab34773d91800000957d
+```'''
+          if old not in s: raise SystemExit('stale release block not found')
+          s=s.replace(old,new,1)
+          marker='\n---\n\n## Features\n'
+          current='''
+---
+
+## Current release: 1.3.111
+
+Wheelchair 1.3.111 continues the same convergence direction instead of adding another numerical backend. For `P > 64`, high precision remains one Rank-N / PrecisionFact system. Big/big division now uses real base-2^32 `u32` recurrence digits, reuses its existing quotient high-water fact at the single Strict/RNE closure, and no longer pays for zero-extended qword slots. The historical `512*N+4096` object envelope is removed: PrecisionFact plus the existing Fourier TypePhysicalFact geometry derives the live add/mul/div span.
+
+Across the retained 4096-262144-bit A/B set, direct big/big division measured about **1.17x-1.34x** faster than 1.3.110. `sqrt`, which consumes that division path, improves about **1.10x** at 4096 bits and **1.16x** at 8192 bits. Correct experiments that regressed physical performance were removed rather than retained as alternate paths.
+
+The preceding 1.3.110 release also removed Field's historical semantic Rank-8 ceiling. `WHFLD217` carries one `u64` RankFact followed by exactly `rank` extent and stride facts; Surface, canonical Field metadata, AddressFact deltas, and runtime tables derive axis storage from that same RankFact. Native256 and Native512 use one runtime-rank address relation. Old `WHFLD216` input is rejected rather than translated. Rank 9, 17, and 33 execute through the same production path.
+
+No named-width high-precision backend, precision selector, workload route, JIT, kernel-offload surface, scheduler, worker pool, source-visible parallel directive, or old-format compatibility reader is added.
+
+## Features
+'''
+          if marker not in s: raise SystemExit('features marker not found')
+          s=s.replace(marker,current,1)
+          s=s.replace('unzip Wheelchair-1.3.102.zip\ncd Wheelchair-1.3.102','unzip Wheelchair-1.3.111.zip\ncd Wheelchair-1.3.111',1)
+          s=s.replace('[current archive](./dist/Wheelchair-1.3.102.zip)','[current archive](./dist/Wheelchair-1.3.111.zip)',1)
+          s=s.replace("Current limits such as Tensor's single runtime extent and the Field Rank-8/four-logical-VREG representation remain explicit. Instance-sized storage does not imply unrestricted execution support.","Current frontiers such as Tensor's single-runtime-extent realization and Field's signed-dword coordinate/stride/span geometry remain explicit. Field rank itself is no longer a fixed-width language limit. Instance-sized storage does not imply unrestricted execution support.",1)
+          anchor='| **1.3.96–1.3.97** | General scalar Physical Reality absorbed the wide scalar register file, removed fixed candidate/resident cliffs, and then erased proved whole-generation next-to-old state transport without adding workload-specific scheduling. |'
+          rows=anchor+'''\n| **1.3.103–1.3.104** | Program-derived capacity aging removed redundant transport and historical fixed-capacity walls without adding scheduler or workload routes. |
+| **1.3.105–1.3.109** | PrecisionFact and Local Propagation aged Rank-N high precision: exact decimal ingress, scalar series quotients, geometry reuse, and dead carrier work converged around one Strict/RNE authority. |
+| **1.3.110** | Field rank became a RankFact rather than `rank <= 8`; fixed axis tables and `r1..r8` runtime families disappeared. |
+| **1.3.111** | Big/big Rank-N division uses compact u32 digits, exact live object spans replace the old envelope, and quotient high-water facts feed the existing closure without rediscovery. |'''
+          if anchor in s and '| **1.3.111** |' not in s: s=s.replace(anchor,rows,1)
           p.write_text(s)
           PY
           grep -q 'Current release: \*\*1.3.111\*\*' README.md
@@ -78,7 +102,7 @@ jobs:
           ! grep -q 'Current release: \*\*1.3.102\*\*' README.md
           ! grep -q 'Field Rank-8/four-logical-VREG representation remain explicit' README.md
 
-      - name: Commit synchronized source
+      - name: Commit source and tag
         shell: bash
         run: |
           set -euo pipefail
@@ -87,7 +111,6 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A main README.md .github
-          git diff --cached --check
           git commit -m 'Update main to Wheelchair 1.3.111'
           git tag -a v1.3.111 -m 'Wheelchair 1.3.111'
           git push origin HEAD:main
@@ -99,10 +122,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          src=/tmp/wheelchair-1.3.111/Wheelchair-1.3.111
+          notes=/tmp/wc111/Wheelchair-1.3.111/RELEASE_NOTES_1_3_111.md
           if gh release view v1.3.111 >/dev/null 2>&1; then
-            gh release edit v1.3.111 --title 'Wheelchair 1.3.111' --notes-file "$src/RELEASE_NOTES_1_3_111.md" --latest
+            gh release edit v1.3.111 --title 'Wheelchair 1.3.111' --notes-file "$notes" --latest
             gh release upload v1.3.111 dist/Wheelchair-1.3.111.zip dist/Wheelchair-1.3.111.zip.sha256 --clobber
           else
-            gh release create v1.3.111 dist/Wheelchair-1.3.111.zip dist/Wheelchair-1.3.111.zip.sha256 --title 'Wheelchair 1.3.111' --notes-file "$src/RELEASE_NOTES_1_3_111.md" --latest
+            gh release create v1.3.111 dist/Wheelchair-1.3.111.zip dist/Wheelchair-1.3.111.zip.sha256 --title 'Wheelchair 1.3.111' --notes-file "$notes" --latest
           fi
