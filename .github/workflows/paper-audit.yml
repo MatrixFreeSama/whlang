@@ -1,0 +1,12 @@
+name: paper-audit
+on:
+  push:
+    paths: ['.github/workflows/paper-audit.yml']
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          unzip -q dist/Wheelchair-1.3.127.zip -d /tmp/w127
+          find /tmp/w127 -type f | grep -Ei 'bench|fsi|level|plastic|mandel|mini|traffic' | head -300
