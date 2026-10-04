@@ -1,0 +1,7 @@
+workload,implementation,compile_ms,returncode,stderr
+miniAMR_27point,Wheelchair_1.3.127_strict_native256,0.956772,0,
+miniAMR_27point,GCC_C_strict_v3,398.099162,0,
+miniAMR_27point,GFortran_strict_v3,6267.145121,0,
+miniFE_heat21,Wheelchair_1.3.127_strict_native256,0.792628,0,
+miniFE_heat21,GCC_C_strict_v3,99.341102,0,
+miniFE_heat21,GFortran_strict_v3,104.346217,0,
