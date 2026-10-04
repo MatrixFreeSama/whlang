@@ -8,22 +8,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: |
-          set +e
-          lscpu | grep -E 'Model name|Flags' || true
-          rm -rf /tmp/w127n
-          unzip -q dist/Wheelchair-1.3.127.zip -d /tmp/w127n
-          W=/tmp/w127n/Wheelchair-1.3.127
-          chmod +x "$W/bin/topologyc-native256"
-          cd "$W"
-          for spec in \
-            'mass3:devtrash/benchmarks/math_generalization_1344/mass3.wh' \
-            'plasticity:devtrash/benchmarks/localized_plasticity_13127/plasticity.whex' \
-            'levelset:devtrash/benchmarks/levelset_regionset_13126/levelset_two_regions.whex'; do
-            name="${spec%%:*}"
-            src="${spec#*:}"
-            echo "=== $name ==="
-            ./bin/topologyc-native256 "$src" -o "/tmp/$name-native256"
-            echo "rc=$?"
-            file "/tmp/$name-native256" 2>/dev/null || true
-            if [ -x "/tmp/$name-native256" ]; then taskset -c 0 "/tmp/$name-native256" 1000 | head -5; echo "run_rc=${PIPESTATUS[0]}"; fi
+          set -e
+          rm -rf /tmp/w127proto
+          unzip -q dist/Wheelchair-1.3.127.zip -d /tmp/w127proto
+          W=/tmp/w127proto/Wheelchair-1.3.127
+          for d in \
+            "$W/devtrash/benchmarks/localized_plasticity_13127" \
+            "$W/devtrash/benchmarks/levelset_regionset_13126"; do
+            echo "===== DIRECTORY: $d ====="
+            find "$d" -maxdepth 1 -type f -printf '%f\n' | sort
+            for f in "$d"/README.md "$d"/*.py "$d"/*.sh; do
+              [ -f "$f" ] || continue
+              echo "===== FILE: $f ====="
+              sed -n '1,320p' "$f"
+            done
           done
