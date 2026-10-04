@@ -1,9 +1,9 @@
-# Wheelchair 1.3.127 cross-mechanism paper pilot
+# Wheelchair 1.3.127 cross-mechanism exploratory pilot
+
+> **Not a paper main table.** The retained Field JSONs in this first expansion run declared `floating_point: tolerant`, while the GCC/GFortran controls were compiled with Strict flags. The measurements are retained as experiment history, but no speedup from this table is used as a Strict apples-to-apples claim. The corrected Strict table is `../field_strict_reference_20261005/RESULTS.md`.
 
 Frozen compiler: `Wheelchair 1.3.127`. This expansion batch uses native256 with x86-64-v3 C/Fortran controls throughout. The retained high-entropy case is excluded here because its frozen whexc launcher has path-dependent admission under relocation; the compiler is not modified to make the paper harness accept it.
 All timed processes are pinned to logical CPU `0`; C/Fortran OpenMP controls use one thread. Each implementation receives one warm-up and `15` interleaved measured repetitions.
-
-This table deliberately mixes wins and losses only across workloads run on this same hosted runner. It is pilot evidence, not the final fixed-machine submission table.
 
 | mechanism/workload | implementation | median ms | MAD ms | time/C | speedup/C | checksum rel. error vs C |
 |---|---|---:|---:|---:|---:|---:|
@@ -16,6 +16,7 @@ This table deliberately mixes wins and losses only across workloads run on this 
 
 ## Interpretation guardrails
 
+- This table is retained specifically to document the contract mismatch discovered during hardening; it is superseded for paper claims by the Strict/reference rerun.
 - The retained high-entropy 1.3.102 witness is not included in this fresh batch because relocated frozen-package admission differs from repository-root admission. That coverage issue is recorded rather than repaired for publication.
 - `miniAMR_27point` and `miniFE_heat21` are established public simulation kernels; the same generated WHFLD217 bytes are consumed by Wheelchair, C, and Fortran.
 - Deep periodic CoordinateFact is not forced into this native256 batch because the frozen topologyc-native256 entry rejects the retained d23/d40 sources; it is reserved for a separate native whexc/ISA-matched table.
