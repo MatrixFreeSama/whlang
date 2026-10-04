@@ -1,4 +1,4 @@
-name: Sync Wheelchair 1.3.126
+name: sync-wheelchair-1.3.126
 
 on:
   push:
@@ -15,76 +15,85 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
 
-      - name: Verify archive
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd dist
-          sha256sum -c Wheelchair-1.3.126.zip.sha256
-
-      - name: Materialize versionless production main
-        shell: bash
-        run: |
-          set -euo pipefail
-          archive="$GITHUB_WORKSPACE/dist/Wheelchair-1.3.126.zip"
-          unpack="$(mktemp -d)"
-          unzip -q "$archive" -d "$unpack"
-          src="$(find "$unpack" -mindepth 1 -maxdepth 1 -type d -name 'Wheelchair-*' -print -quit)"
-          staging="$(mktemp -d)"
-          mkdir -p "$staging/main"
-          cp -a "$src/bin" "$staging/main/"
-          cp -a "$src/compiler" "$staging/main/"
-          cp -a "$src/runtime" "$staging/main/"
-          cp -a "$src/surface" "$staging/main/"
-          cp -a "$src/tools" "$staging/main/"
-          cp -a "$src/build.sh" "$staging/main/"
-          cp -a "$src/README.md" "$staging/main/"
-          mkdir -p main
-          rsync -a --delete "$staging/main/" main/
-
-      - name: Update repository README
-        shell: python
-        run: |
-          from pathlib import Path
-
-          p = Path("README.md")
-          s = p.read_text(encoding="utf-8")
-          s = s.replace("> Current release: **1.3.112**", "> Current release: **1.3.126**", 1)
-          s = s.replace("[Download Wheelchair 1.3.112](./dist/Wheelchair-1.3.112.zip)", "[Download Wheelchair 1.3.126](./dist/Wheelchair-1.3.126.zip)", 1)
-          s = s.replace("c979e7486d931d9608b6aa99adad2f508fca77457477663ac000a4fe14c667ef", "d2ed180aa9825761b2d3237fa0c4142147b482930bd26b09c32b25b46c2a9f9f", 1)
-          start = s.index("## Current release: 1.3.112")
-          end = s.index("## Features", start)
-          current = '''## Current release: 1.3.126
-
-Wheelchair 1.3.126 replaces the previous single-interval `[lo, hi)` SupportFact with one source-derived canonical `RegionSet`. Support is no longer forced through a bounded interval approximation: ADD/SUB compose support by region union, the runtime canonicalizes those regions by sorting and merging while deleting empty pieces, and Physical Reality reprices only the work that survives. The legacy interval backend is deleted rather than retained as a compatibility route.
-
-Strict reduction keeps the existing canonical reduction tree. Regions proved dead collapse to exact `+0`; surviving regions retain the same Strict ordering and closure semantics. No workload-name dispatch, fixed element-count threshold, scheduler family, JIT path, kernel-offload route, or source-visible parallel construct is introduced. The change is a general support representation inside the existing Rank-N / Physical DAG architecture.
-
-On the retained Level-Set workload, the 8M case moves from **7.236 ms in 1.3.125 to 0.939 ms in 1.3.126 (7.70x)**. The 1.3.126 size curve is **0.813 / 0.776 / 0.848 ms** at 4M / 8M / 16M, and the four-core measurement is **0.911 ms** versus **6.357 ms** for the native C OpenMP control on the same experiment. All **36/36** retained gates pass. The speedup comes from representing and deleting disconnected support directly instead of inflating it into one coarse interval.
-
-'''
-          p.write_text(s[:start] + current + s[end:], encoding="utf-8")
-
-      - name: Commit synchronized tree
-        shell: bash
-        run: |
-          set -euo pipefail
-          git rm .github/workflows/sync-wheelchair-1.3.126.yml
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A README.md main .github/workflows/sync-wheelchair-1.3.126.yml
-          git commit -m 'Sync README and production main to Wheelchair 1.3.126'
-          git push origin HEAD:main
-
-      - name: Publish release
+      - name: Sync README, release, and production main
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          cat > /tmp/release.md <<'EOF'
+
+          archive="dist/Wheelchair-1.3.126.zip"
+          checksum="d2ed180aa9825761b2d3237fa0c4142147b482930bd26b09c32b25b46c2a9f9f"
+          echo "$checksum  $archive" | sha256sum -c -
+
+          work="$RUNNER_TEMP/wheelchair-1.3.126"
+          rm -rf "$work"
+          mkdir -p "$work"
+          unzip -q "$archive" -d "$work"
+          src="$work/Wheelchair-1.3.126"
+
+          test -f "$src/README.md"
+          test -f "$src/build.sh"
+          test -d "$src/bin"
+          test -d "$src/compiler"
+          test -d "$src/runtime"
+          test -d "$src/surface"
+          test -d "$src/tools"
+
+          rm -rf main/bin main/compiler main/runtime main/surface main/tools
+          cp -a "$src/bin" main/bin
+          cp -a "$src/compiler" main/compiler
+          cp -a "$src/runtime" main/runtime
+          cp -a "$src/surface" main/surface
+          cp -a "$src/tools" main/tools
+          cp -a "$src/build.sh" main/build.sh
+          cp -a "$src/README.md" main/README.md
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('README.md')
+          s = p.read_text(encoding='utf-8')
+          s = s.replace('> Current release: **1.3.112**', '> Current release: **1.3.126**', 1)
+          s = s.replace('[Download Wheelchair 1.3.112](./dist/Wheelchair-1.3.112.zip)', '[Download Wheelchair 1.3.126](./dist/Wheelchair-1.3.126.zip)', 1)
+          s = s.replace('c979e7486d931d9608b6aa99adad2f508fca77457477663ac000a4fe14c667ef', 'd2ed180aa9825761b2d3237fa0c4142147b482930bd26b09c32b25b46c2a9f9f', 1)
+
+          start = s.index('## Current release: 1.3.112')
+          end = s.index('## Features', start)
+          current = '\n'.join([
+              '## Current release: 1.3.126',
+              '',
+              'Wheelchair 1.3.126 replaces the previous single-interval `[lo, hi)` SupportFact with one source-derived canonical `RegionSet`. Support is no longer forced through a bounded interval approximation: ADD/SUB compose support by region union, runtime canonicalization sorts and merges those regions while deleting empty pieces, and Physical Reality reprices only the work that survives. The legacy interval backend is deleted rather than retained as a compatibility route.',
+              '',
+              'Strict reduction keeps the existing canonical reduction tree. Regions proved dead collapse to exact `+0`; surviving regions retain the same Strict ordering and closure semantics. No workload-name dispatch, fixed element-count threshold, scheduler family, JIT path, kernel-offload route, or source-visible parallel construct is introduced. The change is a general support representation inside the existing Rank-N / Physical DAG architecture.',
+              '',
+              'On the retained Level-Set workload, the 8M case moves from **7.236 ms in 1.3.125 to 0.939 ms in 1.3.126 (7.70x)**. The 1.3.126 size curve is **0.813 / 0.776 / 0.848 ms** at 4M / 8M / 16M, and the four-core measurement is **0.911 ms** versus **6.357 ms** for the native C OpenMP control on the same experiment. All **36/36** retained gates pass. The speedup comes from representing and deleting disconnected support directly instead of inflating it into one coarse interval.',
+              '',
+              '',
+          ])
+          s = s[:start] + current + s[end:]
+
+          s = s.replace('unzip Wheelchair-1.3.112.zip', 'unzip Wheelchair-1.3.126.zip')
+          s = s.replace('cd Wheelchair-1.3.112', 'cd Wheelchair-1.3.126')
+          s = s.replace('[current archive](./dist/Wheelchair-1.3.112.zip)', '[current archive](./dist/Wheelchair-1.3.126.zip)')
+
+          row112 = '| **1.3.112** | Program-level `tolerance N` becomes one conservative `ToleranceFact` for `P > 64` Rank-N convergent mathematics; Strict/RNE primitive arithmetic remains the only high-precision arithmetic authority. |'
+          row126 = '| **1.3.126** | Canonical unbounded `RegionSet` replaces coarse single-interval support; disconnected dead support is deleted before physical realization while Strict reduction structure is preserved. |'
+          if row126 not in s:
+              if row112 not in s:
+                  raise SystemExit('1.3.112 landmark row not found')
+              s = s.replace(row112, row112 + '\n' + row126, 1)
+
+          assert '> Current release: **1.3.126**' in s
+          assert './dist/Wheelchair-1.3.126.zip' in s
+          assert '## Current release: 1.3.126' in s
+          assert row126 in s
+          p.write_text(s, encoding='utf-8')
+          PY
+
+          cat > "$RUNNER_TEMP/release-1.3.126.md" <<'EOF'
           # Wheelchair 1.3.126
 
           1.3.126 replaces the single `[lo, hi)` SupportFact with one source-derived canonical `RegionSet`.
@@ -104,9 +113,13 @@ On the retained Level-Set workload, the 8M case moves from **7.236 ms in 1.3.125
 
           SHA-256: `d2ed180aa9825761b2d3237fa0c4142147b482930bd26b09c32b25b46c2a9f9f`
           EOF
-          gh release create v1.3.126 \
-            dist/Wheelchair-1.3.126.zip \
-            dist/Wheelchair-1.3.126.zip.sha256 \
-            --target main \
-            --title 'Wheelchair 1.3.126' \
-            --notes-file /tmp/release.md
+
+          rm -f .github/workflows/sync-wheelchair-1.3.126.yml
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Sync Wheelchair 1.3.126 README release and production main"
+          git push origin HEAD:main
+
+          gh release create v1.3.126 "$archive" "dist/Wheelchair-1.3.126.zip.sha256" --target main --title "Wheelchair 1.3.126" --notes-file "$RUNNER_TEMP/release-1.3.126.md"
