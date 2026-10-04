@@ -16,12 +16,12 @@ Wheelchair targets the same broad numerical-computing territory as C and Fortran
 > Current release: **1.3.128**  
 > Target: **Linux x86-64, static ELF64**  
 > Source surfaces: **WH (`.wh`)** and **WHEX (`.whex`)**  
-> [Download Wheelchair 1.3.127](./dist/Wheelchair-1.3.128.zip)
+> [Download Wheelchair 1.3.128](./dist/Wheelchair-1.3.128.zip)
 
 Archive SHA-256:
 
 ```text
-e4b7090a48f5751748fb0eaf6e072c0874939f5bc76a8b4f4ceb252b1847bfeb
+b3e898ffe0d2c24bdbfa56adb5031dba792989ebff04f4fddef334ac0251deba
 ```
 
 ---
