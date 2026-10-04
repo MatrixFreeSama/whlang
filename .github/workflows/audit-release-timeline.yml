@@ -1,0 +1,36 @@
+name: audit-release-timeline
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/audit-release-timeline.yml
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Audit dist against releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          find dist -maxdepth 1 -type f -name 'Wheelchair-*.zip' -printf '%f\n' \
+            | sed -E 's/^Wheelchair-(.*)\.zip$/\1/' | sort -V -u > /tmp/dist.txt
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[].tag_name' \
+            | sed -E 's/^v//' | sort -V -u > /tmp/releases.txt
+          echo '=== DIST VERSIONS ==='
+          cat /tmp/dist.txt
+          echo '=== RELEASE VERSIONS ==='
+          cat /tmp/releases.txt
+          echo '=== DIST WITHOUT RELEASE ==='
+          comm -23 /tmp/dist.txt /tmp/releases.txt || true
+          echo '=== RELEASE WITHOUT DIST ==='
+          comm -13 /tmp/dist.txt /tmp/releases.txt || true
