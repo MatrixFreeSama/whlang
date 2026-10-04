@@ -8,15 +8,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: |
+          set +e
+          lscpu
           unzip -q dist/Wheelchair-1.3.127.zip -d /tmp/w127
-          R=/tmp/w127/Wheelchair-1.3.127/devtrash/benchmarks
-          for f in \
-            "$R/general_whole_episode_1316/REPORT.md" \
-            "$R/general_whole_episode_1316/README.md" \
-            "$R/real_sparse_1326/README.md" \
-            "$R/levelset_regionset_13126/README.md" \
-            "$R/localized_plasticity_13127/README.md" \
-            "$R/math_generalization_1344/build_three_kernel_threeway.sh" \
-            "$R/math_generalization_1344/run_three_kernel_threeway.py"; do
-            if [ -f "$f" ]; then echo "===== $f ====="; sed -n '1,260p' "$f"; fi
-          done
+          W=/tmp/w127/Wheelchair-1.3.127
+          chmod +x "$W/bin/wheelchairc"
+          file "$W/bin/wheelchairc"
+          ldd "$W/bin/wheelchairc" || true
+          echo '=== version from repo cwd ==='
+          "$W/bin/wheelchairc" --version
+          echo "rc=$?"
+          echo '=== version from package cwd ==='
+          cd "$W"
+          ./bin/wheelchairc --version
+          echo "rc=$?"
+          echo '=== compile from package cwd ==='
+          ./bin/wheelchairc devtrash/benchmarks/math_generalization_1344/mass3.wh -o /tmp/mass3
+          echo "rc=$?"
+          file /tmp/mass3 || true
