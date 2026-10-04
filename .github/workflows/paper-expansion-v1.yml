@@ -1,4 +1,4 @@
-name: paper-expansion-v1
+name: paper-high-entropy-isa-probe
 
 on:
   push:
@@ -10,22 +10,29 @@ permissions:
   contents: write
 
 jobs:
-  run:
+  probe:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Run cross-mechanism paper experiments
+      - name: Probe whexc ISA
         shell: bash
         run: |
           set -euo pipefail
-          python3 experiments/paper_1_3_127/run_expansion_v1.py
-          echo '=== RESULTS ==='
-          cat experiments/paper_1_3_127/expansion_v1_20261005/RESULTS.md
+          t="$RUNNER_TEMP/w127"; mkdir -p "$t"; unzip -q dist/Wheelchair-1.3.127.zip -d "$t"
+          r="$t/Wheelchair-1.3.127"
+          chmod +x "$r/bin/whexc"
+          "$r/bin/whexc" benchmarks/high_entropy_sparse_permutation_13102/perm_strict.whex -o "$RUNNER_TEMP/perm_wh"
+          echo '=== CPU FLAGS ==='; lscpu | grep -i '^Flags:' || true
+          echo '=== VECTOR ISA IN GENERATED EXECUTABLE ==='
+          objdump -D -b binary -m i386:x86-64 -Mintel "$RUNNER_TEMP/perm_wh" | grep -Eo '\b[xyz]mm[0-9]+' | sort -u | tail -n 80 || true
+          echo '=== ZMM COUNT ==='
+          objdump -D -b binary -m i386:x86-64 -Mintel "$RUNNER_TEMP/perm_wh" | grep -c 'zmm' || true
+          echo '=== YMM COUNT ==='
+          objdump -D -b binary -m i386:x86-64 -Mintel "$RUNNER_TEMP/perm_wh" | grep -c 'ymm' || true
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add experiments/paper_1_3_127/expansion_v1_20261005
           git rm .github/workflows/paper-expansion-v1.yml
-          git commit -m 'Record Wheelchair 1.3.127 cross-mechanism paper results'
+          git commit -m 'Complete high-entropy ISA probe'
           git push origin HEAD:main
