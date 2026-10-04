@@ -1,0 +1,11 @@
+program levelset_two_regions
+strict
+input n: u64 range 1024..20000000
+field x[i in n]: f64 = (cast(f64, i) - cast(f64, n) * 0.5) * 0.00000001
+field dl[i in n]: f64 = x[i] + 0.02
+field dr[i in n]: f64 = x[i] - 0.02
+field sl[i in n]: f64 = select(dl[i] * dl[i] < 0.0000000004, 0.072 * (1.0 - dl[i] * dl[i] / 0.0000000004), 0.0)
+field sr[i in n]: f64 = select(dr[i] * dr[i] < 0.0000000004, 0.072 * (1.0 - dr[i] * dr[i] / 0.0000000004), 0.0)
+field source[i in n]: f64 = sl[i] + sr[i]
+sum checksum[i in n]: f64 = source[i]
+output checksum

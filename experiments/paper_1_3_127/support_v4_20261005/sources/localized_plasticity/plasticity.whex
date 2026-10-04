@@ -1,0 +1,9 @@
+program localized_plasticity
+strict
+input n: u64 range 16384..20000000
+field x[i in n]: f64 = (cast(f64, i) - cast(f64, n) * 0.5) * 0.000001
+field over[i in n]: f64 = 50000000.0 - 12500000000000.0 * x[i] * x[i]
+field dep[i in n]: f64 = select(over[i] > 0.0, over[i] / 202000000000.0, 0.0)
+field diss[i in n]: f64 = 250000000.0 * dep[i] + 1000000000.0 * dep[i] * dep[i]
+sum checksum[i in n]: f64 = diss[i]
+output checksum
