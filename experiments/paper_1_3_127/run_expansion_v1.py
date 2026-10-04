@@ -226,40 +226,10 @@ def main():
                 },
             })
 
-        # F. Deep periodic CoordinateFact composition, retained from 1.3.124.
-        psrc = wroot / "devtrash" / "benchmarks" / "periodic_affine_aging_13124"
-        pout = source_out / "periodic_affine_aging_13124"
-        pout.mkdir()
-        for name in ("README.md", "d23.whex", "d40.whex", "affine_natural.c", "affine_natural_generic.f90", "affine_ceiling.c", "affine_ceiling_generic.f90"):
-            shutil.copy2(psrc / name, pout / name)
-        pd = bins / "periodic"
-        pd.mkdir()
-        pcommon = {
-            "GCC_C_v3": pd / "c_natural",
-            "GFortran_v3": pd / "fortran_natural",
-            "C_ceiling_v3": pd / "c_ceiling",
-            "Fortran_ceiling_v3": pd / "fortran_ceiling",
-        }
-        compile_one("periodic/GCC_C_v3", gcc_cmd(psrc / "affine_natural.c", pcommon["GCC_C_v3"]))
-        compile_one("periodic/GFortran_v3", gfortran_cmd(psrc / "affine_natural_generic.f90", pcommon["GFortran_v3"]))
-        compile_one("periodic/C_ceiling_v3", gcc_cmd(psrc / "affine_ceiling.c", pcommon["C_ceiling_v3"]))
-        compile_one("periodic/Fortran_ceiling_v3", gfortran_cmd(psrc / "affine_ceiling_generic.f90", pcommon["Fortran_ceiling_v3"]))
-
-        for depth in (23, 40):
-            wexe = pd / f"wheelchair_d{depth}"
-            compile_one(f"periodic/d{depth}/Wheelchair_1.3.127_native256",
-                        ["./bin/topologyc-native256", rel(psrc / f"d{depth}.whex", wroot), "-o", str(wexe)], cwd=wroot)
-            commands = {
-                "Wheelchair_1.3.127_native256": [str(wexe), str(PERIODIC_N)],
-                "GCC_C_v3": [str(pcommon["GCC_C_v3"]), str(PERIODIC_N), str(depth)],
-                "GFortran_v3": [str(pcommon["GFortran_v3"]), str(PERIODIC_N), str(depth)],
-                "C_ceiling_v3": [str(pcommon["C_ceiling_v3"]), str(PERIODIC_N), str(depth)],
-                "Fortran_ceiling_v3": [str(pcommon["Fortran_ceiling_v3"]), str(PERIODIC_N), str(depth)],
-            }
-            cases.append({
-                "group": "coordinatefact_periodic", "workload": f"periodic_depth_{depth}",
-                "baseline": "GCC_C_v3", "commands": commands, "env": os.environ.copy(),
-            })
+        # E2. The retained deep-periodic CoordinateFact sources are deliberately
+        # excluded from this native256 batch because the frozen topologyc-native256
+        # entry rejects them. They remain a separate whexc/ISA-matched experiment;
+        # the frozen compiler is not changed to force admission for publication.
 
         # Binary metadata after all compilation.
         seen = set()
@@ -351,7 +321,7 @@ def main():
             "", "## Interpretation guardrails", "",
             "- The retained high-entropy 1.3.102 witness is not included in this fresh batch because relocated frozen-package admission differs from repository-root admission. That coverage issue is recorded rather than repaired for publication.",
             "- `miniAMR_27point` and `miniFE_heat21` are established public simulation kernels; the same generated WHFLD217 bytes are consumed by Wheelchair, C, and Fortran.",
-            "- `periodic_depth_23/40` isolate CoordinateFact composition. The natural C/Fortran controls explicitly materialize every remap stage; the ceiling controls manually compose the affine relation and are labeled ceilings, not natural baselines.",
+            "- Deep periodic CoordinateFact is not forced into this native256 batch because the frozen topologyc-native256 entry rejects the retained d23/d40 sources; it is reserved for a separate native whexc/ISA-matched table.",
             "- No compiler source is modified by this experiment. No workload-specific branch is added.",
         ]
         (OUT / "RESULTS.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
