@@ -1,4 +1,4 @@
-name: paper-pilot-1.3.127
+name: paper-scalar-v3-1.3.127
 on:
   push:
     branches: [main]
@@ -12,15 +12,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Record runner CPU identity
-        run: |
-          lscpu | grep -E 'Architecture|Model name|CPU\(s\)|Thread|Core|Socket|L1d|L2|L3|Flags' || true
-      - name: Run ISA-normalized frozen paper pilot
-        run: python3 experiments/paper_1_3_127/run_pilot.py
+        run: lscpu
+      - name: Run scalar v3 negative controls
+        run: python3 experiments/paper_1_3_127/run_scalar_v3.py
       - name: Commit raw reproducibility record
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add experiments/paper_1_3_127
+          git add experiments/paper_1_3_127/scalar_v3_20261005
           git rm .github/workflows/paper-audit.yml .github/workflows/paper-pilot.yml
-          git commit -m 'Record Wheelchair 1.3.127 paper pilot results'
+          git commit -m 'Record Wheelchair 1.3.127 scalar v3 paper results'
           git push origin HEAD:main
