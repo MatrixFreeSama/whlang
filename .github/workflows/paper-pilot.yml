@@ -14,7 +14,7 @@ jobs:
       - name: Record runner CPU identity
         run: |
           lscpu | grep -E 'Architecture|Model name|CPU\(s\)|Thread|Core|Socket|L1d|L2|L3|Flags' || true
-      - name: Run frozen paper pilot
+      - name: Run ISA-normalized frozen paper pilot
         run: python3 experiments/paper_1_3_127/run_pilot.py
       - name: Commit raw reproducibility record
         run: |
