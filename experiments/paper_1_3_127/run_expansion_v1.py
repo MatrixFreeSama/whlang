@@ -50,9 +50,8 @@ def unpack_127(work):
     if not root.is_dir():
         dirs = [p for p in dest.iterdir() if p.is_dir()]
         root = dirs[0] if len(dirs) == 1 else dest
-    for name in ("topologyc-native256", "fieldc-native256", "whexc", "fieldc"):
-        p = root / "bin" / name
-        if p.exists():
+    for p in (root / "bin").iterdir():
+        if p.is_file():
             p.chmod(p.stat().st_mode | 0o111)
     return root
 
