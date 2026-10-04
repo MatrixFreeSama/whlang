@@ -62,9 +62,9 @@ SRC127, WH127 = extract("1.3.127")
 SRC126, WH126 = extract("1.3.126")
 
 
-def compiler_version(cmd):
+def compiler_version(cmd, cwd):
     for arg in ("--version", "-V", "-v"):
-        cp = sh([str(cmd), arg], check=False)
+        cp = sh([str(cmd), arg], cwd=cwd, check=False)
         text = (cp.stdout + cp.stderr).strip()
         if text:
             return text[:2000]
@@ -79,20 +79,20 @@ env_text.append(f"python={sys.version}\n")
 env_text.append(f"platform={platform.platform()}\n")
 for cmd in (["uname", "-a"], ["lscpu"], ["gcc", "--version"], ["gfortran", "--version"], ["ld", "--version"]):
     env_text.append(capture(cmd))
-env_text.append("Wheelchair 1.3.127 compiler:\n" + compiler_version(WH127) + "\n")
-env_text.append("Wheelchair 1.3.126 compiler:\n" + compiler_version(WH126) + "\n")
+env_text.append("Wheelchair 1.3.127 compiler:\n" + compiler_version(WH127, SRC127) + "\n")
+env_text.append("Wheelchair 1.3.126 compiler:\n" + compiler_version(WH126, SRC126) + "\n")
 (OUT / "environment.txt").write_text("\n".join(env_text), encoding="utf-8")
 
 compile_rows = []
 
 
-def compile_one(label, cmd, optional=False):
+def compile_one(label, cmd, optional=False, cwd=None):
     t0 = time.perf_counter_ns()
-    cp = sh(cmd, check=False)
+    cp = sh(cmd, cwd=cwd, check=False)
     ms = (time.perf_counter_ns() - t0) / 1e6
-    compile_rows.append([label, ms, cp.returncode, cp.stdout.strip(), cp.stderr.strip(), " ".join(map(str, cmd))])
+    compile_rows.append([label, ms, cp.returncode, cp.stdout.strip(), cp.stderr.strip(), str(cwd or ""), " ".join(map(str, cmd))])
     if cp.returncode != 0 and not optional:
-        raise RuntimeError(f"compile failed: {label}\n{cp.stdout}\n{cp.stderr}")
+        raise RuntimeError(f"compile failed ({cp.returncode}): {label}\n{cp.stdout}\n{cp.stderr}")
     return cp.returncode == 0
 
 
@@ -120,7 +120,7 @@ for kernel in ("mass3", "chem6", "rigid7"):
     wh = kd / "wheelchair"
     cc = kd / "c"
     ff = kd / "fortran"
-    compile_one(f"general/{kernel}/Wheelchair_1.3.127", [str(WH127), str(gdir / f"{kernel}.wh"), "-o", str(wh)])
+    compile_one(f"general/{kernel}/Wheelchair_1.3.127", [str(WH127), str(gdir / f"{kernel}.wh"), "-o", str(wh)], cwd=SRC127)
     compile_one(f"general/{kernel}/GCC_C", gcc_cmd(gdir / f"{kernel}.c", cc))
     compile_one(f"general/{kernel}/GFortran", gfortran_cmd(gdir / f"{kernel}.f90", ff))
     cases.append({"group":"general_negative", "workload":kernel, "arg":GENERAL_STEPS,
@@ -136,9 +136,9 @@ pb = BUILD / "plasticity"
 pb.mkdir()
 impls = {}
 impls["Wheelchair_1.3.127"] = pb / "wheelchair_127"
-compile_one("plasticity/Wheelchair_1.3.127", [str(WH127), str(pdir / "plasticity.whex"), "-o", str(impls["Wheelchair_1.3.127"])])
+compile_one("plasticity/Wheelchair_1.3.127", [str(WH127), str(pdir / "plasticity.whex"), "-o", str(impls["Wheelchair_1.3.127"])], cwd=SRC127)
 impls["Wheelchair_1.3.126"] = pb / "wheelchair_126"
-if not compile_one("plasticity/Wheelchair_1.3.126", [str(WH126), str(pdir / "plasticity.whex"), "-o", str(impls["Wheelchair_1.3.126"])], optional=True):
+if not compile_one("plasticity/Wheelchair_1.3.126", [str(WH126), str(pdir / "plasticity.whex"), "-o", str(impls["Wheelchair_1.3.126"])], optional=True, cwd=SRC126):
     impls.pop("Wheelchair_1.3.126")
 impls["GCC_C"] = pb / "c"
 impls["GFortran"] = pb / "fortran"
@@ -165,7 +165,7 @@ limpls = {
     "C_ceiling": lb / "c_ceiling",
     "Fortran_ceiling": lb / "fortran_ceiling",
 }
-compile_one("levelset/Wheelchair_1.3.127", [str(WH127), str(ldir / "levelset_two_regions.whex"), "-o", str(limpls["Wheelchair_1.3.127"])])
+compile_one("levelset/Wheelchair_1.3.127", [str(WH127), str(ldir / "levelset_two_regions.whex"), "-o", str(limpls["Wheelchair_1.3.127"])], cwd=SRC127)
 compile_one("levelset/GCC_C", gcc_cmd(ldir / "levelset.c", limpls["GCC_C"]))
 compile_one("levelset/GFortran", gfortran_cmd(ldir / "levelset.f90", limpls["GFortran"]))
 compile_one("levelset/C_ceiling", gcc_cmd(ldir / "levelset_ceiling.c", limpls["C_ceiling"]))
@@ -174,7 +174,7 @@ cases.append({"group":"support", "workload":"levelset_two_regions", "arg":DOMAIN
 
 with (OUT / "compile_log.csv").open("w", newline="", encoding="utf-8") as f:
     w = csv.writer(f)
-    w.writerow(["label", "compile_ms", "returncode", "stdout", "stderr", "command"])
+    w.writerow(["label", "compile_ms", "returncode", "stdout", "stderr", "cwd", "command"])
     w.writerows(compile_rows)
 
 
