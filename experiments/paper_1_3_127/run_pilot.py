@@ -18,6 +18,7 @@ REPS = 15
 GENERAL_STEPS = 20_000_000
 DOMAIN_N = 8_000_000
 CPU = min(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else 0
+WH_COMPILER = "./bin/topologyc-native256"
 
 
 def sh(cmd, cwd=None, check=True):
@@ -47,8 +48,10 @@ def unpack(version, work):
     else:
         dirs = [p for p in dest.iterdir() if p.is_dir()]
         root = dirs[0] if len(dirs) == 1 else dest
-    compiler = root / "bin" / "wheelchairc"
-    compiler.chmod(compiler.stat().st_mode | 0o111)
+    for name in ("wheelchairc", "topologyc-native256"):
+        p = root / "bin" / name
+        if p.exists():
+            p.chmod(p.stat().st_mode | 0o111)
     return root
 
 
@@ -57,11 +60,18 @@ def rel(path, root):
 
 
 def gcc_cmd(src, out):
-    return ["gcc", "-O3", "-march=native", "-fno-fast-math", "-ffp-contract=off", str(src), "-lm", "-o", str(out)]
+    return [
+        "gcc", "-O3", "-march=x86-64-v3", "-mtune=generic",
+        "-fno-fast-math", "-ffp-contract=off", str(src), "-lm", "-o", str(out),
+    ]
 
 
 def gfortran_cmd(src, out):
-    return ["gfortran", "-O3", "-march=native", "-fno-fast-math", "-ffp-contract=off", "-fprotect-parens", str(src), "-o", str(out)]
+    return [
+        "gfortran", "-O3", "-march=x86-64-v3", "-mtune=generic",
+        "-fno-fast-math", "-ffp-contract=off", "-fprotect-parens",
+        str(src), "-o", str(out),
+    ]
 
 
 def main():
@@ -73,6 +83,8 @@ def main():
 
     env = [
         "paper_snapshot=Wheelchair-1.3.127",
+        "isa_profile=x86-64-v3 / Wheelchair native256",
+        f"wheelchair_compiler={WH_COMPILER}",
         f"repo_commit={sh(['git', 'rev-parse', 'HEAD']).stdout.strip()}",
         f"pinned_cpu={CPU}",
         f"python={sys.version}",
@@ -104,6 +116,8 @@ def main():
         work = Path(td)
         src127 = unpack("1.3.127", work)
         src126 = unpack("1.3.126", work)
+        if not (src127 / "bin" / "topologyc-native256").exists():
+            raise RuntimeError("1.3.127 archive does not contain production topologyc-native256")
         bins = work / "bins"
         bins.mkdir()
 
@@ -117,25 +131,25 @@ def main():
             kd = bins / f"general_{kernel}"
             kd.mkdir()
             impls = {
-                "Wheelchair_1.3.127": kd / "wheelchair",
-                "GCC_C": kd / "c",
-                "GFortran": kd / "fortran",
+                "Wheelchair_1.3.127_native256": kd / "wheelchair",
+                "GCC_C_v3": kd / "c",
+                "GFortran_v3": kd / "fortran",
             }
             compile_one(
-                f"general/{kernel}/Wheelchair_1.3.127",
-                ["./bin/wheelchairc", rel(gdir / f"{kernel}.wh", src127), "-o", str(impls["Wheelchair_1.3.127"])],
+                f"general/{kernel}/Wheelchair_1.3.127_native256",
+                [WH_COMPILER, rel(gdir / f"{kernel}.wh", src127), "-o", str(impls["Wheelchair_1.3.127_native256"])],
                 cwd=src127,
             )
-            compile_one(f"general/{kernel}/GCC_C", gcc_cmd(gdir / f"{kernel}.c", impls["GCC_C"]))
-            compile_one(f"general/{kernel}/GFortran", gfortran_cmd(gdir / f"{kernel}.f90", impls["GFortran"]))
+            compile_one(f"general/{kernel}/GCC_C_v3", gcc_cmd(gdir / f"{kernel}.c", impls["GCC_C_v3"]))
+            compile_one(f"general/{kernel}/GFortran_v3", gfortran_cmd(gdir / f"{kernel}.f90", impls["GFortran_v3"]))
             cases.append({
                 "group": "general_negative", "workload": kernel, "arg": GENERAL_STEPS,
-                "impls": impls, "baseline": "GCC_C",
+                "impls": impls, "baseline": "GCC_C_v3",
             })
 
-        # B. Localized elastoplastic support. The 127 source is copied into the
-        # 126 temporary package root so the ablation changes compiler version,
-        # not source text or path semantics.
+        # B. Localized elastoplastic support. Copy the exact 1.3.127 source into
+        # the 1.3.126 temporary package root so the ablation varies compiler
+        # version only, not source text or path semantics.
         pdir = src127 / "devtrash" / "benchmarks" / "localized_plasticity_13127"
         pcopy = sources_out / "localized_plasticity"
         pcopy.mkdir()
@@ -148,62 +162,64 @@ def main():
         pd = bins / "plasticity"
         pd.mkdir()
         pimpls = {
-            "Wheelchair_1.3.127": pd / "wheelchair_127",
-            "Wheelchair_1.3.126": pd / "wheelchair_126",
-            "GCC_C": pd / "c",
-            "GFortran": pd / "fortran",
-            "C_ceiling": pd / "c_ceiling",
-            "Fortran_ceiling": pd / "fortran_ceiling",
+            "Wheelchair_1.3.127_native256": pd / "wheelchair_127",
+            "Wheelchair_1.3.126_native256": pd / "wheelchair_126",
+            "GCC_C_v3": pd / "c",
+            "GFortran_v3": pd / "fortran",
+            "C_ceiling_v3": pd / "c_ceiling",
+            "Fortran_ceiling_v3": pd / "fortran_ceiling",
         }
         compile_one(
-            "plasticity/Wheelchair_1.3.127",
-            ["./bin/wheelchairc", rel(pdir / "plasticity.whex", src127), "-o", str(pimpls["Wheelchair_1.3.127"])],
+            "plasticity/Wheelchair_1.3.127_native256",
+            [WH_COMPILER, rel(pdir / "plasticity.whex", src127), "-o", str(pimpls["Wheelchair_1.3.127_native256"])],
             cwd=src127,
         )
-        if not compile_one(
-            "plasticity/Wheelchair_1.3.126",
-            ["./bin/wheelchairc", "paper_inputs/plasticity.whex", "-o", str(pimpls["Wheelchair_1.3.126"])],
-            cwd=src126,
-            optional=True,
-        ):
-            pimpls.pop("Wheelchair_1.3.126")
-        compile_one("plasticity/GCC_C", gcc_cmd(pdir / "plasticity.c", pimpls["GCC_C"]))
-        compile_one("plasticity/GFortran", gfortran_cmd(pdir / "plasticity.f90", pimpls["GFortran"]))
-        compile_one("plasticity/C_ceiling", gcc_cmd(pdir / "plasticity_ceiling.c", pimpls["C_ceiling"]))
-        compile_one("plasticity/Fortran_ceiling", gfortran_cmd(pdir / "plasticity_ceiling.f90", pimpls["Fortran_ceiling"]))
+        if (src126 / "bin" / "topologyc-native256").exists():
+            if not compile_one(
+                "plasticity/Wheelchair_1.3.126_native256",
+                [WH_COMPILER, "paper_inputs/plasticity.whex", "-o", str(pimpls["Wheelchair_1.3.126_native256"])],
+                cwd=src126,
+                optional=True,
+            ):
+                pimpls.pop("Wheelchair_1.3.126_native256")
+        else:
+            pimpls.pop("Wheelchair_1.3.126_native256")
+        compile_one("plasticity/GCC_C_v3", gcc_cmd(pdir / "plasticity.c", pimpls["GCC_C_v3"]))
+        compile_one("plasticity/GFortran_v3", gfortran_cmd(pdir / "plasticity.f90", pimpls["GFortran_v3"]))
+        compile_one("plasticity/C_ceiling_v3", gcc_cmd(pdir / "plasticity_ceiling.c", pimpls["C_ceiling_v3"]))
+        compile_one("plasticity/Fortran_ceiling_v3", gfortran_cmd(pdir / "plasticity_ceiling.f90", pimpls["Fortran_ceiling_v3"]))
         cases.append({
             "group": "support", "workload": "localized_plasticity", "arg": DOMAIN_N,
-            "impls": pimpls, "baseline": "GCC_C",
+            "impls": pimpls, "baseline": "GCC_C_v3",
         })
 
         # C. Disconnected Level-Set / VOF support.
         ldir = src127 / "devtrash" / "benchmarks" / "levelset_regionset_13126"
         lcopy = sources_out / "levelset_regionset"
         lcopy.mkdir()
-        for name in ("levelset_two_regions.whex", "levelset.c", "levelset.f90", "levelset_ceiling.c", "levelset_ceiling.f90", "README.md"):
-            if (ldir / name).exists():
-                shutil.copy2(ldir / name, lcopy / name)
+        for name in ("levelset_two_regions.whex", "levelset.c", "levelset.f90", "levelset_ceiling.c", "levelset_ceiling.f90"):
+            shutil.copy2(ldir / name, lcopy / name)
         ld = bins / "levelset"
         ld.mkdir()
         limpls = {
-            "Wheelchair_1.3.127": ld / "wheelchair",
-            "GCC_C": ld / "c",
-            "GFortran": ld / "fortran",
-            "C_ceiling": ld / "c_ceiling",
-            "Fortran_ceiling": ld / "fortran_ceiling",
+            "Wheelchair_1.3.127_native256": ld / "wheelchair",
+            "GCC_C_v3": ld / "c",
+            "GFortran_v3": ld / "fortran",
+            "C_ceiling_v3": ld / "c_ceiling",
+            "Fortran_ceiling_v3": ld / "fortran_ceiling",
         }
         compile_one(
-            "levelset/Wheelchair_1.3.127",
-            ["./bin/wheelchairc", rel(ldir / "levelset_two_regions.whex", src127), "-o", str(limpls["Wheelchair_1.3.127"])],
+            "levelset/Wheelchair_1.3.127_native256",
+            [WH_COMPILER, rel(ldir / "levelset_two_regions.whex", src127), "-o", str(limpls["Wheelchair_1.3.127_native256"])],
             cwd=src127,
         )
-        compile_one("levelset/GCC_C", gcc_cmd(ldir / "levelset.c", limpls["GCC_C"]))
-        compile_one("levelset/GFortran", gfortran_cmd(ldir / "levelset.f90", limpls["GFortran"]))
-        compile_one("levelset/C_ceiling", gcc_cmd(ldir / "levelset_ceiling.c", limpls["C_ceiling"]))
-        compile_one("levelset/Fortran_ceiling", gfortran_cmd(ldir / "levelset_ceiling.f90", limpls["Fortran_ceiling"]))
+        compile_one("levelset/GCC_C_v3", gcc_cmd(ldir / "levelset.c", limpls["GCC_C_v3"]))
+        compile_one("levelset/GFortran_v3", gfortran_cmd(ldir / "levelset.f90", limpls["GFortran_v3"]))
+        compile_one("levelset/C_ceiling_v3", gcc_cmd(ldir / "levelset_ceiling.c", limpls["C_ceiling_v3"]))
+        compile_one("levelset/Fortran_ceiling_v3", gfortran_cmd(ldir / "levelset_ceiling.f90", limpls["Fortran_ceiling_v3"]))
         cases.append({
             "group": "support", "workload": "levelset_two_regions", "arg": DOMAIN_N,
-            "impls": limpls, "baseline": "GCC_C",
+            "impls": limpls, "baseline": "GCC_C_v3",
         })
 
         with (OUT / "compile_log.csv").open("w", newline="", encoding="utf-8") as f:
@@ -269,6 +285,7 @@ def main():
 
         lines = [
             "# Wheelchair 1.3.127 paper pilot results", "",
+            "ISA-normalized profile: `x86-64-v3 / Wheelchair native256`.",
             f"Pinned logical CPU: `{CPU}`. Measured repetitions: `{REPS}`. Whole-process wall time.", "",
             "| workload | implementation | median ms | MAD ms | time/C | speedup/C |",
             "|---|---|---:|---:|---:|---:|",
