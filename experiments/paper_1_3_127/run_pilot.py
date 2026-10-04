@@ -71,6 +71,10 @@ def compiler_version(cmd, cwd):
     return "version flag produced no text"
 
 
+def rel(src, root):
+    return os.path.relpath(src, root)
+
+
 env_text = []
 env_text.append(f"paper_snapshot=Wheelchair-1.3.127\n")
 env_text.append(f"repo_commit={sh(['git','rev-parse','HEAD']).stdout.strip()}\n")
@@ -120,7 +124,7 @@ for kernel in ("mass3", "chem6", "rigid7"):
     wh = kd / "wheelchair"
     cc = kd / "c"
     ff = kd / "fortran"
-    compile_one(f"general/{kernel}/Wheelchair_1.3.127", [str(WH127), str(gdir / f"{kernel}.wh"), "-o", str(wh)], cwd=SRC127)
+    compile_one(f"general/{kernel}/Wheelchair_1.3.127", [str(WH127), rel(gdir / f"{kernel}.wh", SRC127), "-o", str(wh)], cwd=SRC127)
     compile_one(f"general/{kernel}/GCC_C", gcc_cmd(gdir / f"{kernel}.c", cc))
     compile_one(f"general/{kernel}/GFortran", gfortran_cmd(gdir / f"{kernel}.f90", ff))
     cases.append({"group":"general_negative", "workload":kernel, "arg":GENERAL_STEPS,
@@ -136,9 +140,9 @@ pb = BUILD / "plasticity"
 pb.mkdir()
 impls = {}
 impls["Wheelchair_1.3.127"] = pb / "wheelchair_127"
-compile_one("plasticity/Wheelchair_1.3.127", [str(WH127), str(pdir / "plasticity.whex"), "-o", str(impls["Wheelchair_1.3.127"])], cwd=SRC127)
+compile_one("plasticity/Wheelchair_1.3.127", [str(WH127), rel(pdir / "plasticity.whex", SRC127), "-o", str(impls["Wheelchair_1.3.127"])], cwd=SRC127)
 impls["Wheelchair_1.3.126"] = pb / "wheelchair_126"
-if not compile_one("plasticity/Wheelchair_1.3.126", [str(WH126), str(pdir / "plasticity.whex"), "-o", str(impls["Wheelchair_1.3.126"])], optional=True, cwd=SRC126):
+if not compile_one("plasticity/Wheelchair_1.3.126", [str(WH126), rel(pdir / "plasticity.whex", SRC126), "-o", str(impls["Wheelchair_1.3.126"])], optional=True, cwd=SRC126):
     impls.pop("Wheelchair_1.3.126")
 impls["GCC_C"] = pb / "c"
 impls["GFortran"] = pb / "fortran"
@@ -165,7 +169,7 @@ limpls = {
     "C_ceiling": lb / "c_ceiling",
     "Fortran_ceiling": lb / "fortran_ceiling",
 }
-compile_one("levelset/Wheelchair_1.3.127", [str(WH127), str(ldir / "levelset_two_regions.whex"), "-o", str(limpls["Wheelchair_1.3.127"])], cwd=SRC127)
+compile_one("levelset/Wheelchair_1.3.127", [str(WH127), rel(ldir / "levelset_two_regions.whex", SRC127), "-o", str(limpls["Wheelchair_1.3.127"])], cwd=SRC127)
 compile_one("levelset/GCC_C", gcc_cmd(ldir / "levelset.c", limpls["GCC_C"]))
 compile_one("levelset/GFortran", gfortran_cmd(ldir / "levelset.f90", limpls["GFortran"]))
 compile_one("levelset/C_ceiling", gcc_cmd(ldir / "levelset_ceiling.c", limpls["C_ceiling"]))
