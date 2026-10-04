@@ -1,0 +1,125 @@
+name: field-coordinatefact-128-test
+on:
+  push:
+    paths:
+      - '.github/workflows/field-coordinatefact-128-test.yml'
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply candidate 1.3.128 aging patch
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p=Path('main/compiler/field_frontend_common_x86_64.S')
+          s=p.read_text()
+
+          old='''ff_region_delta_stack_off:.skip 4\nff_region_class_stack_off:.skip 4\nff_resident_reserved_mask:.skip 4'''
+          new='''ff_region_delta_stack_off:.skip 4\nff_region_class_stack_off:.skip 4\nff_packet_coord_stack_off:.skip 4\nff_resident_reserved_mask:.skip 4'''
+          assert old in s
+          s=s.replace(old,new,1)
+
+          old='''    mov [rip+ff_region_class_stack_off],edi\n    add edi,8                            # exact local class authority + padding\n    add edi,31\n    and edi,-32                           # preserve vector/ABI-friendly alignment\n    mov [rip+ff_cache_bytes],edi\n    test edi,edi; jz .fcg_no_cache_frame\n    call ff_emit_stack_sub; test eax,eax; jnz .fcg_bad\n    # mov dword ptr [rsp+class_off],-1 : no RegionFact has physical authority yet.\n    mov dil,0xC7; call ff_emit_u8\n    mov dil,0x84; call ff_emit_u8\n    mov dil,0x24; call ff_emit_u8\n    mov edi,dword ptr [rip+ff_region_class_stack_off]; call ff_emit_u32\n    mov edi,-1; call ff_emit_u32\n.fcg_no_cache_frame:'''
+          new='''    mov [rip+ff_region_class_stack_off],edi\n    add edi,8                            # exact local class authority + padding\n.if FIELD_LANES == 8\n    # Native256 has no spare Rank-N SIMD bank.  Give the one canonical packet\n    # CoordinateFact a compact execution-local stack carrier instead of\n    # rediscovering q->axis coordinates independently for every AddressFact.\n    add edi,31; jc .fcg_bad\n    and edi,-32\n    mov [rip+ff_packet_coord_stack_off],edi\n    mov rax,[rip+ff_common_rank]\n    shl rax,5                            # one YMM (8 x u32) per logical axis\n    jc .fcg_bad\n    add rax,8                            # cached packet-q authority\n    jc .fcg_bad\n    cmp rax,0x7fffffff\n    ja .fcg_bad\n    add edi,eax\n    jc .fcg_bad\n.else\n    mov dword ptr [rip+ff_packet_coord_stack_off],-1\n.endif\n    add edi,31; jc .fcg_bad\n    and edi,-32                           # preserve vector/ABI-friendly alignment\n    mov [rip+ff_cache_bytes],edi\n    test edi,edi; jz .fcg_no_cache_frame\n    call ff_emit_stack_sub; test eax,eax; jnz .fcg_bad\n    # mov dword ptr [rsp+class_off],-1 : no RegionFact has physical authority yet.\n    mov dil,0xC7; call ff_emit_u8\n    mov dil,0x84; call ff_emit_u8\n    mov dil,0x24; call ff_emit_u8\n    mov edi,dword ptr [rip+ff_region_class_stack_off]; call ff_emit_u32\n    mov edi,-1; call ff_emit_u32\n.if FIELD_LANES == 8\n    # mov qword ptr [rsp+packet_coord_off],-1 : no packet CoordinateFact yet.\n    mov dil,0x48; call ff_emit_u8\n    mov dil,0xC7; call ff_emit_u8\n    mov dil,0x84; call ff_emit_u8\n    mov dil,0x24; call ff_emit_u8\n    mov edi,dword ptr [rip+ff_packet_coord_stack_off]; call ff_emit_u32\n    mov edi,-1; call ff_emit_u32\n.endif\n.fcg_no_cache_frame:'''
+          assert old in s
+          s=s.replace(old,new,1)
+
+          anchor='''# Coordinate offset stack slots live after all value-cache slots.\nff_emit_coord_store:'''
+          insert='''# Materialize the execution-local canonical packet CoordinateFact arena into R8.\n# Native256 uses this carrier because architectural SIMD pressure may remove a\n# persistent Rank-N register bank; carrier scarcity must not duplicate semantics.\nff_emit_packet_coord_arena_r8:\n    mov dil,0x4C; call ff_emit_u8\n    mov dil,0x8D; call ff_emit_u8\n    mov dil,0x84; call ff_emit_u8\n    mov dil,0x24; call ff_emit_u8\n    mov edi,dword ptr [rip+ff_packet_coord_stack_off]\n    call ff_emit_u32\n    ret\n\n# Coordinate offset stack slots live after all value-cache slots.\nff_emit_coord_store:'''
+          assert anchor in s
+          s=s.replace(anchor,insert,1)
+
+          start=s.index('''    # Layout-equivalent immutable inputs share one offset identity per delta.''')
+          end=s.index('''.fcg_fast_done:''',start)
+          block=s[start:end]
+          newblock='''    # Layout-equivalent immutable inputs share one offset identity per delta.\n    # Both physical profiles now consume one canonical CoordinateFact per packet.\n    # Native512 keeps its register realization; native256 uses the execution-local\n    # packet carrier and never re-derives Rank-N coordinates per AddressFact.\n    xor r14d,r14d                       # coordinate slot\n.fcg_coord_prefetch:\n    cmp r14d,dword ptr [rip+ff_coord_count]\n    jae .fcg_fast_done\n    mov rax,[rip+ff_coord_owner_ptr]\n    mov r13d,[rax+r14*4]                # representative access\n    mov rdx,[rip+ff_access_field_ptr]\n    movzx edi,byte ptr [rdx+r13]\n    call ff_emit_mov_edi_imm\n    mov edi,r13d; call ff_emit_mov_esi_imm\n.if FIELD_LANES == 8\n    lea rdi,[rip+cg_qend]; mov esi,cg_qend_end-cg_qend; call ff_emit_bytes\n    call ff_emit_packet_coord_arena_r8; test eax,eax; jnz .fcg_bad\n.endif\n    mov edi,r13d\n    call ff_runtime_offsets_from_coords_va_for_access\n    test rax,rax; jz .fcg_bad\n    call ff_emit_call; test eax,eax; jnz .fcg_bad\n    xor r12d,r12d                       # canonical cache slot\n.fcg_coord_users:\n    cmp r12d,dword ptr [rip+ff_cache_count]\n    jae .fcg_coord_next\n    mov rax,[rip+ff_cache_owner_ptr]\n    mov r13d,[rax+r12*4]\n    mov rax,[rip+ff_access_coord_slot_ptr]\n    cmp dword ptr [rax+r13*4],r14d\n    jne .fcg_coord_user_next\n    mov rdx,[rip+ff_access_field_ptr]\n    movzx edi,byte ptr [rdx+r13]\n    call ff_emit_direct_gather; test eax,eax; jnz .fcg_bad\n    mov edi,r12d; call ff_emit_accept_helper_result; test eax,eax; jnz .fcg_bad\n.fcg_coord_user_next:\n    inc r12d\n    jmp .fcg_coord_users\n.fcg_coord_next:\n    inc r14d\n    jmp .fcg_coord_prefetch\n'''
+          s=s[:start]+newblock+s[end:]
+
+          old='''.if FIELD_LANES == 16\n    mov rdx,[rip+ff_access_field_ptr]\n    movzx edi,byte ptr [rdx+r13]\n    call ff_emit_mov_edi_imm\n    mov edi,r13d; call ff_emit_mov_esi_imm\n    mov edi,r13d\n    call ff_runtime_offsets_from_coords_va_for_access\n    test rax,rax; jz .fcg_bad\n    call ff_emit_call; test eax,eax; jnz .fcg_bad\n    mov rdx,[rip+ff_access_field_ptr]\n    movzx edi,byte ptr [rdx+r13]\n    call ff_emit_direct_gather; test eax,eax; jnz .fcg_bad\n.else\n    mov rdx,[rip+ff_access_field_ptr]\n    movzx edi,byte ptr [rdx+r13]\n    call ff_emit_mov_edi_imm\n    mov edi,r13d; call ff_emit_mov_esi_imm\n    lea rdi,[rip+cg_qend]; mov esi,cg_qend_end-cg_qend; call ff_emit_bytes\n    mov edi,r13d\n    call ff_runtime_load_va_for_access\n    test rax,rax; jz .fcg_bad\n    call ff_emit_call; test eax,eax; jnz .fcg_bad\n.endif'''
+          new='''    mov rdx,[rip+ff_access_field_ptr]\n    movzx edi,byte ptr [rdx+r13]\n    call ff_emit_mov_edi_imm\n    mov edi,r13d; call ff_emit_mov_esi_imm\n.if FIELD_LANES == 8\n    lea rdi,[rip+cg_qend]; mov esi,cg_qend_end-cg_qend; call ff_emit_bytes\n    call ff_emit_packet_coord_arena_r8; test eax,eax; jnz .fcg_bad\n.endif\n    mov edi,r13d\n    call ff_runtime_offsets_from_coords_va_for_access\n    test rax,rax; jz .fcg_bad\n    call ff_emit_call; test eax,eax; jnz .fcg_bad\n    mov rdx,[rip+ff_access_field_ptr]\n    movzx edi,byte ptr [rdx+r13]\n    call ff_emit_direct_gather; test eax,eax; jnz .fcg_bad'''
+          assert old in s
+          s=s.replace(old,new,1)
+
+          old='''.fcg_load_mutable:\n    mov rdx,[rip+ff_access_field_ptr]; movzx edi,byte ptr [rdx+rax]\n    call ff_emit_mov_edi_imm\n    mov edi,[r15+16]; call ff_emit_mov_esi_imm\n    lea rdi,[rip+cg_qend]; mov esi,cg_qend_end-cg_qend; call ff_emit_bytes\n    mov edi,[r15+16]\n    call ff_runtime_load_va_for_access\n    test rax,rax; jz .fcg_bad\n    call ff_emit_call; test eax,eax; jnz .fcg_bad\n    mov edi,[r15+4]; call ff_codegen_alias_kill\n    mov edi,[r15+4]; FF_MAP_VREG edi,rdi; xor esi,esi; call ff_emit_vmov\n    mov edi,ebx; call ff_emit_reload_residents; test eax,eax; jnz .fcg_bad\n    jmp .fcg_next'''
+          new='''.fcg_load_mutable:\n    mov r13d,[r15+16]\n    mov rdx,[rip+ff_access_field_ptr]; movzx edi,byte ptr [rdx+r13]\n    call ff_emit_mov_edi_imm\n    mov edi,r13d; call ff_emit_mov_esi_imm\n    lea rdi,[rip+cg_qend]; mov esi,cg_qend_end-cg_qend; call ff_emit_bytes\n.if FIELD_LANES == 8\n    call ff_emit_packet_coord_arena_r8; test eax,eax; jnz .fcg_bad\n.endif\n    mov edi,r13d\n    call ff_runtime_offsets_va_for_access\n    test rax,rax; jz .fcg_bad\n    call ff_emit_call; test eax,eax; jnz .fcg_bad\n    mov rdx,[rip+ff_access_field_ptr]; movzx edi,byte ptr [rdx+r13]\n    call ff_emit_direct_gather; test eax,eax; jnz .fcg_bad\n    mov edi,[r15+4]; call ff_codegen_alias_kill\n    mov edi,[r15+4]; FF_MAP_VREG edi,rdi; xor esi,esi; call ff_emit_vmov\n    mov edi,ebx; call ff_emit_reload_residents; test eax,eax; jnz .fcg_bad\n    jmp .fcg_next'''
+          assert old in s
+          s=s.replace(old,new,1)
+          p.write_text(s)
+
+          p=Path('main/runtime/field_runtime_256_x86_64.S')
+          s=p.read_text()
+          pat=r'''# One runtime-rank AVX2 address relation\. RankFact changes loop geometry, not ABI\.\n\.global field_compute_offsets_f32\nfield_compute_offsets_f32:\n.*?\n(?=\.global field_load_f32)'''
+          new=r'''# One runtime-rank AVX2 AddressFact relation.  R8 names the execution-local\n# canonical packet CoordinateFact carrier.  Register scarcity changes where the\n# fact lives, never how many times q is decomposed.  The first AddressFact for a\n# packet materializes Rank-N coordinates once; every later AddressFact consumes\n# those coordinates directly.\n.global field_compute_offsets_f32\nfield_compute_offsets_f32:\n    push rbp\n    push rbx\n    push r12\n    push r13\n    push r14\n    push r15\n    mov rbp,r8\n    test rbp,rbp\n    jz .bad_args\n    mov r12d,edi                         # field\n    mov r13d,esi                         # access\n    mov r14,rdx                          # packet q\n    cmp qword ptr [rbp],r14\n    je .Lfco8_coords_ready\n\n    # Materialize canonical logical coordinates once for this packet.\n    xor r15d,r15d\n    cmp byte ptr [rip+g_shape_pow2],1\n    je .Lfco8_coord_pow\n.Lfco8_coord_gen:\n    cmp r15d,dword ptr [rip+g_rank]\n    jae .Lfco8_coord_done\n    mov eax,r14d\n    vmovd xmm6,eax\n    vpbroadcastd ymm6,xmm6\n    vpaddd ymm6,ymm6,ymmword ptr [rip+lane8_dword]\n    mov r8,[rip+g_logical_strides_ptr]\n    mov eax,[r8+r15*4]\n    call vec_divmod_u31_8\n    vmovdqa ymm6,ymm8\n    mov r8,[rip+g_field_extents_ptr]\n    mov eax,[r8+r15*4]\n    call vec_divmod_u31_8\n    mov r9,r15\n    shl r9,5\n    vmovdqu ymmword ptr [rbp+r9+8],ymm9\n    inc r15d\n    jmp .Lfco8_coord_gen\n\n.Lfco8_coord_pow:\n    cmp r15d,dword ptr [rip+g_rank]\n    jae .Lfco8_coord_done\n    mov eax,r14d\n    vmovd xmm6,eax\n    vpbroadcastd ymm6,xmm6\n    vpaddd ymm6,ymm6,ymmword ptr [rip+lane8_dword]\n    mov r8,[rip+g_stride_shifts_ptr]\n    mov eax,[r8+r15*4]\n    vmovd xmm15,eax\n    vpbroadcastd ymm15,xmm15\n    vpsrlvd ymm11,ymm6,ymm15\n    mov r8,[rip+g_extent_masks_ptr]\n    mov eax,[r8+r15*4]\n    vmovd xmm15,eax\n    vpbroadcastd ymm15,xmm15\n    vpand ymm11,ymm11,ymm15\n    mov r9,r15\n    shl r9,5\n    vmovdqu ymmword ptr [rbp+r9+8],ymm11\n    inc r15d\n    jmp .Lfco8_coord_pow\n\n.Lfco8_coord_done:\n    mov qword ptr [rbp],r14\n\n.Lfco8_coords_ready:\n    # Each AddressFact now performs only delta/wrap/stride realization.\n    vpxor ymm7,ymm7,ymm7\n    xor r15d,r15d\n.Lfco8_realize:\n    cmp r15d,dword ptr [rip+g_rank]\n    jae .Lfco8_done\n    mov r9,r15\n    shl r9,5\n    vmovdqu ymm11,ymmword ptr [rbp+r9+8]\n    mov r8,[rip+g_spec_delta_norm_ptr]\n    mov r9,r13\n    imul r9,qword ptr [rip+g_access_delta_stride]\n    lea r9,[r9+r15*4]\n    mov eax,[r8+r9]\n    test eax,eax\n    jz .Lfco8_stride\n    vmovd xmm15,eax\n    vpbroadcastd ymm15,xmm15\n    vpaddd ymm11,ymm11,ymm15\n    mov r8,[rip+g_field_extents_ptr]\n    mov eax,[r8+r15*4]\n    vmovd xmm15,eax\n    vpbroadcastd ymm15,xmm15\n    vpcmpgtd ymm10,ymm15,ymm11\n    vpcmpeqd ymm9,ymm9,ymm9\n    vpxor ymm10,ymm10,ymm9\n    vpand ymm10,ymm10,ymm15\n    vpsubd ymm11,ymm11,ymm10\n.Lfco8_stride:\n    mov r8,[rip+g_field_strides_ptr]\n    mov r9,r12\n    imul r9,qword ptr [rip+g_axis_bytes]\n    lea r9,[r9+r15*4]\n    mov eax,[r8+r9]\n    vmovd xmm15,eax\n    vpbroadcastd ymm15,xmm15\n    vpmulld ymm11,ymm11,ymm15\n    vpaddd ymm7,ymm7,ymm11\n    inc r15d\n    jmp .Lfco8_realize\n.Lfco8_done:\n    pop r15\n    pop r14\n    pop r13\n    pop r12\n    pop rbx\n    pop rbp\n    ret\n\n'''
+          s2,n=re.subn(pat,new,s,flags=re.S)
+          assert n==1,n
+          p.write_text(s2)
+          PY
+      - name: Build all gates
+        shell: bash
+        run: |
+          cd main
+          bash build.sh | tee /tmp/build.log
+      - name: Benchmark 127 vs candidate
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import array,json,os,statistics,struct,subprocess,tempfile,time,zipfile
+          from pathlib import Path
+          ROOT=Path.cwd(); CPU=min(os.sched_getaffinity(0)); REPS=7; SIZES=(192,256)
+          def run(cmd,cwd=None):
+              cp=subprocess.run(cmd,cwd=cwd,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+              if cp.returncode: raise RuntimeError(f'{cmd}\n{cp.stdout}\n{cp.stderr}')
+              return cp
+          def timed(cmd,cwd=None):
+              t=time.perf_counter_ns(); cp=subprocess.run(['taskset','-c',str(CPU)]+cmd,cwd=cwd,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE); ms=(time.perf_counter_ns()-t)/1e6
+              if cp.returncode: raise RuntimeError(cp.stderr)
+              return ms,cp.stdout.strip()
+          def field(path,n):
+              total=n**3; h=bytearray(256); h[:8]=b'WHFLD217'; struct.pack_into('<I',h,8,2); struct.pack_into('<I',h,12,1); struct.pack_into('<Q',h,16,3); struct.pack_into('<Q',h,24,256); struct.pack_into('<Q',h,32,total)
+              for i,x in enumerate((n,n,n)): struct.pack_into('<Q',h,64+8*i,x)
+              for i,x in enumerate((n*n*4,n*4,4)): struct.pack_into('<Q',h,88+8*i,x)
+              vals=array.array('f',(((i*37+11)&4095)/4096.0 for i in range(4096))); b=vals.tobytes(); q,r=divmod(total,4096)
+              with path.open('wb') as f:
+                  f.write(h)
+                  for _ in range(q): f.write(b)
+                  if r: f.write(b[:4*r])
+          with tempfile.TemporaryDirectory() as td:
+              w=Path(td); pkg=w/'pkg'; pkg.mkdir()
+              with zipfile.ZipFile(ROOT/'dist'/'Wheelchair-1.3.127.zip') as z:z.extractall(pkg)
+              base=next(x for x in pkg.iterdir() if x.is_dir())
+              for x in (base/'bin').iterdir():
+                  if x.is_file(): x.chmod(x.stat().st_mode|0o111)
+              src=ROOT/'main'/'devtrash'/'benchmarks'/'real_sparse_1326'
+              fs={n:w/f'f{n}.whfld' for n in SIZES}
+              for n,p in fs.items(): field(p,n)
+              allrows=[]
+              for stem,label in [('miniamr27','miniAMR27'),('minife_heat21','miniFE21')]:
+                  cfg=json.loads((src/f'{stem}.json').read_text()); cfg['contracts']['floating_point']='strict'; cp=w/f'{stem}.json'; cp.write_text(json.dumps(cfg,separators=(',',':')))
+                  cand=w/f'{stem}.cand'; old=w/f'{stem}.old'; cc=w/f'{stem}.cbin'
+                  run(['./bin/fieldc-native256',str(cp),'-o',str(cand)],cwd=ROOT/'main')
+                  run(['./bin/fieldc-native256',str(cp),'-o',str(old)],cwd=base)
+                  run(['gcc','-O3','-march=x86-64-v3','-mtune=generic','-fno-fast-math','-ffp-contract=off',str(src/f'{stem}.c'),'-lm','-o',str(cc)])
+                  for n in SIZES:
+                      cmds={'127':[str(old),str(fs[n])],'128cand':[str(cand),str(fs[n])],'C':[str(cc),str(fs[n]),str(n)]}
+                      for c in cmds.values(): timed(c)
+                      rows={k:[] for k in cmds}
+                      outs={}
+                      names=list(cmds)
+                      for rep in range(REPS):
+                          order=names[rep%3:]+names[:rep%3]
+                          for k in order:
+                              ms,out=timed(cmds[k]); rows[k].append(ms); outs[k]=out
+                      med={k:statistics.median(v) for k,v in rows.items()}
+                      allrows.append((label,n,med,outs))
+              print('RESULTS_BEGIN')
+              for label,n,med,outs in allrows:
+                  print(f'{label} n={n} 127={med["127"]:.6f}ms cand={med["128cand"]:.6f}ms C={med["C"]:.6f}ms cand_vs_127={med["127"]/med["128cand"]:.3f}x cand_vs_C={med["C"]/med["128cand"]:.3f}x')
+                  print('checksums',outs)
+              print('RESULTS_END')
+          PY
