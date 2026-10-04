@@ -1,0 +1,3 @@
+workload,reference_f64,stdout
+miniAMR_27point,4330802.035350197,reference_f64=4330802.035350197
+miniFE_heat21,10587306.991015121,reference_f64=10587306.991015121
