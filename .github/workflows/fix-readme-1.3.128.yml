@@ -1,0 +1,29 @@
+name: fix-readme-1.3.128
+on:
+  push:
+    paths:
+      - '.github/workflows/fix-readme-1.3.128.yml'
+permissions:
+  contents: write
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Align README release head
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('README.md'); s=p.read_text()
+          s=s.replace('[Download Wheelchair 1.3.127](./dist/Wheelchair-1.3.128.zip)','[Download Wheelchair 1.3.128](./dist/Wheelchair-1.3.128.zip)',1)
+          s=s.replace('e4b7090a48f5751748fb0eaf6e072c0874939f5bc76a8b4f4ceb252b1847bfeb','b3e898ffe0d2c24bdbfa56adb5031dba792989ebff04f4fddef334ac0251deba',1)
+          p.write_text(s)
+          PY
+          rm -f .github/workflows/fix-readme-1.3.128.yml
+          git config user.name 'Wheelchair Release Bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add README.md .github/workflows
+          git commit -m 'Align Wheelchair 1.3.128 README checksum'
+          git push origin HEAD:main
