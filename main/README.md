@@ -1,6 +1,6 @@
-# Wheelchair 1.3.127
+# Wheelchair 1.3.128
 
-![Build](https://img.shields.io/badge/build-37%2F37%20PASS-brightgreen) ![Release](https://img.shields.io/badge/release-1.3.127-blue)
+![Build](https://img.shields.io/badge/build-37%2F37%20PASS-brightgreen) ![Release](https://img.shields.io/badge/release-1.3.128-blue)
 
 Wheelchair is an HPC- and simulation-first general-purpose AOT language built around Rank-N semantics, matrix-free execution, ValueFacts, StateFacts, AddressFacts, RegionFacts, CoordinateFacts, GroupFact, Physical Reality, Traffic Reality, Silicon Domain Graphs, and Physical DAG execution.
 
@@ -13,6 +13,12 @@ physical work / mathematical-physical lower bound -> 1
 Idle silicon is valid whenever another materialization costs more than the remaining necessary work.
 
 
+
+## 1.3.128: native256 canonical packet CoordinateFact aging
+
+The native256 generic Field realization no longer rediscovers Rank-N packet coordinates independently for every AddressFact. When SIMD register pressure cannot retain a Rank-N coordinate bank, one canonical packet CoordinateFact is materialized in compact execution-local storage and shared by all AddressFacts. The obsolete coordinate-offset stack transport and generic `field_load_f32` authority are removed rather than retained beside the new path. There is no non-power-of-two backend, extent threshold, stencil/workload matcher, JIT, scheduler, or source-visible parallel route.
+
+On the retained Strict miniAMR-27 / miniFE-21 one-CPU sweep, 1.3.128 is bit-identical to 1.3.127 at every tested size. At 192^3 the former generic-address cliff falls from **180.160 ms to 43.186 ms (4.17x)** for miniAMR-27 and from **146.466 ms to 37.644 ms (3.89x)** for miniFE-21. The matched GCC C controls are 65.734 ms and 40.101 ms respectively, so the repaired paths measure **1.52x** and **1.07x** the C throughput on that hosted-runner pilot. The 256^3 mature path also improves by **1.15x / 1.11x** over 1.3.127 rather than regressing.
 
 ## 1.3.127: SupportFact becomes an expression algebra
 

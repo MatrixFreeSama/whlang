@@ -21,7 +21,7 @@ Wheelchair targets the same broad numerical-computing territory as C and Fortran
 Archive SHA-256:
 
 ```text
-b3e898ffe0d2c24bdbfa56adb5031dba792989ebff04f4fddef334ac0251deba
+9110b357e9e5eafcd07df8751e803a7fb4f209b4332fc2b7f4e6a02e0b9ac761
 ```
 
 ---
