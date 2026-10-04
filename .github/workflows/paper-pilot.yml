@@ -11,7 +11,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Run frozen paper pilot from package roots
+      - name: Run package-relative frozen paper pilot
         run: python3 experiments/paper_1_3_127/run_pilot.py
       - name: Commit raw reproducibility record
         run: |
