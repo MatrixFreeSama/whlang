@@ -71,7 +71,8 @@ def gcc_cmd(src, out, openmp=False):
 
 def gfortran_cmd(src, out, openmp=False):
     cmd = ["gfortran", "-O3", "-march=x86-64-v3", "-mtune=generic",
-           "-fno-fast-math", "-ffp-contract=off", "-fprotect-parens"]
+           "-fno-fast-math", "-ffp-contract=off", "-fprotect-parens",
+           "-ffree-line-length-none"]
     if openmp:
         cmd.append("-fopenmp")
     cmd += [str(src), "-o", str(out)]
