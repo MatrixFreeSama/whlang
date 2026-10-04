@@ -1479,3 +1479,20 @@ echo 'SUPPORTFACT_REGIONSET_CONVERGENCE_1_3_126=PASS'
 echo 'REGIONSET_FIXED_COUNT_CLASSES=0'
 echo 'REGIONSET_WORKLOAD_MATCHER=0'
 echo 'WHEELCHAIR_1_3_126_BUILD=PASS'
+
+# 1.3.128 native256 CoordinateFact aging. Register pressure may change the
+# physical carrier but may not duplicate the semantic fact per AddressFact.
+grep -q 'ff_packet_coord_stack_off:' compiler/field_frontend_common_x86_64.S
+grep -q 'canonical packet CoordinateFact' runtime/field_runtime_256_x86_64.S
+! grep -q '^ff_emit_coord_store:' compiler/field_frontend_common_x86_64.S
+! grep -q '^ff_emit_coord_load:' compiler/field_frontend_common_x86_64.S
+! grep -q '^ff_runtime_load_va_for_access:' compiler/field_frontend_common_x86_64.S
+! grep -q '^\.global field_load_f32$' runtime/field_runtime_256_x86_64.S
+! grep -q '^\.global field_load_f32$' runtime/field_runtime_512_x86_64.S
+! grep -q 'FIELD_RUNTIME_LOAD_VA' tools/generate_field_runtime_offsets.sh compiler/field_frontend_common_x86_64.S
+! grep -RqsE 'miniamr|minife|stencil[ _-]*(route|matcher)|extent[ _-]*(threshold|class)|nonpow2[ _-]*(backend|route)' compiler runtime tools
+echo 'CANONICAL_PACKET_COORDINATEFACT_1_3_128=PASS'
+echo 'ADDRESSFACT_RUNTIME_REDERIVATION_AUTHORITY=0'
+echo 'FIELD_GENERIC_LOAD_HELPER_AUTHORITY=0'
+echo 'COORDINATE_OFFSET_STACK_TRANSPORT=0'
+echo 'WHEELCHAIR_1_3_128_BUILD=PASS'

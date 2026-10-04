@@ -13,10 +13,10 @@
 
 Wheelchair targets the same broad numerical-computing territory as C and Fortran, but it does not start from a mandatory sequential instruction stream and then try to recover parallelism afterward. Its compiler treats mathematical structure, value identity, causal dependence, precision, locality, and physical realization as first-class compile-time information.
 
-> Current release: **1.3.127**  
+> Current release: **1.3.128**  
 > Target: **Linux x86-64, static ELF64**  
 > Source surfaces: **WH (`.wh`)** and **WHEX (`.whex`)**  
-> [Download Wheelchair 1.3.127](./dist/Wheelchair-1.3.127.zip)
+> [Download Wheelchair 1.3.127](./dist/Wheelchair-1.3.128.zip)
 
 Archive SHA-256:
 
@@ -25,6 +25,10 @@ e4b7090a48f5751748fb0eaf6e072c0874939f5bc76a8b4f4ceb252b1847bfeb
 ```
 
 ---
+
+## Wheelchair 1.3.128
+
+1.3.128 ages native256 generic Field AddressFact realization into one canonical packet CoordinateFact: non-power-of-two neighborhood accesses no longer re-derive Rank-N coordinates independently. The old coordinate-offset stack transport and generic Field load helper are removed; no workload matcher, extent threshold, second backend, JIT, scheduler, or parallel DSL surface is added.
 
 ## Current release: 1.3.127 — paper snapshot
 
@@ -941,7 +945,7 @@ These milestones record changes in semantics, execution, and release verificatio
 | **1.3.111** | Big/big Rank-N division uses compact u32 digits, exact live object spans replace the old envelope, and quotient high-water facts feed the existing closure without rediscovery. |
 | **1.3.112** | Program-level `tolerance N` becomes one conservative `ToleranceFact` for `P > 64` Rank-N convergent mathematics; Strict/RNE primitive arithmetic remains the only high-precision arithmetic authority. |
 | **1.3.126** | Canonical unbounded `RegionSet` replaces coarse single-interval support; disconnected dead support is deleted before physical realization while Strict reduction structure is preserved. |
-| **1.3.127** | Paper snapshot: freezes the research baseline, makes the ValueFact/pure-arithmetic overhead an explicit negative control, and aligns archive, SHA, production `main/`, README, and Release for reproducibility. |
+| **1.3.128** | Paper snapshot: freezes the research baseline, makes the ValueFact/pure-arithmetic overhead an explicit negative control, and aligns archive, SHA, production `main/`, README, and Release for reproducibility. |
 
 The table selects turning points rather than listing every patch. Versioned benchmark results above remain observations of their original releases and hosts, not measurements of the current compiler unless explicitly labeled as the current snapshot.
 

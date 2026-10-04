@@ -26,7 +26,6 @@ va_fabric_bridge=$(need field_fabric_activation_bridge_present_patch)
 va_fabric_abi=$(need field_fabric_activation_abi_version_patch)
 va_mask=$(need field_prepare_mask_f32)
 va_offsets=$(need field_compute_offsets_f32)
-va_load=$(need field_load_f32)
 va_store=$(need field_store_f32)
 va_field_data=$(need g_field_data_ptr)
 va_field_contig=$(need g_field_contig_ptr)
@@ -73,7 +72,6 @@ cat > "$OUT" <<EOT
 .equ FIELD_RUNTIME_FABRIC_ACTIVATION_ABI_OFF, $(to_off "$va_fabric_abi")
 .equ FIELD_RUNTIME_MASK_VA, $va_mask
 .equ FIELD_RUNTIME_OFFSETS_VA, $va_offsets
-.equ FIELD_RUNTIME_LOAD_VA, $va_load
 .equ FIELD_RUNTIME_STORE_VA, $va_store
 .equ FIELD_RUNTIME_FIELD_DATA_PTR_VA, $va_field_data
 .equ FIELD_RUNTIME_FIELD_CONTIG_PTR_VA, $va_field_contig

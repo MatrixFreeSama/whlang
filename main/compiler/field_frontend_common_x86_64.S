@@ -2679,7 +2679,6 @@ ff_emit_vfma_acc_constslot:
     mov dil,0x24; call ff_emit_u8
 .endif
     mov edi,dword ptr [rip+ff_cache_count]
-    add edi,dword ptr [rip+ff_coord_count]
     add edi,r13d
     imul edi,edi,FIELD_LANES*4
     call ff_emit_u32
@@ -3180,7 +3179,6 @@ ff_emit_address_gpr_residents:
     # Native512 no longer emits coord stores/loads, so these bytes are address
     # space only, not memory traffic; removing the namespace itself belongs to a
     # later whole-frame renumbering, not a partial compatibility shim.
-    add edi,dword ptr [rip+ff_coord_count]
     add edi,dword ptr [rip+ff_const_pool_count]
     imul edi,edi,FIELD_LANES*4
     lea edi,[rdi+rbx*8]
@@ -3522,7 +3520,6 @@ ff_emit_reload_residents:
     cmp dword ptr [rax+rbx*4],r12d
     jle .ferr_const_next
     mov esi,dword ptr [rip+ff_cache_count]
-    add esi,dword ptr [rip+ff_coord_count]
     add esi,ebx
     call ff_emit_cache_load
     test eax,eax
@@ -3963,7 +3960,6 @@ ff_emit_addr_pool_init:
     mov dil,0x84; call ff_emit_u8
     mov dil,0x24; call ff_emit_u8
     mov edi,dword ptr [rip+ff_cache_count]
-    add edi,dword ptr [rip+ff_coord_count]
     add edi,dword ptr [rip+ff_const_pool_count]
     imul edi,edi,FIELD_LANES*4
     lea edi,[rdi+rbx*8]
@@ -3999,7 +3995,6 @@ ff_emit_const_pool_init:
     call ff_emit_const_real
     test eax,eax; jnz .fecpi_bad
     mov edi,dword ptr [rip+ff_cache_count]
-    add edi,dword ptr [rip+ff_coord_count]
     add edi,ebx
     call ff_emit_cache_store_simd0
     test eax,eax; jnz .fecpi_bad
@@ -4031,7 +4026,6 @@ ff_emit_const_residents:
     cmp edi,-1
     je .fecrl_next
     mov esi,dword ptr [rip+ff_cache_count]
-    add esi,dword ptr [rip+ff_coord_count]
     add esi,ebx
     call ff_emit_cache_load
     test eax,eax; jnz .fecrl_bad
@@ -4110,31 +4104,18 @@ ff_emit_field_base_rax:
     pop rbx
     ret
 
-# Coordinate offset stack slots live after all value-cache slots.
-ff_emit_coord_store:
-    add edi,dword ptr [rip+ff_cache_count]
-    imul edi,edi,FIELD_LANES*4
-    push rdi
-.if FIELD_LANES == 16
-    lea rdi,[rip+cg_coord_store512]; mov esi,cg_coord_store512_end-cg_coord_store512; call ff_emit_bytes
-.else
-    lea rdi,[rip+cg_coord_store256]; mov esi,cg_coord_store256_end-cg_coord_store256; call ff_emit_bytes
-.endif
-    pop rdi
+# Materialize the execution-local canonical packet CoordinateFact arena into R8.
+# Native256 uses this carrier because architectural SIMD pressure may remove a
+# persistent Rank-N register bank; carrier scarcity must not duplicate semantics.
+ff_emit_packet_coord_arena_r8:
+    mov dil,0x4C; call ff_emit_u8
+    mov dil,0x8D; call ff_emit_u8
+    mov dil,0x84; call ff_emit_u8
+    mov dil,0x24; call ff_emit_u8
+    mov edi,dword ptr [rip+ff_packet_coord_stack_off]
     call ff_emit_u32
     ret
-ff_emit_coord_load:
-    add edi,dword ptr [rip+ff_cache_count]
-    imul edi,edi,FIELD_LANES*4
-    push rdi
-.if FIELD_LANES == 16
-    lea rdi,[rip+cg_coord_load512]; mov esi,cg_coord_load512_end-cg_coord_load512; call ff_emit_bytes
-.else
-    lea rdi,[rip+cg_coord_load256]; mov esi,cg_coord_load256_end-cg_coord_load256; call ff_emit_bytes
-.endif
-    pop rdi
-    call ff_emit_u32
-    ret
+
 
 # Direct regular-neighborhood load. edi=field, esi=access. The current Region
 # already proves the complete vector packet is inside its stable neighborhood
@@ -4160,7 +4141,6 @@ ff_emit_addr_fact_load:
     mov dil,0x84; call ff_emit_u8
     mov dil,0x24; call ff_emit_u8
     mov edi,dword ptr [rip+ff_cache_count]
-    add edi,dword ptr [rip+ff_coord_count]
     add edi,dword ptr [rip+ff_const_pool_count]
     imul edi,edi,FIELD_LANES*4
     lea edi,[rdi+rbx*8]
@@ -5209,7 +5189,6 @@ ff_codegen:
     mov eax,dword ptr [rip+ff_address_fact_count]
     mov [rip+ff_addr_pool_count],eax
     mov edi,dword ptr [rip+ff_cache_count]
-    add edi,dword ptr [rip+ff_coord_count]
     add edi,dword ptr [rip+ff_const_pool_count]
     imul edi,edi,FIELD_LANES*4
     mov eax,dword ptr [rip+ff_addr_pool_count]
@@ -5219,7 +5198,26 @@ ff_codegen:
     lea edi,[rdi+rax*8]                  # execution-local piecewise-affine deltas
     mov [rip+ff_region_class_stack_off],edi
     add edi,8                            # exact local class authority + padding
-    add edi,31
+.if FIELD_LANES == 8
+    # Native256 has no spare Rank-N SIMD bank.  Give the one canonical packet
+    # CoordinateFact a compact execution-local stack carrier instead of
+    # rediscovering q->axis coordinates independently for every AddressFact.
+    add edi,31; jc .fcg_bad
+    and edi,-32
+    mov [rip+ff_packet_coord_stack_off],edi
+    mov rax,[rip+ff_common_rank]
+    shl rax,5                            # one YMM (8 x u32) per logical axis
+    jc .fcg_bad
+    add rax,8                            # cached packet-q authority
+    jc .fcg_bad
+    cmp rax,0x7fffffff
+    ja .fcg_bad
+    add edi,eax
+    jc .fcg_bad
+.else
+    mov dword ptr [rip+ff_packet_coord_stack_off],-1
+.endif
+    add edi,31; jc .fcg_bad
     and edi,-32                           # preserve vector/ABI-friendly alignment
     mov [rip+ff_cache_bytes],edi
     test edi,edi; jz .fcg_no_cache_frame
@@ -5230,6 +5228,15 @@ ff_codegen:
     mov dil,0x24; call ff_emit_u8
     mov edi,dword ptr [rip+ff_region_class_stack_off]; call ff_emit_u32
     mov edi,-1; call ff_emit_u32
+.if FIELD_LANES == 8
+    # mov qword ptr [rsp+packet_coord_off],-1 : no packet CoordinateFact yet.
+    mov dil,0x48; call ff_emit_u8
+    mov dil,0xC7; call ff_emit_u8
+    mov dil,0x84; call ff_emit_u8
+    mov dil,0x24; call ff_emit_u8
+    mov edi,dword ptr [rip+ff_packet_coord_stack_off]; call ff_emit_u32
+    mov edi,-1; call ff_emit_u32
+.endif
 .fcg_no_cache_frame:
     # AddressFacts are RegionFacts in 1.3.81.  Their physical deltas may change
     # when a periodic piecewise-affine region changes wrap class, so the address
@@ -5416,11 +5423,9 @@ ff_codegen:
     xor edi,edi; call ff_emit_u32
 
     # Layout-equivalent immutable inputs share one offset identity per delta.
-    # Native512 realizes that identity as a transient MachineFact in ZMM17 and
-    # consumes it immediately for every cached load that names the coordinate.
-    # The old offset-vector stack authority is deleted: CoordinateFact ->
-    # AddressFact -> LoadFact remains one uninterrupted physical chain.
-.if FIELD_LANES == 16
+    # Both physical profiles now consume one canonical CoordinateFact per packet.
+    # Native512 keeps its register realization; native256 uses the execution-local
+    # packet carrier and never re-derives Rank-N coordinates per AddressFact.
     xor r14d,r14d                       # coordinate slot
 .fcg_coord_prefetch:
     cmp r14d,dword ptr [rip+ff_coord_count]
@@ -5431,6 +5436,10 @@ ff_codegen:
     movzx edi,byte ptr [rdx+r13]
     call ff_emit_mov_edi_imm
     mov edi,r13d; call ff_emit_mov_esi_imm
+.if FIELD_LANES == 8
+    lea rdi,[rip+cg_qend]; mov esi,cg_qend_end-cg_qend; call ff_emit_bytes
+    call ff_emit_packet_coord_arena_r8; test eax,eax; jnz .fcg_bad
+.endif
     mov edi,r13d
     call ff_runtime_offsets_from_coords_va_for_access
     test rax,rax; jz .fcg_bad
@@ -5454,45 +5463,6 @@ ff_codegen:
 .fcg_coord_next:
     inc r14d
     jmp .fcg_coord_prefetch
-.else
-    # AVX2 has no spare Rank-N coordinate carrier bank. Its exact old physical
-    # realization remains, selected by ISA facts rather than compatibility mode.
-    xor r14d,r14d
-.fcg_coord_prefetch:
-    cmp r14d,dword ptr [rip+ff_coord_count]
-    jae .fcg_fast_value_prefetch
-    mov rax,[rip+ff_coord_owner_ptr]
-    mov r13d,[rax+r14*4]
-    mov rdx,[rip+ff_access_field_ptr]
-    movzx edi,byte ptr [rdx+r13]
-    call ff_emit_mov_edi_imm
-    mov edi,r13d; call ff_emit_mov_esi_imm
-    lea rdi,[rip+cg_qend]; mov esi,cg_qend_end-cg_qend; call ff_emit_bytes
-    mov edi,r13d
-    call ff_runtime_offsets_va_for_access
-    test rax,rax; jz .fcg_bad
-    call ff_emit_call; test eax,eax; jnz .fcg_bad
-    mov edi,r14d; call ff_emit_coord_store; test eax,eax; jnz .fcg_bad
-    inc r14d
-    jmp .fcg_coord_prefetch
-.fcg_fast_value_prefetch:
-    xor r14d,r14d
-.fcg_fast_value_loop:
-    cmp r14d,dword ptr [rip+ff_cache_count]
-    jae .fcg_fast_done
-    mov rax,[rip+ff_cache_owner_ptr]
-    mov r13d,[rax+r14*4]
-    mov rax,[rip+ff_access_coord_slot_ptr]
-    mov edi,[rax+r13*4]
-    call ff_emit_coord_load; test eax,eax; jnz .fcg_bad
-    mov rdx,[rip+ff_access_field_ptr]
-    movzx edi,byte ptr [rdx+r13]
-    call ff_emit_direct_gather; test eax,eax; jnz .fcg_bad
-    mov edi,r14d; call ff_emit_accept_helper_result; test eax,eax; jnz .fcg_bad
-.fcg_fast_next:
-    inc r14d
-    jmp .fcg_fast_value_loop
-.endif
 .fcg_fast_done:
     call ff_emit_materialize_helper_clobbered_residents; test eax,eax; jnz .fcg_bad
     call ff_emit_const_residents; test eax,eax; jnz .fcg_bad
@@ -5517,11 +5487,14 @@ ff_codegen:
     jae .fcg_prefetch_done
     mov rax,[rip+ff_cache_owner_ptr]
     mov r13d,[rax+r14*4]
-.if FIELD_LANES == 16
     mov rdx,[rip+ff_access_field_ptr]
     movzx edi,byte ptr [rdx+r13]
     call ff_emit_mov_edi_imm
     mov edi,r13d; call ff_emit_mov_esi_imm
+.if FIELD_LANES == 8
+    lea rdi,[rip+cg_qend]; mov esi,cg_qend_end-cg_qend; call ff_emit_bytes
+    call ff_emit_packet_coord_arena_r8; test eax,eax; jnz .fcg_bad
+.endif
     mov edi,r13d
     call ff_runtime_offsets_from_coords_va_for_access
     test rax,rax; jz .fcg_bad
@@ -5529,17 +5502,6 @@ ff_codegen:
     mov rdx,[rip+ff_access_field_ptr]
     movzx edi,byte ptr [rdx+r13]
     call ff_emit_direct_gather; test eax,eax; jnz .fcg_bad
-.else
-    mov rdx,[rip+ff_access_field_ptr]
-    movzx edi,byte ptr [rdx+r13]
-    call ff_emit_mov_edi_imm
-    mov edi,r13d; call ff_emit_mov_esi_imm
-    lea rdi,[rip+cg_qend]; mov esi,cg_qend_end-cg_qend; call ff_emit_bytes
-    mov edi,r13d
-    call ff_runtime_load_va_for_access
-    test rax,rax; jz .fcg_bad
-    call ff_emit_call; test eax,eax; jnz .fcg_bad
-.endif
     mov edi,r14d; call ff_emit_accept_helper_result; test eax,eax; jnz .fcg_bad
 .fcg_prefetch_next:
     inc r14d
@@ -5633,14 +5595,20 @@ ff_codegen:
     call ff_emit_cache_load; test eax,eax; jnz .fcg_bad
     jmp .fcg_next
 .fcg_load_mutable:
-    mov rdx,[rip+ff_access_field_ptr]; movzx edi,byte ptr [rdx+rax]
+    mov r13d,[r15+16]
+    mov rdx,[rip+ff_access_field_ptr]; movzx edi,byte ptr [rdx+r13]
     call ff_emit_mov_edi_imm
-    mov edi,[r15+16]; call ff_emit_mov_esi_imm
+    mov edi,r13d; call ff_emit_mov_esi_imm
     lea rdi,[rip+cg_qend]; mov esi,cg_qend_end-cg_qend; call ff_emit_bytes
-    mov edi,[r15+16]
-    call ff_runtime_load_va_for_access
+.if FIELD_LANES == 8
+    call ff_emit_packet_coord_arena_r8; test eax,eax; jnz .fcg_bad
+.endif
+    mov edi,r13d
+    call ff_runtime_offsets_va_for_access
     test rax,rax; jz .fcg_bad
     call ff_emit_call; test eax,eax; jnz .fcg_bad
+    mov rdx,[rip+ff_access_field_ptr]; movzx edi,byte ptr [rdx+r13]
+    call ff_emit_direct_gather; test eax,eax; jnz .fcg_bad
     mov edi,[r15+4]; call ff_codegen_alias_kill
     mov edi,[r15+4]; FF_MAP_VREG edi,rdi; xor esi,esi; call ff_emit_vmov
     mov edi,ebx; call ff_emit_reload_residents; test eax,eax; jnz .fcg_bad
@@ -5668,7 +5636,6 @@ ff_codegen:
     jmp .fcg_next
 .fcg_const_stack:
     add esi,dword ptr [rip+ff_cache_count]
-    add esi,dword ptr [rip+ff_coord_count]
     push rsi
     mov edx,esi
     mov edi,[r15+4]
@@ -6164,14 +6131,6 @@ ff_runtime_advance_coords_va_for_field:
     xor eax,eax
     ret
 
-ff_runtime_load_va_for_access:
-    cmp edi,dword ptr [rip+ff_access_count]
-    jae .ffrvl_bad
-    mov rax,FIELD_RUNTIME_LOAD_VA
-    ret
-.ffrvl_bad:
-    xor eax,eax
-    ret
 
 ff_runtime_store_va_for_field:
     cmp edi,dword ptr [rip+ff_field_count]
@@ -6770,6 +6729,7 @@ ff_cache_bytes:.skip 4
 ff_addr_pool_count:.skip 4
 ff_region_delta_stack_off:.skip 4
 ff_region_class_stack_off:.skip 4
+ff_packet_coord_stack_off:.skip 4
 ff_resident_reserved_mask:.skip 4
 ff_const_pool_last_use_pos_ptr:.skip 8
 # Compile-time avoided-transport demand after consumer-local folding.  This is

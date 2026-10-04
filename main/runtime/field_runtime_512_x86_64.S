@@ -1074,33 +1074,6 @@ field_compute_offsets_f32:
     pop rbx
     ret
 
-.global field_load_f32
-field_load_f32:
-    push r12
-    mov r12d,edi
-    mov rax,[rip+g_field_contig_ptr]
-    cmp byte ptr [rax+r12],1
-    jne .Lfl16_dynamic_gather
-    mov rax,[rip+g_spec_linear_delta_bytes_ptr]
-    cmp qword ptr [rax+rsi*8],0
-    jne .Lfl16_dynamic_gather
-    call field_prepare_q16
-    mov rax,[rip+g_field_data_ptr]
-    mov rax,[rax+r12*8]
-    lea rax,[rax+rdx*4]
-    vmovups zmm0{k1}{z},zmmword ptr [rax]
-    pop r12
-    ret
-.Lfl16_dynamic_gather:
-    call field_compute_offsets_f32
-    mov rax,[rip+g_field_data_ptr]
-    mov rax,[rax+r12*8]
-    vxorps zmm0,zmm0,zmm0
-    vgatherdps zmm0{k1},dword ptr [rax+zmm17]
-    call field_prepare_q16
-    pop r12
-    ret
-
 .global field_store_f32
 field_store_f32:
     push r12

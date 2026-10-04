@@ -1037,25 +1037,35 @@ field_itof32_1:
     vcvtdq2ps ymm0,ymm14
     ret
 
-# One runtime-rank AVX2 address relation. RankFact changes loop geometry, not ABI.
+# One runtime-rank AVX2 AddressFact relation.  R8 names the execution-local
+# canonical packet CoordinateFact carrier.  Register scarcity changes where the
+# fact lives, never how many times q is decomposed.  The first AddressFact for a
+# packet materializes Rank-N coordinates once; every later AddressFact consumes
+# those coordinates directly.
 .global field_compute_offsets_f32
 field_compute_offsets_f32:
+    push rbp
     push rbx
     push r12
     push r13
     push r14
     push r15
-    mov r12d,edi
-    mov r13d,esi
-    mov r14,rdx
-    call field_prepare_q8
-    vpxor ymm7,ymm7,ymm7
+    mov rbp,r8
+    test rbp,rbp
+    jz .bad_args
+    mov r12d,edi                         # field
+    mov r13d,esi                         # access
+    mov r14,rdx                          # packet q
+    cmp qword ptr [rbp],r14
+    je .Lfco8_coords_ready
+
+    # Materialize canonical logical coordinates once for this packet.
     xor r15d,r15d
     cmp byte ptr [rip+g_shape_pow2],1
-    je .Lfco8_dynamic_pow
-.Lfco8_dynamic_gen:
+    je .Lfco8_coord_pow
+.Lfco8_coord_gen:
     cmp r15d,dword ptr [rip+g_rank]
-    jae .Lfco8_dynamic_done
+    jae .Lfco8_coord_done
     mov eax,r14d
     vmovd xmm6,eax
     vpbroadcastd ymm6,xmm6
@@ -1067,11 +1077,15 @@ field_compute_offsets_f32:
     mov r8,[rip+g_field_extents_ptr]
     mov eax,[r8+r15*4]
     call vec_divmod_u31_8
-    vmovdqa ymm11,ymm9
-    jmp .Lfco8_dynamic_realize
-.Lfco8_dynamic_pow:
+    mov r9,r15
+    shl r9,5
+    vmovdqu ymmword ptr [rbp+r9+8],ymm9
+    inc r15d
+    jmp .Lfco8_coord_gen
+
+.Lfco8_coord_pow:
     cmp r15d,dword ptr [rip+g_rank]
-    jae .Lfco8_dynamic_done
+    jae .Lfco8_coord_done
     mov eax,r14d
     vmovd xmm6,eax
     vpbroadcastd ymm6,xmm6
@@ -1086,14 +1100,32 @@ field_compute_offsets_f32:
     vmovd xmm15,eax
     vpbroadcastd ymm15,xmm15
     vpand ymm11,ymm11,ymm15
-.Lfco8_dynamic_realize:
+    mov r9,r15
+    shl r9,5
+    vmovdqu ymmword ptr [rbp+r9+8],ymm11
+    inc r15d
+    jmp .Lfco8_coord_pow
+
+.Lfco8_coord_done:
+    mov qword ptr [rbp],r14
+
+.Lfco8_coords_ready:
+    # Each AddressFact now performs only delta/wrap/stride realization.
+    vpxor ymm7,ymm7,ymm7
+    xor r15d,r15d
+.Lfco8_realize:
+    cmp r15d,dword ptr [rip+g_rank]
+    jae .Lfco8_done
+    mov r9,r15
+    shl r9,5
+    vmovdqu ymm11,ymmword ptr [rbp+r9+8]
     mov r8,[rip+g_spec_delta_norm_ptr]
     mov r9,r13
     imul r9,qword ptr [rip+g_access_delta_stride]
     lea r9,[r9+r15*4]
     mov eax,[r8+r9]
     test eax,eax
-    jz .Lfco8_dynamic_stride
+    jz .Lfco8_stride
     vmovd xmm15,eax
     vpbroadcastd ymm15,xmm15
     vpaddd ymm11,ymm11,ymm15
@@ -1106,7 +1138,7 @@ field_compute_offsets_f32:
     vpxor ymm10,ymm10,ymm9
     vpand ymm10,ymm10,ymm15
     vpsubd ymm11,ymm11,ymm10
-.Lfco8_dynamic_stride:
+.Lfco8_stride:
     mov r8,[rip+g_field_strides_ptr]
     mov r9,r12
     imul r9,qword ptr [rip+g_axis_bytes]
@@ -1117,44 +1149,14 @@ field_compute_offsets_f32:
     vpmulld ymm11,ymm11,ymm15
     vpaddd ymm7,ymm7,ymm11
     inc r15d
-    cmp byte ptr [rip+g_shape_pow2],1
-    je .Lfco8_dynamic_pow
-    jmp .Lfco8_dynamic_gen
-.Lfco8_dynamic_done:
-    mov rdx,r14
-    call field_prepare_q8
+    jmp .Lfco8_realize
+.Lfco8_done:
     pop r15
     pop r14
     pop r13
     pop r12
     pop rbx
-    ret
-
-.global field_load_f32
-field_load_f32:
-    push r12
-    mov r12d,edi
-    mov rax,[rip+g_field_contig_ptr]
-    cmp byte ptr [rax+r12],1
-    jne .Lfl8_dynamic_gather
-    mov rax,[rip+g_spec_linear_delta_bytes_ptr]
-    cmp qword ptr [rax+rsi*8],0
-    jne .Lfl8_dynamic_gather
-    call field_prepare_q8
-    mov rax,[rip+g_field_data_ptr]
-    mov rax,[rax+r12*8]
-    lea rax,[rax+rdx*4]
-    vmaskmovps ymm0,ymm4,ymmword ptr [rax]
-    pop r12
-    ret
-.Lfl8_dynamic_gather:
-    call field_compute_offsets_f32
-    mov rax,[rip+g_field_data_ptr]
-    mov rax,[rax+r12*8]
-    vxorps ymm0,ymm0,ymm0
-    vmovaps ymm15,ymm4
-    vgatherdps ymm0,dword ptr [rax+ymm7],ymm15
-    pop r12
+    pop rbp
     ret
 
 .global field_store_f32
