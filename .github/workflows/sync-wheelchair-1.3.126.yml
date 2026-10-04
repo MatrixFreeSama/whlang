@@ -1,0 +1,112 @@
+name: Sync Wheelchair 1.3.126
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/sync-wheelchair-1.3.126.yml
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Verify archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum -c Wheelchair-1.3.126.zip.sha256
+
+      - name: Materialize versionless production main
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$GITHUB_WORKSPACE/dist/Wheelchair-1.3.126.zip"
+          unpack="$(mktemp -d)"
+          unzip -q "$archive" -d "$unpack"
+          src="$(find "$unpack" -mindepth 1 -maxdepth 1 -type d -name 'Wheelchair-*' -print -quit)"
+          staging="$(mktemp -d)"
+          mkdir -p "$staging/main"
+          cp -a "$src/bin" "$staging/main/"
+          cp -a "$src/compiler" "$staging/main/"
+          cp -a "$src/runtime" "$staging/main/"
+          cp -a "$src/surface" "$staging/main/"
+          cp -a "$src/tools" "$staging/main/"
+          cp -a "$src/build.sh" "$staging/main/"
+          cp -a "$src/README.md" "$staging/main/"
+          mkdir -p main
+          rsync -a --delete "$staging/main/" main/
+
+      - name: Update repository README
+        shell: python
+        run: |
+          from pathlib import Path
+
+          p = Path("README.md")
+          s = p.read_text(encoding="utf-8")
+          s = s.replace("> Current release: **1.3.112**", "> Current release: **1.3.126**", 1)
+          s = s.replace("[Download Wheelchair 1.3.112](./dist/Wheelchair-1.3.112.zip)", "[Download Wheelchair 1.3.126](./dist/Wheelchair-1.3.126.zip)", 1)
+          s = s.replace("c979e7486d931d9608b6aa99adad2f508fca77457477663ac000a4fe14c667ef", "d2ed180aa9825761b2d3237fa0c4142147b482930bd26b09c32b25b46c2a9f9f", 1)
+          start = s.index("## Current release: 1.3.112")
+          end = s.index("## Features", start)
+          current = '''## Current release: 1.3.126
+
+Wheelchair 1.3.126 replaces the previous single-interval `[lo, hi)` SupportFact with one source-derived canonical `RegionSet`. Support is no longer forced through a bounded interval approximation: ADD/SUB compose support by region union, the runtime canonicalizes those regions by sorting and merging while deleting empty pieces, and Physical Reality reprices only the work that survives. The legacy interval backend is deleted rather than retained as a compatibility route.
+
+Strict reduction keeps the existing canonical reduction tree. Regions proved dead collapse to exact `+0`; surviving regions retain the same Strict ordering and closure semantics. No workload-name dispatch, fixed element-count threshold, scheduler family, JIT path, kernel-offload route, or source-visible parallel construct is introduced. The change is a general support representation inside the existing Rank-N / Physical DAG architecture.
+
+On the retained Level-Set workload, the 8M case moves from **7.236 ms in 1.3.125 to 0.939 ms in 1.3.126 (7.70x)**. The 1.3.126 size curve is **0.813 / 0.776 / 0.848 ms** at 4M / 8M / 16M, and the four-core measurement is **0.911 ms** versus **6.357 ms** for the native C OpenMP control on the same experiment. All **36/36** retained gates pass. The speedup comes from representing and deleting disconnected support directly instead of inflating it into one coarse interval.
+
+'''
+          p.write_text(s[:start] + current + s[end:], encoding="utf-8")
+
+      - name: Commit synchronized tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/sync-wheelchair-1.3.126.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A README.md main .github/workflows/sync-wheelchair-1.3.126.yml
+          git commit -m 'Sync README and production main to Wheelchair 1.3.126'
+          git push origin HEAD:main
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/release.md <<'EOF'
+          # Wheelchair 1.3.126
+
+          1.3.126 replaces the single `[lo, hi)` SupportFact with one source-derived canonical `RegionSet`.
+
+          - ADD/SUB compose support by region union instead of widening disconnected work into one coarse interval.
+          - Runtime canonicalization sorts and merges regions, removes empty pieces, and reprices only surviving physical work.
+          - The legacy interval backend is deleted rather than retained as a compatibility path.
+          - Strict reduction preserves the canonical tree; dead regions fold to exact `+0`, while surviving regions keep the existing Strict ordering and closure semantics.
+          - No workload-name dispatch, magic element threshold, JIT, kernel offload, scheduler family, or source-visible parallel construct is added.
+
+          Retained Level-Set measurements:
+
+          - 8M: 1.3.125 **7.236 ms** -> 1.3.126 **0.939 ms** (**7.70x**).
+          - 1.3.126 size curve, 4M / 8M / 16M: **0.813 / 0.776 / 0.848 ms**.
+          - Four-core: Wheelchair **0.911 ms** vs native C OpenMP **6.357 ms**.
+          - Validation: **36/36** retained gates pass.
+
+          SHA-256: `d2ed180aa9825761b2d3237fa0c4142147b482930bd26b09c32b25b46c2a9f9f`
+          EOF
+          gh release create v1.3.126 \
+            dist/Wheelchair-1.3.126.zip \
+            dist/Wheelchair-1.3.126.zip.sha256 \
+            --target main \
+            --title 'Wheelchair 1.3.126' \
+            --notes-file /tmp/release.md
