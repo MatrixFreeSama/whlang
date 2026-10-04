@@ -185,30 +185,12 @@ def main():
             "OMP_WAIT_POLICY": "PASSIVE",
         })
 
-        # D. High-entropy runtime-modulo permutation, retained from 1.3.102.
-        hsrc = ROOT / "benchmarks" / "high_entropy_sparse_permutation_13102"
-        hout = source_out / "high_entropy_sparse_permutation"
-        shutil.copytree(hsrc, hout)
-        hp = wroot / "paper_inputs"
-        hp.mkdir(exist_ok=True)
-        shutil.copy2(hsrc / "perm_strict.whex", hp / "perm_strict.whex")
-        hd = bins / "high_entropy"
-        hd.mkdir()
-        himpls = {
-            "Wheelchair_1.3.127_whexc_v4": hd / "wheelchair",
-            "GCC_C_v4": hd / "c",
-            "GFortran_v4": hd / "fortran",
-        }
-        compile_one("high_entropy/Wheelchair_1.3.127_whexc_v4",
-                    ["./bin/whexc", "paper_inputs/perm_strict.whex", "-o", str(himpls["Wheelchair_1.3.127_whexc_v4"])], cwd=wroot)
-        compile_one("high_entropy/GCC_C_v4",
-                    ["gcc", "-O3", "-march=x86-64-v4", "-mtune=generic", "-fopenmp", "-fno-fast-math", "-ffp-contract=off", str(hsrc / "perm.c"), "-lm", "-o", str(himpls["GCC_C_v4"])])
-        compile_one("high_entropy/GFortran_v4",
-                    ["gfortran", "-O3", "-march=x86-64-v4", "-mtune=generic", "-fopenmp", "-fno-fast-math", "-ffp-contract=off", "-fprotect-parens", str(hsrc / "perm.f90"), "-o", str(himpls["GFortran_v4"])])
-        cases.append({
-            "group": "high_entropy_permutation_v4", "workload": "high_entropy_6perm_v4", "baseline": "GCC_C_v4",
-            "commands": {k: [str(v), str(HE_N)] for k, v in himpls.items()}, "env": omp1,
-        })
+        # D. High-entropy runtime-modulo permutation is deliberately excluded from
+        # this expansion batch. The frozen whexc launcher admits the retained source
+        # from the repository root but the sovereign topology path rejects the same
+        # source after relocation under a temporary package root. That launcher/path
+        # coverage issue is kept as a separate reproducibility observation instead of
+        # changing the frozen compiler or inventing a publication-only route.
 
         # E. Established public simulation kernels: miniAMR-27 and miniFE heat21.
         fsrc = wroot / "devtrash" / "benchmarks" / "real_sparse_1326"
@@ -355,7 +337,7 @@ def main():
 
         lines = [
             "# Wheelchair 1.3.127 cross-mechanism paper pilot", "",
-            "Frozen compiler: `Wheelchair 1.3.127`. High-entropy uses the existing `whexc` AVX-512 realization with x86-64-v4 C/Fortran controls; Field and periodic cases use native256 with x86-64-v3 controls. No speedup is aggregated across ISA profiles.",
+            "Frozen compiler: `Wheelchair 1.3.127`. This expansion batch uses native256 with x86-64-v3 C/Fortran controls throughout. The retained high-entropy case is excluded here because its frozen whexc launcher has path-dependent admission under relocation; the compiler is not modified to make the paper harness accept it.",
             f"All timed processes are pinned to logical CPU `{CPU}`; C/Fortran OpenMP controls use one thread. Each implementation receives one warm-up and `{REPS}` interleaved measured repetitions.",
             "", "This table deliberately mixes wins and losses only across workloads run on this same hosted runner. It is pilot evidence, not the final fixed-machine submission table.", "",
             "| mechanism/workload | implementation | median ms | MAD ms | time/C | speedup/C | checksum rel. error vs C |",
@@ -366,7 +348,7 @@ def main():
             lines.append(f"| {r[1]} | {r[2]} | {r[5]:.6f} | {r[9]:.6f} | {r[10]:.4f} | {r[11]:.4f} | {err} |")
         lines += [
             "", "## Interpretation guardrails", "",
-            "- `high_entropy_6perm_v4` is the retained runtime-modulo physical-work-inflation witness. The frozen `whexc` product uses AVX-512, so only x86-64-v4 C/Fortran controls are compared with it; it is not mixed with the v3 tables.",
+            "- The retained high-entropy 1.3.102 witness is not included in this fresh batch because relocated frozen-package admission differs from repository-root admission. That coverage issue is recorded rather than repaired for publication.",
             "- `miniAMR_27point` and `miniFE_heat21` are established public simulation kernels; the same generated WHFLD217 bytes are consumed by Wheelchair, C, and Fortran.",
             "- `periodic_depth_23/40` isolate CoordinateFact composition. The natural C/Fortran controls explicitly materialize every remap stage; the ceiling controls manually compose the affine relation and are labeled ceilings, not natural baselines.",
             "- No compiler source is modified by this experiment. No workload-specific branch is added.",
