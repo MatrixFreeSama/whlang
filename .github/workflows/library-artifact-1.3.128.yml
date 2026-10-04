@@ -1,0 +1,29 @@
+name: library-artifact-1.3.128
+on:
+  push:
+    paths:
+      - '.github/workflows/library-artifact-1.3.128.yml'
+permissions:
+  contents: write
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify official archive
+        shell: bash
+        run: test "$(sha256sum dist/Wheelchair-1.3.128.zip | awk '{print $1}')" = "9110b357e9e5eafcd07df8751e803a7fb4f209b4332fc2b7f4e6a02e0b9ac761"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheelchair-1.3.128-official
+          path: dist/Wheelchair-1.3.128.zip
+          compression-level: 0
+      - name: Self-delete workflow
+        shell: bash
+        run: |
+          rm -f .github/workflows/library-artifact-1.3.128.yml
+          git config user.name 'Wheelchair Transfer Bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add .github/workflows/library-artifact-1.3.128.yml
+          git commit -m 'Remove temporary Wheelchair 1.3.128 artifact exporter'
+          git push origin HEAD:main
