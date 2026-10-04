@@ -1,0 +1,1 @@
+{"format":"wheelchair.field/1","contracts":{"floating_point":"strict"},"fields":[{"mode":"input","type":"f32","rank":3}],"accesses":[{"field":0,"delta":[0,0,0]}],"ops":[{"op":"load","access":0,"dst":0},{"op":"mul","a":0,"b":0,"dst":1},{"op":"reduce","src":1}]}
