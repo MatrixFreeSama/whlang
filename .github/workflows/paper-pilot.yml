@@ -11,13 +11,23 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Run package-relative frozen paper pilot
+      - name: Fix frozen harness invocation form
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('experiments/paper_1_3_127/run_pilot.py')
+          s = p.read_text(encoding='utf-8')
+          s = s.replace('[str(WH127), rel(', '["./bin/wheelchairc", rel(')
+          s = s.replace('[str(WH126), rel(', '["./bin/wheelchairc", rel(')
+          p.write_text(s, encoding='utf-8')
+          PY
+      - name: Run fully package-relative frozen paper pilot
         run: python3 experiments/paper_1_3_127/run_pilot.py
       - name: Commit raw reproducibility record
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add experiments/paper_1_3_127/pilot_20261005
+          git add experiments/paper_1_3_127
           git rm .github/workflows/paper-audit.yml .github/workflows/paper-pilot.yml
           git commit -m 'Record Wheelchair 1.3.127 paper pilot results'
           git push origin HEAD:main
