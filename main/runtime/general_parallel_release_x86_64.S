@@ -30,6 +30,9 @@
 .equ ST_NODE_ARRIVED, 0
 .equ ST_NODE_DONE, 4
 .equ ST_NODE_LOCAL_NEXT, 8
+.equ ST_NODE_FRONTIER_TAIL, 12
+.equ ST_NODE_FRONTIER_ANCHOR_NEXT, 16
+.equ ST_NODE_FRONTIER_ANCHOR, 20
 # Every causal node owns one cache line. The state arena is sized from
 # gr_node_count at invocation time; trailing invocation metadata holds stack
 # base/size plus one shared x86 execution-admission count. The count is not a
@@ -72,7 +75,7 @@ gr_release_base:
     # node plus 24 bytes of invocation metadata (stack base/size + live x86 count).
     mov rsi,rax
     shl rsi,6
-    add rsi,24
+    add rsi,24                   # invocation metadata immediately follows node states
     jc .gr_fail_no_state
     mov qword ptr [rsp+40],rsi
     mov eax,SYS_mmap
@@ -115,90 +118,211 @@ gr_release_base:
     pop rax
     mov qword ptr [rdx],rax
 
-    # The invocation root is already a live execution context. Reserve the first
-    # causally ready root for that context instead of cloning it and immediately
-    # waiting. Additional independent roots may materialize outward only when the
-    # same work/lifecycle comparison says they repay it. This removes a pure OS
-    # lifecycle tax without creating workers, credits, recipients or a ready queue.
+    # All currently-ready x86 roots are one physical frontier, but readiness is
+    # not permission to manufacture an OS execution.  The existing shared
+    # work-vs-lifecycle price still decides how many *additional* roots can repay
+    # outward materialization.  Frontier fusion changes only ownership shape:
+    # every admitted execution receives a fixed root chain before launch, so a
+    # short early root cannot exit while later ready roots collapse onto the
+    # invocation context.  No ready queue, worker, idle-CPU query or post-launch
+    # task transfer exists.
     xor ebx,ebx
-    xor r14d,r14d
-    mov dword ptr [rsp+24],-1             # root executed by invocation context
-    mov dword ptr [rsp+16],-1             # completion-local root continuation chain
+    xor r14d,r14d                       # x86 root count
+    mov dword ptr [rsp+24],0            # total root count, including fabric
+    mov dword ptr [rsp+12],-1           # invocation x86 root
+    mov dword ptr [rsp+20],0            # extra roots whose work repays lifecycle
     call gr_meta_indegree_ptr
     mov qword ptr [rsp+32],rax
-.gr_root_scan:
+.gr_root_count_scan:
     cmp ebx,dword ptr [rip+gr_node_count]
-    jae .gr_roots_done
+    jae .gr_root_count_done
     mov rdx,qword ptr [rsp+32]
     cmp dword ptr [rdx+rbx*4],0
-    jne .gr_root_next
-    inc r14d
-
-    # The invocation context may execute only an x86 realization locally. A fabric
-    # root already has a distinct AOT physical entry and must enter that activation
-    # ABI even when it is the first ready root. Never reinterpret a fabric tag as
-    # permission to execute the retained x86 body.
+    jne .gr_root_count_next
+    inc dword ptr [rsp+24]
     call gr_meta_realization_tag_ptr
     cmp dword ptr [rax+rbx*4],GR_REALIZATION_RECONFIGURABLE_FABRIC
-    je .gr_root_fabric
-
-    cmp dword ptr [rsp+24],-1
-    jne .gr_root_extra
-    mov dword ptr [rsp+24],ebx
-    jmp .gr_root_next
-.gr_root_extra:
+    jne .gr_root_count_x86
+    mov edi,ebx
+    mov esi,CLONE_VM_FILES_FS_SIGCHLD
+    call gr_materialize_node
+    test eax,eax
+    jnz .gr_runtime_fail
+    jmp .gr_root_count_next
+.gr_root_count_x86:
+    inc r14d
+    cmp dword ptr [rsp+12],-1
+    jne .gr_root_count_cost
+    mov dword ptr [rsp+12],ebx           # first x86 root stays in live context
+    jmp .gr_root_count_next
+.gr_root_count_cost:
     mov edi,ebx
     call gr_should_materialize
     test eax,eax
-    jz .gr_root_execute_local
+    jz .gr_root_count_next
+    inc dword ptr [rsp+20]
+.gr_root_count_next:
+    inc ebx
+    jmp .gr_root_count_scan
+.gr_root_count_done:
+    cmp dword ptr [rsp+24],0
+    je .gr_runtime_fail
+    test r14d,r14d
+    jz .gr_enter_reap
+
+    # K is not hardware width by itself.  One live invocation context already
+    # exists; every additional bundle must be justified by one root that passed
+    # the same Physical Reality lifecycle comparison used before frontier fusion.
+    mov edx,dword ptr [rsp+20]
+    inc edx                               # local context + profitable outward roots
+    cmp edx,r14d
+    cmova edx,r14d
+    call gr_state_meta_ptr
+    mov ecx,dword ptr [rax+20]            # exact invocation affinity multiplicity
+    test ecx,ecx
+    jnz .gr_root_have_admission
+    mov ecx,1
+.gr_root_have_admission:
+    cmp edx,ecx
+    cmova edx,ecx
+    mov dword ptr [rsp+16],edx            # cost-gated fixed bundle count K
+
+    # The anchors themselves form the temporary bundle vector inside their
+    # existing cache-line state.  This avoids allocating a second root table:
+    # every child anchor independently repays one outward lifecycle.
+    mov ebx,dword ptr [rsp+12]
+    cmp ebx,-1
+    je .gr_runtime_fail
+    mov rdx,rbx
+    shl rdx,6
+    mov dword ptr [r15+rdx+ST_NODE_LOCAL_NEXT],-1
+    mov dword ptr [r15+rdx+ST_NODE_FRONTIER_TAIL],ebx
+    mov dword ptr [r15+rdx+ST_NODE_FRONTIER_ANCHOR_NEXT],-1
+    mov dword ptr [r15+rdx+ST_NODE_FRONTIER_ANCHOR],1
+    mov dword ptr [rsp+56],ebx            # last anchor
+
+    mov r13d,1                            # number of anchors already formed
+    xor ebx,ebx
+.gr_root_anchor_scan:
+    cmp r13d,dword ptr [rsp+16]
+    jae .gr_root_anchor_done
+    cmp ebx,dword ptr [rip+gr_node_count]
+    jae .gr_runtime_fail                  # cost count and roots disagreed
+    mov rdx,qword ptr [rsp+32]
+    cmp dword ptr [rdx+rbx*4],0
+    jne .gr_root_anchor_next
+    cmp ebx,dword ptr [rsp+12]
+    je .gr_root_anchor_next
+    call gr_meta_realization_tag_ptr
+    cmp dword ptr [rax+rbx*4],GR_REALIZATION_RECONFIGURABLE_FABRIC
+    je .gr_root_anchor_next
     mov edi,ebx
-    mov esi,CLONE_VM_FILES_FS_SIGCHLD
-    call gr_materialize_node
+    call gr_should_materialize
     test eax,eax
-    jz .gr_root_next
-.gr_root_execute_local:
-    # Expose every causally-ready root before spending the invocation context on
-    # a local continuation. The chain lives only in the already-owned node state;
-    # it is not a global ready queue and is dead after this root scan.
+    jz .gr_root_anchor_next
+
+    mov eax,dword ptr [rsp+56]
+    mov rdx,rax
+    shl rdx,6
+    mov dword ptr [r15+rdx+ST_NODE_FRONTIER_ANCHOR_NEXT],ebx
+    mov rdx,rbx
+    shl rdx,6
+    mov dword ptr [r15+rdx+ST_NODE_LOCAL_NEXT],-1
+    mov dword ptr [r15+rdx+ST_NODE_FRONTIER_TAIL],ebx
+    mov dword ptr [r15+rdx+ST_NODE_FRONTIER_ANCHOR_NEXT],-1
+    mov dword ptr [r15+rdx+ST_NODE_FRONTIER_ANCHOR],1
+    mov dword ptr [rsp+56],ebx
+    inc r13d
+.gr_root_anchor_next:
+    inc ebx
+    jmp .gr_root_anchor_scan
+.gr_root_anchor_done:
+
+    # Every remaining x86 root joins one of the already-existing fixed bundles.
+    # Cyclic assignment is structural and deterministic; it inspects neither CPU
+    # identity nor runtime load.  Small roots may ride an execution whose lifecycle
+    # is already justified, but they can never create an execution by themselves.
+    mov r13d,dword ptr [rsp+12]           # current anchor
+    xor ebx,ebx
+.gr_root_chain_scan:
+    cmp ebx,dword ptr [rip+gr_node_count]
+    jae .gr_root_chain_done
+    mov rdx,qword ptr [rsp+32]
+    cmp dword ptr [rdx+rbx*4],0
+    jne .gr_root_chain_next
+    call gr_meta_realization_tag_ptr
+    cmp dword ptr [rax+rbx*4],GR_REALIZATION_RECONFIGURABLE_FABRIC
+    je .gr_root_chain_next
+    mov rdx,rbx
+    shl rdx,6
+    cmp dword ptr [r15+rdx+ST_NODE_FRONTIER_ANCHOR],0
+    jne .gr_root_chain_next
+
+    mov rax,r13
+    shl rax,6
+    mov ecx,dword ptr [r15+rax+ST_NODE_FRONTIER_TAIL]
+    mov rsi,rcx
+    shl rsi,6
+    mov dword ptr [r15+rsi+ST_NODE_LOCAL_NEXT],ebx
+    mov dword ptr [r15+rax+ST_NODE_FRONTIER_TAIL],ebx
+    mov dword ptr [r15+rdx+ST_NODE_LOCAL_NEXT],-1
+
+    mov eax,dword ptr [r15+rax+ST_NODE_FRONTIER_ANCHOR_NEXT]
+    cmp eax,-1
+    jne .gr_root_chain_advance
+    mov eax,dword ptr [rsp+12]
+.gr_root_chain_advance:
+    mov r13d,eax
+.gr_root_chain_next:
+    inc ebx
+    jmp .gr_root_chain_scan
+.gr_root_chain_done:
+
+    # Materialize only the already-cost-justified child bundles. Clone refusal
+    # merges that fixed chain into the invocation bundle; correctness and graph
+    # identity therefore never depend on OS willingness to create a context.
+    mov ebx,dword ptr [rsp+12]
     mov rax,rbx
     shl rax,6
-    mov edx,dword ptr [rsp+16]
-    mov dword ptr [r15+rax+ST_NODE_LOCAL_NEXT],edx
-    mov dword ptr [rsp+16],ebx
-    jmp .gr_root_next
-.gr_root_fabric:
+    mov ebx,dword ptr [r15+rax+ST_NODE_FRONTIER_ANCHOR_NEXT]
+.gr_root_launch_children:
+    cmp ebx,-1
+    je .gr_root_launch_local
+    mov rax,rbx
+    shl rax,6
+    mov r13d,dword ptr [r15+rax+ST_NODE_FRONTIER_ANCHOR_NEXT]
     mov edi,ebx
     mov esi,CLONE_VM_FILES_FS_SIGCHLD
-    call gr_materialize_node
+    call gr_materialize_chain
     test eax,eax
-    jnz .gr_runtime_fail
-.gr_root_next:
-    inc ebx
-    jmp .gr_root_scan
-.gr_roots_done:
-    test r14d,r14d
-    jz .gr_runtime_fail
-    mov edi,dword ptr [rsp+24]
+    jz .gr_root_launch_next
+
+    # Append a refused child chain to the already-live local chain.  This happens
+    # before the invocation begins consuming its bundle and creates no alternate
+    # scheduler, recipient or compatibility execution path.
+    mov ecx,dword ptr [rsp+12]
+    mov rdx,rcx
+    shl rdx,6
+    mov edi,dword ptr [r15+rdx+ST_NODE_FRONTIER_TAIL]
+    mov rsi,rdi
+    shl rsi,6
+    mov dword ptr [r15+rsi+ST_NODE_LOCAL_NEXT],ebx
+    mov rsi,rbx
+    shl rsi,6
+    mov eax,dword ptr [r15+rsi+ST_NODE_FRONTIER_TAIL]
+    mov dword ptr [r15+rdx+ST_NODE_FRONTIER_TAIL],eax
+.gr_root_launch_next:
+    mov ebx,r13d
+    jmp .gr_root_launch_children
+
+.gr_root_launch_local:
+    mov edi,dword ptr [rsp+12]
     cmp edi,-1
     je .gr_enter_reap
     mov esi,CLONE_VM_FILES_FS_SIGCHLD
-    call gr_node_task
+    call gr_node_chain_task
     test eax,eax
     jnz .gr_runtime_fail
-.gr_root_local_drain:
-    mov edi,dword ptr [rsp+16]
-    cmp edi,-1
-    je .gr_root_locals_done
-    mov rax,rdi
-    shl rax,6
-    mov edx,dword ptr [r15+rax+ST_NODE_LOCAL_NEXT]
-    mov dword ptr [rsp+16],edx
-    mov esi,CLONE_VM_FILES_FS_SIGCHLD
-    call gr_node_task
-    test eax,eax
-    jnz .gr_runtime_fail
-    jmp .gr_root_local_drain
-.gr_root_locals_done:
 
     # The invocation context has finished every local continuation. It no longer
     # consumes one execution-admission slot while blocked in wait4, so descendants
@@ -345,6 +469,96 @@ gr_materialize_node:
     ret
 
 
+
+# gr_materialize_chain(edi=head_node, esi=clone_flags) -> eax=0 success, 1 refusal.
+# Root-frontier bundles are fixed before any executor starts. A child owns its
+# entire chain and returns to the OS only after that fused physical execution is
+# complete. This is not a worker and cannot accept later work.
+gr_materialize_chain:
+    push r12
+    push r13
+    mov r12d,edi
+    mov r13d,esi
+    call gr_try_acquire_x86_slot
+    test eax,eax
+    jnz .gmc_fail
+    mov rdx,r12
+    shl rdx,16
+    call gr_state_meta_ptr
+    mov rsi,qword ptr [rax]
+    test rsi,rsi
+    jz .gmc_release_fail
+    add rsi,rdx
+    add rsi,GR_STACK_BYTES-16
+    mov eax,SYS_clone
+    mov edi,r13d
+    xor edx,edx
+    xor r10d,r10d
+    xor r8d,r8d
+    syscall
+    test rax,rax
+    js .gmc_release_fail
+    jz .gmc_child
+    xor eax,eax
+    jmp .gmc_done
+.gmc_child:
+    mov edi,r12d
+    mov esi,CLONE_OUTWARD_SUCCESSOR
+    call gr_node_chain_task
+    test eax,eax
+    jnz .gmc_child_fail
+    call gr_release_x86_slot
+    xor edi,edi
+    mov eax,SYS_exit
+    syscall
+    ud2
+.gmc_child_fail:
+    call gr_release_x86_slot
+    mov edi,70
+    mov eax,SYS_exit
+    syscall
+    ud2
+.gmc_release_fail:
+    call gr_release_x86_slot
+.gmc_fail:
+    mov eax,1
+.gmc_done:
+    pop r13
+    pop r12
+    ret
+
+# gr_node_chain_task(edi=head_node, esi=successor_flags) -> eax=0/1.
+# LOCAL_NEXT was frozen by frontier fusion before launch and is consumed only by
+# this execution.  No task can be appended after materialization.
+gr_node_chain_task:
+    push rbx
+    push r12
+    push r13
+    mov ebx,edi
+    mov r13d,esi
+.gnct_loop:
+    cmp ebx,-1
+    je .gnct_ok
+    mov rax,rbx
+    shl rax,6
+    mov r12d,dword ptr [r15+rax+ST_NODE_LOCAL_NEXT]
+    mov edi,ebx
+    mov esi,r13d
+    call gr_node_task
+    test eax,eax
+    jnz .gnct_fail
+    mov ebx,r12d
+    jmp .gnct_loop
+.gnct_ok:
+    xor eax,eax
+    jmp .gnct_done
+.gnct_fail:
+    mov eax,1
+.gnct_done:
+    pop r13
+    pop r12
+    pop rbx
+    ret
 
 # gr_activate_fabric_node(edi=node_id, esi=clone_flags) -> eax=0 accepted, 1 fail.
 # ABI v2 passes only already-proved Physical-DAG facts:

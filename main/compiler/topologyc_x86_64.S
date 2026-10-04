@@ -1076,7 +1076,6 @@ select_silicon_profile:
     mov dword ptr [rip+hot_loop_alignment], 1
     mov dword ptr [rip+reduction_carriers], 1
     mov dword ptr [rip+fp_add_latency_ticks], PRC_FP_ADD_LATENCY_TICKS
-    mov dword ptr [rip+front_end_budget], 1
     mov dword ptr [rip+simd_scan_width], 1
     mov dword ptr [rip+scan_loop_bytes], 0
     mov dword ptr [rip+scan_loads_per_block], 0
@@ -1090,7 +1089,6 @@ select_silicon_profile:
     jnc .ssp_avx2
     mov dword ptr [rip+simd_scan_width],64
     mov dword ptr [rip+hot_loop_alignment],64
-    mov dword ptr [rip+front_end_budget],64
     mov dword ptr [rip+architectural_vector_registers],32
     mov dword ptr [rip+scan_loop_bytes],silicon_hot_fused_scan_avx512_end-silicon_hot_fused_scan_avx512
     mov dword ptr [rip+scan_loads_per_block],1
@@ -1103,7 +1101,6 @@ select_silicon_profile:
     jnc .ssp_scalar
     mov dword ptr [rip+simd_scan_width],32
     mov dword ptr [rip+hot_loop_alignment],32
-    mov dword ptr [rip+front_end_budget],32
     mov dword ptr [rip+architectural_vector_registers],16
     mov dword ptr [rip+scan_loop_bytes],silicon_hot_fused_scan_avx2_end-silicon_hot_fused_scan_avx2
     mov dword ptr [rip+scan_loads_per_block],1
@@ -2299,33 +2296,9 @@ synthesize_resource_schedule:
     # facts.  A one-body probe may legitimately realize one accumulator while
     # the surrounding dense relation can still profitably contain several SIMD
     # bodies.  Therefore the recurrence-carrier witness must never cap Group
-    # body width.  Bound the episode instead by the target front-end budget and
-    # the measured single-body resource footprint.  The budget belongs to the
-    # silicon profile; it is not a source-shape or workload threshold.
-    mov edx,dword ptr [rip+front_end_budget]
-    test edx,edx
-    jz .srs_group_fit_frontend_ready
-    push rax
-    mov eax,edx
-    xor edx,edx
-    mov r10d,dword ptr [rip+group_body_cost_ops]
-    test r10d,r10d
-    jnz .srs_group_frontend_have_ops
-    mov r10d,dword ptr [rip+schedule_total_ops]
-    test r10d,r10d
-    jnz .srs_group_frontend_have_ops
-    mov r10d,1
-.srs_group_frontend_have_ops:
-    div r10d                        # complete bodies within target front-end budget
-    test eax,eax
-    jnz .srs_group_frontend_nonzero
-    mov eax,1
-.srs_group_frontend_nonzero:
-    mov r10d,eax
-    pop rax
-    cmp eax,r10d
-    jbe .srs_group_fit_frontend_ready
-    mov eax,r10d
+    # body width.  Code replication is already bounded by the measured body
+    # bytes fitting the discovered L1I capacity above.  Do not introduce a
+    # second op-count budget whose numeric value is borrowed from SIMD width.
 .srs_group_fit_frontend_ready:
     # Unbounded streams have no finite ShapeFact carry to erase, but a true
     # reduction recurrence may still expose several independent carrier chains.
@@ -3354,7 +3327,6 @@ profile_status: .skip 4
 hot_loop_alignment: .skip 4
 reduction_carriers: .skip 4
 fp_add_latency_ticks: .skip 4
-front_end_budget: .skip 4
 simd_scan_width: .skip 4
 scan_loop_bytes: .skip 4
 scan_loads_per_block: .skip 4

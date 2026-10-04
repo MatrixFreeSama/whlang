@@ -13,28 +13,26 @@
 
 Wheelchair targets the same broad numerical-computing territory as C and Fortran, but it does not start from a mandatory sequential instruction stream and then try to recover parallelism afterward. Its compiler treats mathematical structure, value identity, causal dependence, precision, locality, and physical realization as first-class compile-time information.
 
-> Current release: **1.3.112**  
+> Current release: **1.3.126**  
 > Target: **Linux x86-64, static ELF64**  
 > Source surfaces: **WH (`.wh`)** and **WHEX (`.whex`)**  
-> [Download Wheelchair 1.3.112](./dist/Wheelchair-1.3.112.zip)
+> [Download Wheelchair 1.3.126](./dist/Wheelchair-1.3.126.zip)
 
 Archive SHA-256:
 
 ```text
-c979e7486d931d9608b6aa99adad2f508fca77457477663ac000a4fe14c667ef
+d2ed180aa9825761b2d3237fa0c4142147b482930bd26b09c32b25b46c2a9f9f
 ```
 
 ---
 
-## Current release: 1.3.112
+## Current release: 1.3.126
 
-Wheelchair 1.3.112 extends the existing whole-program `tolerance N` contract into `P > 64` Rank-N mathematics as one conservative `ToleranceFact`. Basic `add/sub/mul/div` remain the same strict P-bit operations and still close through the single Strict/RNE authority. Tolerance changes only the stopping proof of convergent relations: `sqrt` uses its Newton update bound, `exp` and `log` use conservative series-tail bounds, and the shared `sin/cos` relation closes only when both propagated tails fit the admitted budget. If no safe proof is available, execution retains the existing Strict convergence rule.
+Wheelchair 1.3.126 replaces the previous single-interval `[lo, hi)` SupportFact with one source-derived canonical `RegionSet`. Support is no longer forced through a bounded interval approximation: ADD/SUB compose support by region union, runtime canonicalization sorts and merges those regions while deleting empty pieces, and Physical Reality reprices only the work that survives. The legacy interval backend is deleted rather than retained as a compatibility route.
 
-This is not a second fast-math backend. Precision is not silently reduced, primitive arithmetic is not reassociated, and no tolerant add/mul/div family, named-width backend, precision selector, JIT, kernel-offload route, scheduler, worker pool, or source-visible parallel construct is introduced. The historical local type form `fpP ~(abs=...,rel=...)` is rejected rather than accepted with a discarded error object; program-level `tolerance N` is the admitted high-precision tolerance authority.
+Strict reduction keeps the existing canonical reduction tree. Regions proved dead collapse to exact `+0`; surviving regions retain the same Strict ordering and closure semantics. No workload-name dispatch, fixed element-count threshold, scheduler family, JIT path, kernel-offload route, or source-visible parallel construct is introduced. The change is a general support representation inside the existing Rank-N / Physical DAG architecture.
 
-At `tolerance 1e-10`, fixed-CPU A/B against 1.3.111 measures about **5.0x-5.6x** for 4096-bit `exp/log/sin/cos`, **12.6x-17.2x** at 8192 bits, and **31.1x-43.1x** at 16384 bits. `sqrt` improves about **1.11x / 1.49x / 1.81x**. The gains come from terminating iterations whose remaining contribution is proved irrelevant, not from reducing precision. Strict outputs remain bit-identical on the retained fp127/fp521/fp4096/fp8192 advanced-math probes, and a 240-case exact-rational tolerance grid records zero bound violations.
-
-The preceding 1.3.111 release compacted big/big Rank-N division to real base-2^32 `u32` recurrence digits, reused quotient high-water facts at the same Strict/RNE closure, and removed the historical `512*N+4096` object envelope in favor of live spans derived from PrecisionFact and Fourier TypePhysicalFact geometry.
+On the retained Level-Set workload, the 8M case moves from **7.236 ms in 1.3.125 to 0.939 ms in 1.3.126 (7.70x)**. The 1.3.126 size curve is **0.813 / 0.776 / 0.848 ms** at 4M / 8M / 16M, and the four-core measurement is **0.911 ms** versus **6.357 ms** for the native C OpenMP control on the same experiment. All **36/36** retained gates pass. The speedup comes from representing and deleting disconnected support directly instead of inflating it into one coarse interval.
 
 ## Features
 
@@ -310,8 +308,8 @@ WH is the friendlier surface; WHEX is the more explicit structural surface. Both
 The release archive ships prebuilt static compiler binaries under `bin/`.
 
 ```sh
-unzip Wheelchair-1.3.112.zip
-cd Wheelchair-1.3.112
+unzip Wheelchair-1.3.126.zip
+cd Wheelchair-1.3.126
 
 ./bin/wheelchairc surface/examples/equivalent_en.wh -o demo
 ./demo 4
@@ -895,7 +893,7 @@ The 1.3 series moved more decisions into shared semantic and physical facts: whi
 
 ### Historical evidence
 
-The pre-version account comes from the recovered archive's `README.md`, `SPECIFICATION.md`, and compiler sources. The 1.0.0 package's `RELEASE.md` identifies the first public version baseline without claiming architecture completion. Early numbered milestones are retained in `RELEASE_NOTES.md` inside [1.2.0](./dist/Wheelchair-1.2.0.zip) and in `worktree/` inside [1.2.8](./dist/Wheelchair-1.2.8.zip). Later notes and proofs are preserved under `devtrash/history/` and `devtrash/release_history/` in the [current archive](./dist/Wheelchair-1.3.112.zip). This is a reconstruction from surviving artifacts; the date in the pre-version filename does not establish the project's creation date.
+The pre-version account comes from the recovered archive's `README.md`, `SPECIFICATION.md`, and compiler sources. The 1.0.0 package's `RELEASE.md` identifies the first public version baseline without claiming architecture completion. Early numbered milestones are retained in `RELEASE_NOTES.md` inside [1.2.0](./dist/Wheelchair-1.2.0.zip) and in `worktree/` inside [1.2.8](./dist/Wheelchair-1.2.8.zip). Later notes and proofs are preserved under `devtrash/history/` and `devtrash/release_history/` in the [current archive](./dist/Wheelchair-1.3.126.zip). This is a reconstruction from surviving artifacts; the date in the pre-version filename does not establish the project's creation date.
 
 ## Landmark architecture releases
 
@@ -940,6 +938,7 @@ These milestones record changes in semantics, execution, and release verificatio
 | **1.3.110** | Field rank became a RankFact rather than `rank <= 8`; fixed axis tables and `r1..r8` runtime families disappeared. |
 | **1.3.111** | Big/big Rank-N division uses compact u32 digits, exact live object spans replace the old envelope, and quotient high-water facts feed the existing closure without rediscovery. |
 | **1.3.112** | Program-level `tolerance N` becomes one conservative `ToleranceFact` for `P > 64` Rank-N convergent mathematics; Strict/RNE primitive arithmetic remains the only high-precision arithmetic authority. |
+| **1.3.126** | Canonical unbounded `RegionSet` replaces coarse single-interval support; disconnected dead support is deleted before physical realization while Strict reduction structure is preserved. |
 
 The table selects turning points rather than listing every patch. Versioned benchmark results above remain observations of their original releases and hosts, not measurements of the current compiler unless explicitly labeled as the current snapshot.
 

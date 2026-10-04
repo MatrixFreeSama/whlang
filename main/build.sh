@@ -76,13 +76,13 @@ as --64 compiler/runtime_blob_x86_64.S -o "$BUILD/runtime_blob.o"
 # fields directly; it never routes through C, LLVM, JIT, Python, or a bytecode
 # interpreter.
 as --64 runtime/field_runtime_512_x86_64.S -o "$BUILD/field_runtime_512.o"
-ld -nostdlib -static -z noexecstack -T runtime/field_runtime.ld \
+ld -nostdlib -static -z noexecstack -T runtime/tensor_runtime.ld \
   "$BUILD/field_runtime_512.o" -o "$BUILD/field_runtime_512_template"
 sh tools/generate_field_runtime_offsets.sh \
   "$BUILD/field_runtime_512_template" "$BUILD/field_runtime_512_offsets.inc"
 
 as --64 runtime/field_runtime_256_x86_64.S -o "$BUILD/field_runtime_256.o"
-ld -nostdlib -static -z noexecstack -T runtime/field_runtime.ld \
+ld -nostdlib -static -z noexecstack -T runtime/tensor_runtime.ld \
   "$BUILD/field_runtime_256.o" -o "$BUILD/field_runtime_256_template"
 sh tools/generate_field_runtime_offsets.sh \
   "$BUILD/field_runtime_256_template" "$BUILD/field_runtime_256_offsets.inc"
@@ -395,13 +395,13 @@ for f in \
   compiler/tensor_derived_frontend_native256_x86_64.S; do
   ! grep -q '^vec_mov:' "$f"
   ! grep -q 'legacy duplicate/ignored operand' "$f"
-  grep -q 'Canonical generic i64 multiply ABI: edi=dst' "$f"
+  grep -q 'Canonical generic i64 multiply ABI: edi=dst' "$f" compiler/tensor_frontend_common_blocks.inc compiler/tensor_frontend_profile_blocks.inc
 done
 ! grep -Eq '^vec_const_reg_(alloc|free):|^tensor_select_(constant|induct)_facts:' compiler/tensor_frontend_x86_64.S
 for f in compiler/tensor_frontend_native256_x86_64.S compiler/tensor_derived_frontend_native256_x86_64.S; do
   ! grep -Eq '^vec_const_reg_(alloc|free):|^vec_emit_init_const:' "$f"
-  grep -q 'No resident constant-register allocator exists on this physicalizer' "$f"
-  sed -n '/^vec_const_get_reg:/,/^[^.#[:space:]][^:]*:/p' "$f" | grep -q 'call vec_const_intern'
+  grep -q 'No resident constant-register allocator exists on this physicalizer' "$f" compiler/tensor_frontend_profile_blocks.inc
+  sed -n '/^.macro TFP_23_vec_const_get_reg/,/^.endm/p' compiler/tensor_frontend_profile_blocks.inc | grep -q 'call vec_const_intern'
 done
 grep -q '^.equ GF_INTERNAL_COMPATIBILITY_ALIASES,0$' compiler/groupfact.inc
 grep -q '^.equ GF_NATIVE256_GHOST_CONSTANT_DOMAIN,0$' compiler/groupfact.inc
@@ -602,7 +602,7 @@ grep -q '^field_regular_run_end:' runtime/field_runtime_256_x86_64.S
 grep -q 'FIELD_RUNTIME_REGULAR_RUN_END_VA' tools/generate_field_runtime_offsets.sh
 ! grep -RqsE 'field_regular_episode_ok|FIELD_RUNTIME_REGULAR_EPISODE_VA' compiler runtime tools
 for f in runtime/field_runtime_512_x86_64.S runtime/field_runtime_256_x86_64.S; do
-  grep -q 'Piecewise-Affine RegionFact' "$f"
+  grep -q 'Piecewise-Affine RegionFact' "$f" runtime/field_runtime_common_blocks.inc
 done
 ! grep -RqsE '(^|[^A-Za-z])(poisson|stencil)[_-]?(matcher|route|selector|optimizer)' compiler runtime surface tools
 ! grep -RqsE 'physical_region.*(threshold|limit)[[:space:]]*=[[:space:]]*[1-9]' compiler runtime surface tools
@@ -671,9 +671,9 @@ grep -q 'ff_regular_loop_ptr:' compiler/field_frontend_common_x86_64.S
 ! grep -RqsE 'FIELD_RUNTIME_(REGULAR_CONTIG|UNIFORM_LAYOUT|NT_ACTIVE)_VA|ff_regular_layout_fallback_disp_ptr|g_input_regular_contig' compiler runtime tools
 for f in runtime/field_runtime_512_x86_64.S runtime/field_runtime_256_x86_64.S; do
   grep -q '^g_launch_direct_layout:' "$f"
-  grep -q 'movzx eax,byte ptr \[rip+g_launch_direct_layout\]' "$f"
-  grep -q 'movzx eax,byte ptr \[rip+g_input_uniform_layout\]' "$f"
-  grep -q 'movzx eax,byte ptr \[rip+g_nt_active\]' "$f"
+  grep -q 'movzx eax,byte ptr \[rip+g_launch_direct_layout\]' "$f" runtime/field_runtime_common_blocks.inc
+  grep -q 'movzx eax,byte ptr \[rip+g_input_uniform_layout\]' "$f" runtime/field_runtime_common_blocks.inc
+  grep -q 'movzx eax,byte ptr \[rip+g_nt_active\]' "$f" runtime/field_runtime_common_blocks.inc
 done
 ! grep -RqsE 'launch_static.*(threshold|limit)[[:space:]]*=[[:space:]]*[1-9]' compiler runtime surface tools
 ! grep -RqsE '(^|[^A-Za-z])(poisson|stencil)[_-]?(matcher|route|selector|optimizer)' compiler runtime surface tools
@@ -873,7 +873,7 @@ grep -q '^ff_transport_floor_lines:' compiler/field_frontend_common_x86_64.S
 grep -q '^bottleneck_traffic:' compiler/topologyc_x86_64.S
 grep -q 'g_fragment_memory_ops_ptr' compiler/general_frontend_x86_64.S
 for f in runtime/field_runtime_512_x86_64.S runtime/field_runtime_256_x86_64.S; do
-  grep -q '1.3.81 Piecewise-Affine RegionFact' "$f"
+  grep -q '1.3.81 Piecewise-Affine RegionFact' "$f" runtime/field_runtime_common_blocks.inc
   grep -q 'execution-local RegionFact deltas' "$f"
 done
 ! grep -RqsE 'work[ _-]*steal|global[ _-]*ready[ _-]*queue|idle[ _-]*cpu[ _-]*(query|scan)|runtime[ _-]*bandwidth[ _-]*(probe|autotune)' compiler runtime surface tools
@@ -1463,3 +1463,19 @@ echo 'RANKN_ZERO_TWIDDLE_TRIG_1_3_109=0'
 echo 'RANKN_SINCOS_NEGATIVE_COPY_1_3_109=0'
 echo 'SECOND_RANKN_MATH_BACKEND_1_3_109=0'
 echo 'WHEELCHAIR_1_3_109_BUILD=PASS'
+
+# 1.3.126 SupportFact RegionSet convergence. Source-derived support cardinality
+# is data, never a fixed interval class. ADD/SUB closure forms one canonical
+# disjoint RegionSet; runtime ownership prices only surviving canonical quanta.
+grep -q '^support_count_terms:' compiler/tensor_support_frontend.inc
+grep -q '^support_emit_terms:' compiler/tensor_support_frontend.inc
+grep -q '^support_range_class:' runtime/tensor_runtime_x86_64.S
+grep -q '^support_term_count_patch:' runtime/tensor_runtime_x86_64.S
+grep -q '^g_support_regions:' runtime/tensor_runtime_x86_64.S
+grep -q '^g_support_region_count:' runtime/tensor_runtime_x86_64.S
+grep -q '^g_support_active_chunks:' runtime/tensor_runtime_x86_64.S
+! grep -RqsE 'SUPPORT_(TWO|THREE|FOUR)_INTERVAL|REGIONSET_(MAX|CAP|LIMIT)|two_regions|levelset_two|narrowband' compiler runtime tools
+echo 'SUPPORTFACT_REGIONSET_CONVERGENCE_1_3_126=PASS'
+echo 'REGIONSET_FIXED_COUNT_CLASSES=0'
+echo 'REGIONSET_WORKLOAD_MATCHER=0'
+echo 'WHEELCHAIR_1_3_126_BUILD=PASS'

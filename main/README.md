@@ -1,6 +1,6 @@
-# Wheelchair 1.3.112
+# Wheelchair 1.3.126
 
-![Build](https://img.shields.io/badge/build-29%2F29%20PASS-brightgreen) ![Release](https://img.shields.io/badge/release-1.3.112-blue)
+![Build](https://img.shields.io/badge/build-36%2F36%20PASS-brightgreen) ![Release](https://img.shields.io/badge/release-1.3.126-blue)
 
 Wheelchair is an HPC- and simulation-first general-purpose AOT language built around Rank-N semantics, matrix-free execution, ValueFacts, StateFacts, AddressFacts, RegionFacts, CoordinateFacts, GroupFact, Physical Reality, Traffic Reality, Silicon Domain Graphs, and Physical DAG execution.
 
@@ -12,6 +12,100 @@ physical work / mathematical-physical lower bound -> 1
 
 Idle silicon is valid whenever another materialization costs more than the remaining necessary work.
 
+
+
+## 1.3.126: SupportFact becomes a canonical RegionSet
+
+A zero-false reduction is no longer limited to one contiguous support. ADD/SUB support facts compose as a source-derived union; runtime discovers the exact IEEE intervals, sorts/merges them into one disjoint RegionSet, and the existing strict reduction tree erases every wholly dead subtree. There is no two-region mode, fixed Region capacity, Level-Set/narrow-band matcher, active-set backend, or new DSL.
+
+On the retained real Level-Set/VOF two-interface benchmark (`n=8,000,000`, about 0.1% active support), pinned one-CPU median falls from **7.236 ms in 1.3.125 to 0.939 ms in 1.3.126 (7.70x)** with the same strict checksum. Natural serial C/Fortran measure 10.717/11.062 ms; hand-bounded two-band controls measure 1.381/1.716 ms. The 4M/8M/16M probe loses the former full-domain linear scaling and stays near support/startup cost.
+
+## 1.3.125: proven zero support stops owning execution
+
+A zero-false PredicateFact can now contract the execution domain itself instead of only masking value work inside each packet. The compiler proves constant/monotone/single-basin support topology, emits the original IEEE relation as one cold boundary witness, and Physical Reality retains ownership only for canonical leaves that can intersect the true support. Strict reductions preserve the immutable q=1 tree by replacing only proved-all-zero subtrees with exact `+0`; empty support closes directly to the reduction identity. No contact/Hertz matcher, active-set DSL, density threshold, second reduction backend, JIT, scheduler, or source-visible sparsity mechanism is added.
+
+On the retained real penalty-contact benchmark (`n=8,000,000`, about 4473 active points), pinned single-CPU whole-process median falls from **6.638 ms in 1.3.124 to 0.886 ms in 1.3.125 (7.49x)** with the same strict checksum. Pure serial `-O3 -march=native` C/Fortran measure 8.842/7.819 ms; hand-bounded support implementations measure 1.344/1.753 ms. With four CPUs available, Wheelchair measures 0.858 ms versus 2.340 ms in 1.3.124 and naturally reprices the shrunken work rather than forcing full-domain multiplicity.
+
+
+## 1.3.124: periodic facts keep their mathematical size
+
+Deep dynamic affine coordinates no longer become physically huge merely because an unreduced u64 representative crosses the old reciprocal proof estimate. The quotient bound is derived from the affine relation itself, unsigned u64 coordinates convert exactly without scalar lanes, and genuinely wider periodic facts reuse the existing persistent AffineFact authority so exact ring expansion initializes retained value/step state instead of living in the hot loop. No depth matcher, benchmark route, compatibility evaluator, second periodic IR, JIT, scheduler, or source-visible parallel/periodic DSL is introduced.
+
+On the retained pinned 16M-element depth-23 diagnostic, the 1.3.123 cliff contracts from **720.100 ms to 27.201 ms (26.47x)** and from a 21,833-byte executable to 8,985 bytes, while natural C/Fortran measure 580.733/588.603 ms and hand-composed C measures 25.001 ms. At depth 40, where the correlated reciprocal proof is genuinely insufficient, the exact retained realization improves **1070.342 -> 482.341 ms (2.22x)** and still beats natural C/Fortran, but remains far from the manual C ceiling; that residual gap is kept visible as physical-aging work.
+
+## 1.3.123: periodic facts outlive one physical precision trick
+
+Dynamic periodic affine coordinates no longer become source-language errors when the FP64 reciprocal realization leaves its strict proof domain. `PeriodicAffineFact(c,d,n)` remains one semantic fact. A compile-time physical proof keeps the mature reciprocal path where safe, expands it with exact integer ±2 quotient correction where the binary64 error bound proves that sufficient, and otherwise realizes the same fact with exact integer modular arithmetic. There is no depth matcher, benchmark route, source-visible mode, compatibility evaluator, second Tensor IR, JIT, or scheduling DSL.
+
+The former `(3*i+b) mod n` depth wall disappears: weighted permutation-sensitive oracle tests pass through depth 40 at multiple runtime extents, while depth 12 keeps its prior executable byte-for-byte. On the retained pinned 16M-element benchmark, depths 13/21/22 run at 23.745/23.682/24.377 ms versus natural C at 344.997/496.447/506.645 ms and natural Fortran at 349.908/487.547/525.043 ms. The matching hand-composed C ceilings are 24.788/23.454/24.220 ms, showing that the automatic structure is essentially back at the manually collapsed physical workload. Depth 23 remains a documented physical-aging frontier: exact semantics compile, but the general integer-ring fallback is still slower than the manual ceiling.
+
+## 1.3.122: parallel assembly authorities converge
+
+Tensor no longer carries four mostly parallel frontend source bodies. ISA/profile-independent bodies live once in a common assembler-time authority, genuinely shared physical-profile bodies live once in a profile authority, and the four entry surfaces retain only the semantic/physical differences that actually exist. Field runtime follows the same rule for proof-neutral AVX2/AVX-512 bodies while proof-bearing frontier/reduction authorities remain explicit. The duplicate Field linker script is gone. There is no runtime ISA/profile dispatcher, generated source clone, compatibility frontend, workload matcher, scheduler, JIT, or DSL surface.
+
+This is source convergence, not a performance trick. All eight production binaries remain byte-for-byte identical to the pristine 1.3.121 build, and the retained 12-pair structural-inflation program is still the same 8513-byte ELF with SHA-256 `ab7667c9bca6a2b39449b41bd4cbf3f81045e50d192d1d3350d62cca9176a569`. Eleven interleaved runs measure 5.400 -> 5.343 ms median; because the executables are identical, that ~1.1% difference is noise. Production `.S/.inc` source falls from 3,018,437 to 2,639,371 bytes (-12.56%); Tensor frontend authorities fall 29.51% and Field runtime authorities 20.56%. The release ZIP also stops shipping the generated `build/` tree while retaining historical `devtrash/` evidence and canonical `bin/` products.
+
+## 1.3.121: CoordinateFacts compose before realization
+
+Indexed periodic coordinates now compose symbolically before any SIMD carrier is allocated. Arbitrarily deep affine/remap chains therefore collapse into one canonical CoordinateFact; identity chains disappear completely, signed residue representatives normalize in the same Z/nZ materializer, and source nesting no longer leaks AVX-512 register cardinality into language expressibility. The former 24-indexed-map wall is gone without a larger limit, spill path, compatibility evaluator, workload matcher, or scheduling DSL.
+
+The derived backend also retires its private 6-slot dense/mixed/scaled partitions and 2-slot induction partition in favor of the existing physical persistent Fact register authority. Front-end SIMD-byte budgets, the Field 8 MiB / 2x / 4x NT-store selector, a dead mutable-slot constant, and a defensive CPUID subleaf cap are removed rather than retuned. On the retained constant-mathematics structural-inflation benchmark, 0 through 200 canceling remap pairs emit the same 8513-byte executable. At 12 pairs, same-host 1.3.120 -> 1.3.121 wall time is 394.124 -> 99.647 ms (3.96x). In a separate same-host current-vs-C/Fortran run, Wheelchair is 99.541 ms versus 199.103 / 200.410 ms, about 2.00x / 2.01x faster.
+
+## 1.3.120: periodic ShapeFact closure
+
+Dynamic high-axis affine remaps now close through the same ShapeFact-N physical product ring as existing mixed-radix coordinates. Expressions such as `(b*97 + i*13 + 17) % n` no longer fall out of the structural tensor path. The compiler uses the identity `(L mod n) * S = (L*S) mod (n*S)` and the existing CoordinateFact authority; there is no rank-specific route, fixed-radix matcher, scalar fallback, second coordinate backend, or scheduling DSL. A retained benchmark records both the repaired coverage and the remaining gap to a hand-written recurrence ceiling.
+
+## 1.3.119: Predicate support becomes physical
+
+1.3.119 keeps AVX-512 floating PredicateFacts in native mask authority and lets exact `+0.0` false support become a zero-work guarded packet Region. A fully empty packet no longer computes the true relation; a mixed packet computes it once and masks inactive lanes exactly. This is the same Rank-N PredicateFact/Region chain, with no active-set DSL, density threshold, workload matcher, second tensor IR, or scheduler. Cross-packet compaction is deliberately not claimed.
+
+In the retained strict 100M-element diagnostic, direct PredicateFact work improves **96.663 → 74.200 ms** on one CPU (**1.303×**) and reaches **1.227× C throughput**. With the same predicate behind nonconforming CoordinateFact remaps, Wheelchair improves **156.509 → 127.177 ms** and records **3.149× C / 3.145× Fortran** on one CPU. Dense and all-active probes also improve, confirming that the gain is not a sparse-density special branch.
+
+## 1.3.118: Rank-N predicates become ordinary ValueFacts
+
+Field/Tensor values now consume the same predicate relation that General already uses: FP `eq/ne/lt/le/gt/ge` produce Rank-N PredicateFacts, and `select(P, f64, f64)` remains inside the existing structured Physical DAG on AVX-512, native256, derived, and derived-native256 paths. This closes the former seam where CoordinateFact and SIMD mask machinery existed but a value-dependent Field predicate still forced structured-source rejection. No contact primitive, active-set container, workload matcher, second Predicate IR, JIT, scheduler, or source-visible parallel DSL is added.
+
+The retained strict 100M-element diagnostic deliberately separates the new relation from CoordinateFact. With direct coordinates Wheelchair is near ordinary C scale (**95.40 ms vs 90.08 ms** on one CPU), so predicate support is not advertised as a speed trick. With the same predicate behind two nonconforming runtime remaps, Wheelchair records **159.55 ms vs 407.39 ms C / 422.86 ms Fortran** on one CPU (**2.553x / 2.650x faster**) and **55.75 / 104.89 / 107.67 ms** on four CPUs (**1.881x / 1.931x**). About 3.1% of elements are active, but 1.3.118 does **not** yet compact that support set; inactive lanes are not claimed to disappear.
+
+## 1.3.117: proved root frontiers become fixed executions
+
+General AOT root independence now survives into physical execution ownership. Ready roots still pass the existing work-vs-outward-lifecycle cost gate; only roots that repay a new lifecycle may anchor an additional execution, and invocation affinity remains the external multiplicity bound. Once those execution anchors exist, the complete already-ready root frontier is fused into immutable chains before launch. A child owns its chain from birth through completion and then returns to the OS. There is no ready queue, worker pool, work stealing, idle-CPU query, recipient search, or post-completion task transfer.
+
+The fixed integer resident-count wall is also gone: integer StateFacts ask actual old/next GPR geometry, with borrowed R11/R12 carriers removed from the same anonymous temp pool. FP comparisons consume resident ValueFact/ConstantFact XMM operands directly instead of copying them through temporary registers. No Mandelbrot/fractal/pixel matcher, thread API, source-visible parallel DSL, JIT, scheduler, kernel-offload path, compatibility execution graph, or second IR is introduced.
+
+On the exact 16-root whole-domain Mandelbrot regression, 15 interleaved four-CPU runs move Wheelchair from **212.75 ms in 1.3.116 to 73.21 ms in 1.3.117**, a **2.906x** speedup and **65.59%** wall-time reduction; median effective CPU use rises from **1.02 to 3.44 cores**. One-CPU time changes only **212.42 -> 209.01 ms (1.016x)**, isolating the main gain to execution ownership. Fresh strict C/Fortran medians are **42.63 / 43.42 ms**, so parity is not claimed. Checksum remains `0x00000000032e223d`.
+
+## 1.3.116: predicates become physical regions
+
+Repeated PredicateFacts now control one Guarded Physical Region instead of decorating every next-StateFact with an independent select diamond. Exact shared guards are discovered from the existing episode ValueFact graph; all guarded arms still consume the same old state generation, and identity arms emit zero update/commit work. Predicate control consumers can use FLAGS or the resident BOOL carrier directly instead of routing through RAX, and canonical BOOL `and/or/xor` over resident facts map directly to the existing XMM bit relation. Integer literals that fit the architectural immediate relation are consumed as ISA operands rather than transient GPR ValueFacts.
+
+No Mandelbrot/fractal/pixel recognizer, state-count workload route, JIT, runtime scheduler, source-visible parallel DSL, kernel-offload path, compatibility evaluator, or second control IR is added. The region is a compile-time projection of PredicateFact identity plus existing StateFact carriers. Visible trap semantics remain unchanged.
+
+On the retained strict scalar Mandelbrot diagnostic, 15 pinned interleaved runs move the median from **359.70 ms in 1.3.115 to 213.67 ms in 1.3.116**, a further **1.683x** speedup and **40.60%** wall-time reduction with checksum `0x00000000032e223d` unchanged. Fresh strict C and Fortran medians are **143.14 ms** and **144.82 ms**, leaving Wheelchair at about **1.493x C / 1.475x Fortran** rather than claiming parity. The generated trailer contracts from **3193 to 2926 bytes**; static `movabs` sites fall **27 -> 18**, `test` **45 -> 31**, and `jmp` **35 -> 27**. Pure FP1/FP2 scalar recurrences remain essentially neutral, isolating the gain to control/state physicalization.
+
+## 1.3.115: basic ValueFacts stay physical
+
+Basic scalar operators no longer get a veto over an otherwise native Physical episode merely because their emitter realization was missing. FP `neg/abs/min/max`, representation-preserving scalar casts, integer bit relations and signed/unsigned `min/max`, wrap-total integer `neg/abs`, and BOOL `xor` now reuse the existing carrier/CSE/ConstantFact authorities. FP sign masks are ordinary ConstantFacts: when physical pressure retains one, sign transformation collapses to a single XMM bitwise operation; otherwise the same DAG uses a transient bit carrier rather than switching evaluator.
+
+No workload matcher, local generic-island compatibility layer, JIT, runtime scheduler, source-visible parallel DSL, or second scalar backend is added. Visible trap semantics remain proof-gated rather than being weakened for native admission.
+
+Pinned A/B diagnostics versus 1.3.114 improve **2.112x** for `abs(f64)`, **3.391x** for FP `min/max`, **2.535x** for INT `min/max`, and **2.537x** for the formerly generic `select + neg` probe. The latter is now **1.480x** the matching C time instead of **3.755x**. Strict scalar Mandelbrot is essentially neutral (**352.47 ms -> 351.58 ms**) with the same `0x00000000032e223d` checksum, so the release does not use an unrelated workload as evidence.
+
+## 1.3.114: repeated predicates become episode ValueFacts
+
+Repeated compare/boolean relations now share the same episode-scoped Physical ValueFact authority as repeated arithmetic. The compiler may retain exact PredicateFacts in the existing pressure-derived shared carrier pool, and retained parent/child arithmetic facts are no longer forced into an artificial antichain when both still have independent consumers. Shared facts are materialized from structural leaves toward parents so selected parents reuse selected children instead of rebuilding them. The native iterate condition now uses the same Physical predicate emitter rather than the generic expression stack.
+
+No Mandelbrot/fractal/pixel recognizer, predicate-cache knob, control-flow DSL, JIT route, runtime scheduler, workload selector, or second scalar backend is introduced. This is General Physical-DAG convergence.
+
+On the retained strict scalar Mandelbrot diagnostic, 15 interleaved runs move the Wheelchair median from **513.52 ms in 1.3.113 to 347.94 ms in 1.3.114**, a further **1.476x** speedup with identical `0x00000000032e223d` output. Generated trailer counts contract from `vucomisd/seta/setae = 8/8/8` to **1/1/1**, `sete` from **4 to 1**, `vaddsd` from **12 to 5**, and trailer bytes from **3661 to 3193**. C and Fortran remain around **140 ms**, so scalar-control parity is not claimed.
+
+## 1.3.113: control facts stay inside Physical DAG
+
+General scalar realization now treats comparisons, lazy boolean relations, and `select` as ordinary Physical-DAG values instead of ejecting the whole recurrence into the generic stack/state path. Integer `trap` overflow is realized in the same native transition with its strict failure edge; `wrap` remains the same relation rather than a second backend. CSE and effective-state liveness now traverse the complete expression graph, so arithmetic facts below control nodes remain visible to the existing residency authority.
+
+No Mandelbrot/fractal/pixel recognizer, control-flow DSL, scheduler, JIT route, workload selector, or second scalar backend is introduced. The change is a General control/value convergence: predicates may control physical regions without ceasing to be ValueFacts.
+
+On the retained strict scalar Mandelbrot diagnostic (768x768, 512-iteration bound, one fixed CPU, no SIMD), 11 interleaved old/new runs move the Wheelchair median from **2252.69 ms to 523.44 ms**, a **4.304x** speedup with identical `0x00000000032e223d` output. The generated trailer contracts from about **1458 to 983 disassembly lines**, `push+pop` from **386 to 82**, and scalar multiply sites from **20 to 8**. Fresh strict C and Fortran medians are **143.44 ms** and **143.34 ms**; 1.3.113 therefore repairs the major rollback but does not claim scalar-control parity yet.
 
 ## 1.3.112: tolerance becomes a proof bound, not a fast mode
 

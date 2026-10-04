@@ -259,6 +259,13 @@
 .equ PR_MACHINE_FACT_WORKLOAD_MATCHER,0
 .equ PR_MACHINE_FACT_RUNTIME_POLICY_MANAGER,0
 
+# 1.3.117 scalar carrier aging. Integer StateFact residency is physical GPR
+# geometry rather than a semantic state-count wall, and an FP compare consumes
+# an already-resident ValueFact/ConstantFact carrier directly when available.
+.equ PR_INT_STATE_RESIDENCY_IS_GPR_GEOMETRY,1
+.equ PR_INT_STATE_FIXED_RESIDENT_COUNT,0
+.equ PR_FP_COMPARE_RESIDENT_SOURCE_DIRECT,1
+
 # 1.3.75 complete machine-form burn aging.  The existing Physical DAG remains
 # the sole scheduling authority all the way to ISA. Exact immutable coefficient
 # identities are consumed directly by the machine emitter: tolerant +1/-1/0
@@ -330,6 +337,13 @@
 .equ PR_CAUSAL_FRONTIER_COST_GATED,1
 .equ PR_READY_IMPLIES_OUTWARD_EXECUTION,0
 .equ PR_GENERAL_OUTWARD_USES_SHARED_PHYSICAL_PRICE,1
+# 1.3.117 root-frontier ownership aging.  Cost admission is unchanged: fusion may
+# redistribute roots only among execution contexts whose birth was already paid
+# for by the shared lifecycle comparison.  Every bundle is immutable before
+# launch; completion never transfers a root to another executor.
+.equ PR_READY_ROOT_FRONTIER_FUSED_BEFORE_MATERIALIZATION,1
+.equ PR_FRONTIER_FUSION_BYPASSES_WORK_LIFECYCLE_COST,0
+.equ PR_POST_MATERIALIZATION_ROOT_TRANSFER,0
 .equ PR_RUNTIME_CPU_LOCATION_QUERY,0
 .equ PR_RUNTIME_NUMA_PAGE_MIGRATION,0
 

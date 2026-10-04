@@ -25,6 +25,7 @@
 .equ CLONE_PARENT, 0x8000
 .equ PROT_RW, 3
 .equ MAP_PRIVATE_ANON_STACK, 0x20022
+.equ MAP_PRIVATE_ANON, 0x22
 .equ REGION_STACK_SIZE, 16384
 # Reduction frontier is bounded by the qword chunk-index domain, not a fixed leaf geometry.
 .equ REDUCE_LEVELS, 64
@@ -66,6 +67,24 @@ _start:
     jnz .bad_args
     cmp qword ptr [rip+g_chunks],0
     je .bad_args
+    call discover_support
+    test eax,eax
+    jnz .bad_args
+    call reprice_support_ownership
+    test eax,eax
+    jnz .bad_args
+    # An empty proven support is the reduction identity itself. Do not allocate
+    # execution ownership for a Physical DAG with no value-producing leaf.
+    cmp qword ptr [rip+g_support_active_chunks],0
+    jne .support_nonempty
+    pxor xmm0,xmm0
+    movq rax,xmm0
+    call print_checksum
+    xor edi,edi
+    mov eax,SYS_exit_group
+    syscall
+    hlt
+.support_nonempty:
 
     # 1.3.17 external-silicon execution: Wheelchair owns work, never silicon.
     # expansion never queries or accounts free CPU capacity.
@@ -284,6 +303,416 @@ derive_launch_leaf_geometry:
     pop r13
     pop r12
     pop rbx
+    ret
+
+# discover_support_term(edi=RegionSet leaf index) -> rax=chunk_lo, rdx=chunk_hi,
+# ecx=0 exact interval/empty, ecx=1 witness unordered => full-domain support,
+# ecx=2 physical failure. Every eval_slot call reasserts R10D because the leaf
+# evaluator may consume R10 as an ordinary transient register.
+discover_support_term:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp,16
+    mov r14d,edi
+    mov r15,qword ptr [rip+g_domain_size]
+    test r15,r15
+    jz .dst_fail
+    xor r12d,r12d                         # lo=0
+    mov r13,r15
+    dec r13                               # hi=n-1
+.dst_min_loop:
+    cmp r12,r13
+    jae .dst_min_found
+    mov rbx,r13
+    sub rbx,r12
+    shr rbx,1
+    add rbx,r12                           # mid
+    mov r8,rbx
+    mov r9,r15
+    mov r10d,r14d
+    call eval_slot
+    movsd qword ptr [rsp],xmm0
+    lea r8,[rbx+1]
+    mov r9,r15
+    mov r10d,r14d
+    call eval_slot
+    movsd xmm1,qword ptr [rsp]
+    ucomisd xmm1,xmm0
+    jp .dst_full
+    jbe .dst_min_left
+    lea r12,[rbx+1]
+    jmp .dst_min_loop
+.dst_min_left:
+    mov r13,rbx
+    jmp .dst_min_loop
+.dst_min_found:
+    mov r8,r12
+    mov r9,r15
+    mov r10d,r14d
+    call eval_slot
+    test eax,eax
+    jz .dst_empty
+    mov qword ptr [rsp+8],r12             # exact true seed
+
+    # lower_bound(true) over [0,seed]
+    xor r12d,r12d
+    mov r13,qword ptr [rsp+8]
+.dst_left_loop:
+    cmp r12,r13
+    jae .dst_left_done
+    mov rbx,r13
+    sub rbx,r12
+    shr rbx,1
+    add rbx,r12
+    mov r8,rbx
+    mov r9,r15
+    mov r10d,r14d
+    call eval_slot
+    test eax,eax
+    jnz .dst_left_true
+    lea r12,[rbx+1]
+    jmp .dst_left_loop
+.dst_left_true:
+    mov r13,rbx
+    jmp .dst_left_loop
+.dst_left_done:
+    mov qword ptr [rsp],r12               # first true element
+
+    # lower_bound(false) over [seed,n), n is a false sentinel
+    mov r12,qword ptr [rsp+8]
+    mov r13,r15
+.dst_right_loop:
+    cmp r12,r13
+    jae .dst_right_done
+    mov rbx,r13
+    sub rbx,r12
+    shr rbx,1
+    add rbx,r12
+    cmp rbx,r15
+    jae .dst_right_false
+    mov r8,rbx
+    mov r9,r15
+    mov r10d,r14d
+    call eval_slot
+    test eax,eax
+    jz .dst_right_false
+    lea r12,[rbx+1]
+    jmp .dst_right_loop
+.dst_right_false:
+    mov r13,rbx
+    jmp .dst_right_loop
+.dst_right_done:
+    # Convert exact element support to conservative canonical-leaf support.
+    mov rax,qword ptr [rsp]
+    xor edx,edx
+    div qword ptr [rip+chunk_elements_patch]
+    mov rbx,rax                            # chunk_lo
+    mov rax,r12
+    xor edx,edx
+    div qword ptr [rip+chunk_elements_patch]
+    test rdx,rdx
+    jz .dst_hi_ready
+    inc rax
+.dst_hi_ready:
+    cmp rax,qword ptr [rip+g_canonical_chunks]
+    jbe .dst_hi_ok
+    mov rax,qword ptr [rip+g_canonical_chunks]
+.dst_hi_ok:
+    mov rdx,rax                            # chunk_hi
+    mov rax,rbx                            # chunk_lo
+    xor ecx,ecx
+    jmp .dst_done
+.dst_empty:
+    xor eax,eax
+    xor edx,edx
+    xor ecx,ecx
+    jmp .dst_done
+.dst_full:
+    xor eax,eax
+    xor edx,edx
+    mov ecx,1
+    jmp .dst_done
+.dst_fail:
+    xor eax,eax
+    xor edx,edx
+    mov ecx,2
+.dst_done:
+    add rsp,16
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+# discover_support() -> eax 0/1.
+# RegionSet is source-cardinality data: every AOT-proven basin contributes one
+# exact cold interval; runtime sorts and canonicalizes arbitrary overlap or
+# adjacency. No region-count class, density threshold, or workload geometry is
+# encoded in the runtime.
+discover_support:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp,16
+    xor eax,eax
+    mov qword ptr [rip+g_support_regions],0
+    mov qword ptr [rip+g_support_region_count],0
+    mov qword ptr [rip+g_support_active_chunks],0
+    mov rdx,qword ptr [rip+g_canonical_chunks]
+    mov ecx,dword ptr [rip+support_mode_patch]
+    test ecx,ecx
+    jz .ds_regions_full_mode
+    cmp ecx,2
+    je .ds_regions_empty
+    cmp ecx,1
+    jne .ds_regions_fail
+    mov r12d,dword ptr [rip+support_term_count_patch]
+    test r12d,r12d
+    jz .ds_regions_fail
+
+    # One 16-byte [lo,hi) descriptor per proven leaf. The allocation size is a
+    # source fact; there is no fixed RegionSet capacity.
+    mov rsi,r12
+    shl rsi,4
+    jc .ds_regions_fail
+    mov qword ptr [rsp],rsi
+    xor edi,edi
+    mov edx,PROT_RW
+    mov r10d,MAP_PRIVATE_ANON
+    mov r8,-1
+    xor r9d,r9d
+    mov eax,SYS_mmap
+    syscall
+    test rax,rax
+    js .ds_regions_fail
+    mov qword ptr [rip+g_support_regions],rax
+    mov r13,rax                            # descriptor base
+    xor ebx,ebx                            # term index
+    xor r14d,r14d                          # stored intervals
+.ds_regions_term_loop:
+    cmp ebx,r12d
+    jae .ds_regions_terms_done
+    mov edi,ebx
+    call discover_support_term
+    cmp ecx,1
+    je .ds_regions_full
+    cmp ecx,2
+    je .ds_regions_fail
+    cmp rax,rdx
+    jae .ds_regions_term_next
+    mov rcx,r14
+    shl rcx,4
+    mov qword ptr [r13+rcx],rax
+    mov qword ptr [r13+rcx+8],rdx
+    inc r14d
+.ds_regions_term_next:
+    inc ebx
+    jmp .ds_regions_term_loop
+.ds_regions_terms_done:
+    test r14d,r14d
+    jz .ds_regions_empty
+
+    # Insertion sort by lo. Region count is source-derived and cold; keeping the
+    # representation canonical is more valuable than maintaining another tree.
+    mov ebx,1
+.ds_sort_outer:
+    cmp ebx,r14d
+    jae .ds_sort_done
+    mov rax,rbx
+    shl rax,4
+    mov r8,qword ptr [r13+rax]             # key lo
+    mov r9,qword ptr [r13+rax+8]           # key hi
+    mov r15d,ebx
+.ds_sort_inner:
+    test r15d,r15d
+    jz .ds_sort_place
+    mov rax,r15
+    dec rax
+    shl rax,4
+    mov rcx,qword ptr [r13+rax]            # prev lo
+    cmp rcx,r8
+    jbe .ds_sort_place
+    mov rdx,qword ptr [r13+rax+8]
+    add rax,16
+    mov qword ptr [r13+rax],rcx
+    mov qword ptr [r13+rax+8],rdx
+    dec r15d
+    jmp .ds_sort_inner
+.ds_sort_place:
+    mov rax,r15
+    shl rax,4
+    mov qword ptr [r13+rax],r8
+    mov qword ptr [r13+rax+8],r9
+    inc ebx
+    jmp .ds_sort_outer
+.ds_sort_done:
+
+    # Merge overlap and adjacency in-place into one disjoint canonical RegionSet.
+    mov r15d,1                              # write count, first region retained
+    mov ebx,1                               # read index
+.ds_merge_loop:
+    cmp ebx,r14d
+    jae .ds_merge_done
+    mov rax,rbx
+    shl rax,4
+    mov r8,qword ptr [r13+rax]             # next lo
+    mov r9,qword ptr [r13+rax+8]           # next hi
+    mov rax,r15
+    dec rax
+    shl rax,4
+    mov rcx,qword ptr [r13+rax+8]          # current hi
+    cmp r8,rcx
+    ja .ds_merge_new
+    cmp r9,rcx
+    jbe .ds_merge_next
+    mov qword ptr [r13+rax+8],r9
+    jmp .ds_merge_next
+.ds_merge_new:
+    mov rax,r15
+    shl rax,4
+    mov qword ptr [r13+rax],r8
+    mov qword ptr [r13+rax+8],r9
+    inc r15d
+.ds_merge_next:
+    inc ebx
+    jmp .ds_merge_loop
+.ds_merge_done:
+    mov qword ptr [rip+g_support_region_count],r15
+
+    # Active work is the sum of disjoint surviving canonical quanta.
+    xor r12d,r12d
+    xor ebx,ebx
+.ds_active_loop:
+    cmp rbx,r15
+    jae .ds_active_done
+    mov rax,rbx
+    shl rax,4
+    mov rcx,qword ptr [r13+rax+8]
+    sub rcx,qword ptr [r13+rax]
+    jc .ds_regions_fail
+    add r12,rcx
+    jc .ds_regions_fail
+    inc rbx
+    jmp .ds_active_loop
+.ds_active_done:
+    mov qword ptr [rip+g_support_active_chunks],r12
+    xor eax,eax
+    jmp .ds_regions_done
+
+.ds_regions_full:
+    # An unordered witness makes one leaf conservatively full-domain. The union
+    # is therefore the full ShapeFact domain, represented canonically as one region.
+    mov rax,qword ptr [rip+g_canonical_chunks]
+    mov qword ptr [r13],0
+    mov qword ptr [r13+8],rax
+    mov qword ptr [rip+g_support_region_count],1
+    mov qword ptr [rip+g_support_active_chunks],rax
+    xor eax,eax
+    jmp .ds_regions_done
+.ds_regions_full_mode:
+    mov rax,qword ptr [rip+g_canonical_chunks]
+    mov qword ptr [rip+g_support_active_chunks],rax
+    xor eax,eax
+    jmp .ds_regions_done
+.ds_regions_empty:
+    mov qword ptr [rip+g_support_region_count],0
+    mov qword ptr [rip+g_support_active_chunks],0
+    xor eax,eax
+    jmp .ds_regions_done
+.ds_regions_fail:
+    mov eax,1
+.ds_regions_done:
+    add rsp,16
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+# support_range_class(rdi=begin_chunk,rsi=end_chunk) -> eax 0=no support,
+# 1=entire range inside one canonical support region, 2=partial intersection.
+support_range_class:
+    cmp dword ptr [rip+support_mode_patch],0
+    je .src_dense
+    mov rcx,qword ptr [rip+g_support_region_count]
+    test rcx,rcx
+    jz .src_zero
+    mov r8,qword ptr [rip+g_support_regions]
+    xor edx,edx
+.src_loop:
+    cmp rdx,rcx
+    jae .src_zero
+    mov rax,rdx
+    shl rax,4
+    mov r9,qword ptr [r8+rax]              # lo
+    mov r10,qword ptr [r8+rax+8]           # hi
+    cmp r10,rdi
+    jbe .src_next
+    cmp r9,rsi
+    jae .src_zero
+    cmp rdi,r9
+    jb .src_partial
+    cmp rsi,r10
+    jbe .src_dense
+.src_partial:
+    mov eax,2
+    ret
+.src_next:
+    inc rdx
+    jmp .src_loop
+.src_zero:
+    xor eax,eax
+    ret
+.src_dense:
+    mov eax,1
+    ret
+
+# reprice_support_ownership() -> eax 0/1.
+# Ownership is priced from the sum of surviving disjoint RegionSet quanta.
+reprice_support_ownership:
+    mov r10,qword ptr [rip+g_support_active_chunks]
+    test r10,r10
+    jz .rso_regions_ok
+    mov r8,qword ptr [rip+g_chunks]
+    cmp r8,1
+    jbe .rso_regions_ok
+    mov r9,qword ptr [rip+chunk_work_ticks_patch]
+    test r9,r9
+    jz .rso_regions_fail
+    mov rax,qword ptr [rip+outward_materialization_ticks_patch]
+    xor edx,edx
+    div r9
+    inc rax
+    cmp rax,1
+    jbe .rso_regions_ok
+    cmp r10,rax
+    jae .rso_regions_bound
+    mov qword ptr [rip+g_chunks],1
+    jmp .rso_regions_ok
+.rso_regions_bound:
+    dec r10
+    dec rax
+    xor edx,edx
+    div rax
+    test rax,rax
+    jnz .rso_regions_clip
+    mov rax,1
+.rso_regions_clip:
+    cmp r8,rax
+    jbe .rso_regions_ok
+    mov qword ptr [rip+g_chunks],rax
+.rso_regions_ok:
+    xor eax,eax
+    ret
+.rso_regions_fail:
+    mov eax,1
     ret
 
 # strict_split_k(rdi=canonical subtree leaves, esi=ownership regions)
@@ -744,9 +1173,71 @@ reduce_region_results:
     ret
 
 # worker_range(rsi=begin_chunk, rdx=end_chunk) -> xmm0
-# Used by the 1.3.10 causal-work topology. Every supplied range is a true
-# canonical reduction subtree; no executor-derived partition exists.
+# Support-aware realization of one canonical subtree. Strict mode recursively
+# folds proven-zero subtrees to +0 while reproducing the immutable q=1 addition
+# tree exactly. Tolerant mode may directly clip to the support intersection.
 worker_range:
+    push rbx
+    push r12
+    push r13
+    push r14
+    mov r12,rsi
+    mov r13,rdx
+    mov rdi,r12
+    mov rsi,r13
+    call support_range_class
+    test eax,eax
+    jz .wr_regions_zero
+    cmp eax,1
+    je .wr_regions_dense
+    # Partial RegionSet intersection. Split only along the canonical reduction
+    # tree, so Strict addition order is unchanged while zero subtrees disappear.
+    mov r14,r13
+    sub r14,r12
+    cmp r14,1
+    jbe .wr_regions_dense
+    mov rax,r14
+    bsr rcx,rax
+    mov rbx,1
+    shl rbx,cl
+    cmp rbx,r14
+    jne .wr_regions_have_left
+    shr rbx,1
+.wr_regions_have_left:
+    test rbx,rbx
+    jz .bad_args
+    add rbx,r12
+    sub rsp,16
+    mov rsi,r12
+    mov rdx,rbx
+    call worker_range
+    movsd qword ptr [rsp],xmm0
+    mov rsi,rbx
+    mov rdx,r13
+    call worker_range
+    movsd xmm1,qword ptr [rsp]
+    addsd xmm1,xmm0
+    movapd xmm0,xmm1
+    add rsp,16
+    jmp .wr_regions_done
+.wr_regions_dense:
+    mov rsi,r12
+    mov rdx,r13
+    call worker_range_dense
+    jmp .wr_regions_done
+.wr_regions_zero:
+    pxor xmm0,xmm0
+.wr_regions_done:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+# Dense canonical subtree evaluator. Every supplied range is a true canonical
+# reduction subtree when Strict; SupportFact only chooses whether this authority
+# needs to exist physically.
+worker_range_dense:
     push rbx
     push r12
     push r13
@@ -955,6 +1446,10 @@ print_checksum:
 execution_admission_patch: .long 1
 .global reduction_tolerant_patch
 reduction_tolerant_patch: .long 0
+.global support_mode_patch
+support_mode_patch: .long 0
+.global support_term_count_patch
+support_term_count_patch: .long 0
 .global static_placement_required_patch
 static_placement_required_patch: .long 0
 .global static_placement_mask_bytes_patch
@@ -991,6 +1486,9 @@ checksum_line: .ascii "checksum_bits=0x0000000000000000\n"
 g_domain_size: .skip 8
 g_chunks: .skip 8
 g_canonical_chunks: .skip 8
+g_support_regions: .skip 8
+g_support_region_count: .skip 8
+g_support_active_chunks: .skip 8
 .p2align 3
 g_region_arena: .skip 8
 g_region_arena_size: .skip 8

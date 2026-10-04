@@ -6422,18 +6422,34 @@ s_ast_shape_q_new:
     lea rcx,[rip+shape_q_name]; mov [rax+SN_PTR],rcx; mov qword ptr [rax+SN_LEN],SHAPEFN_Q_NAME_LEN
 .sarqn_done: ret
 
-# Canonical affine coordinate collector for one dynamic ShapeFact-N axis.
-# rdi=node, esi=axis id -> eax=1 when node is an ADD/SUB affine form over
-# {axis,n,literal}; rdx=signed constant, ecx=axis coefficient, r8d=n coefficient.
-# No source spelling or fixed AST shape is privileged.
+# Canonical ShapeFact-N affine-coordinate proof.
+# rdi=node, esi=dynamic axis id -> eax=1 when node is an integer affine form
+# over {ShapeFact axes, runtime extent, u64 literals}.  Literal multiplication
+# is algebra, not a separate execution case.  rdx/ecx/r8 retain the historical
+# constant/target-axis/extent coefficients for callers that only need those
+# projections; coefficients of other ShapeFact axes are intentionally erased
+# because their identities are preserved by s_shapefact_rewrite itself.
 s_shapefact_affine_coord_collect:
     push rbx; push r12; push r13; push r14; push r15
     mov rbx,rdi; mov r12d,esi
     test rbx,rbx; jz .sracc_no
 
     mov rdi,rbx; mov esi,r12d; call s_shapefact_axis_matches
-    test eax,eax; jz .sracc_try_n
+    test eax,eax; jz .sracc_try_other_axis
     xor edx,edx; mov ecx,1; xor r8d,r8d; mov eax,1; jmp .sracc_done
+.sracc_try_other_axis:
+    xor r13d,r13d
+.sracc_axis_scan:
+    cmp r13d,dword ptr [rip+s_shape_rank]; jae .sracc_try_n
+    cmp r13d,r12d; je .sracc_axis_next
+    mov rax,[rip+s_shape_axis_ptrs]; mov rdi,[rax+r13*8]
+    mov rax,[rip+s_shape_axis_lens]; mov rsi,[rax+r13*8]
+    mov rdx,[rbx+SN_PTR]; mov rcx,[rbx+SN_LEN]; call s_span_eq
+    test eax,eax; jnz .sracc_other_axis
+.sracc_axis_next:
+    inc r13d; jmp .sracc_axis_scan
+.sracc_other_axis:
+    xor edx,edx; xor ecx,ecx; xor r8d,r8d; mov eax,1; jmp .sracc_done
 .sracc_try_n:
     mov rdi,rbx; call s_shapefact_extent_var_matches
     test eax,eax; jz .sracc_try_literal
@@ -6441,47 +6457,72 @@ s_shapefact_affine_coord_collect:
 .sracc_try_literal:
     mov rdi,rbx; call s_eval_literal_u64_fixed
     test edx,edx; jnz .sracc_try_binary
-    test rax,rax; js .sracc_no             # bounded signed compile-time offset
+    test rax,rax; js .sracc_no
     mov rdx,rax; xor ecx,ecx; xor r8d,r8d; mov eax,1; jmp .sracc_done
 .sracc_try_binary:
     cmp dword ptr [rbx+SN_KIND],NK_BINARY; jne .sracc_no
     mov r13d,dword ptr [rbx+SN_OP]
     cmp r13d,OP_ADD; je .sracc_binary
-    cmp r13d,OP_SUB; jne .sracc_no
+    cmp r13d,OP_SUB; je .sracc_binary
+    cmp r13d,OP_MUL; je .sracc_mul
+    jmp .sracc_no
 .sracc_binary:
     mov rdi,[rbx+SN_A]; mov esi,r12d; call s_shapefact_affine_coord_collect
     test eax,eax; jz .sracc_no
-    push rdx                              # left constant
-    push rcx                              # left axis coefficient
-    push r8                               # left n coefficient
+    push rdx; push rcx; push r8
     mov rdi,[rbx+SN_B]; mov esi,r12d; call s_shapefact_affine_coord_collect
     test eax,eax; jz .sracc_right_fail
-    mov r14,rdx                           # right constant
-    mov r15d,ecx                          # right axis coefficient
-    mov r11d,r8d                          # right n coefficient
-    pop r10                               # left n coefficient
-    pop r9                                # left axis coefficient
-    pop rdx                               # left constant
+    mov r14,rdx; mov r15d,ecx; mov r11d,r8d
+    pop r10; pop r9; pop rdx
     cmp r13d,OP_SUB; je .sracc_combine_sub
     add rdx,r14; jo .sracc_no
-    mov ecx,r9d; add ecx,r15d
-    mov r8d,r10d; add r8d,r11d
+    mov ecx,r9d; add ecx,r15d; jo .sracc_no
+    mov r8d,r10d; add r8d,r11d; jo .sracc_no
     mov eax,1; jmp .sracc_done
 .sracc_combine_sub:
     sub rdx,r14; jo .sracc_no
-    mov ecx,r9d; sub ecx,r15d
-    mov r8d,r10d; sub r8d,r11d
+    mov ecx,r9d; sub ecx,r15d; jo .sracc_no
+    mov r8d,r10d; sub r8d,r11d; jo .sracc_no
     mov eax,1; jmp .sracc_done
 .sracc_right_fail:
     add rsp,24
+    jmp .sracc_no
+.sracc_mul:
+    # Exactly one side must be a compile-time u64 literal.  This keeps the
+    # accepted family affine while making b*1, 97*b and i*13 identical facts.
+    mov rdi,[rbx+SN_A]; call s_eval_literal_u64_fixed
+    test edx,edx; jnz .sracc_mul_rhs_literal
+    mov r14,rax; mov rdi,[rbx+SN_B]; jmp .sracc_mul_recurse
+.sracc_mul_rhs_literal:
+    mov rdi,[rbx+SN_B]; call s_eval_literal_u64_fixed
+    test edx,edx; jnz .sracc_no
+    mov r14,rax; mov rdi,[rbx+SN_A]
+.sracc_mul_recurse:
+    test r14,r14; js .sracc_no
+    mov esi,r12d; call s_shapefact_affine_coord_collect
+    test eax,eax; jz .sracc_no
+    mov r15,rdx
+    mov rax,r15; imul rax,r14; jo .sracc_no; mov rdx,rax
+    movsxd rax,ecx; imul rax,r14; jo .sracc_no
+    cmp rax,0x7fffffff; jg .sracc_no
+    cmp rax,-2147483648; jl .sracc_no
+    mov ecx,eax
+    movsxd rax,r8d; imul rax,r14; jo .sracc_no
+    cmp rax,0x7fffffff; jg .sracc_no
+    cmp rax,-2147483648; jl .sracc_no
+    mov r8d,eax
+    mov eax,1; jmp .sracc_done
 .sracc_no:
     xor eax,eax; xor edx,edx; xor ecx,ecx; xor r8d,r8d
 .sracc_done:
     pop r15; pop r14; pop r13; pop r12; pop rbx; ret
-# Canonical dynamic affine-mod physicalization.
-# rdi=coordinate AST, esi=axis id -> rax=physical high-axis contribution,
-# ecx=2 when the coordinate is mod(affine(axis,n,const),n), otherwise zero.
-# The accepted source family is defined by algebraic closure, not one AST spelling.
+
+# Canonical dynamic-axis periodic physicalization.
+# For a dynamic logical extent n with static suffix S and physical extent P=n*S,
+#     (L mod n) * S == (L*S) mod P.
+# Therefore every affine ShapeFact-N coordinate can be folded through the same
+# physical product ring.  No rank, suffix value, source spelling or benchmark
+# pattern is privileged.
 s_shapefact_dynamic_affine_mod:
     push rbx; push r12; push r13; push r14; push r15
     mov rbx,rdi; mov r12d,esi
@@ -6496,63 +6537,23 @@ s_shapefact_dynamic_affine_mod:
 
     mov rdi,[rbx+SN_A]; mov esi,r12d; call s_shapefact_affine_coord_collect
     test eax,eax; jz .srdam_no
-    cmp ecx,1; jne .srdam_no              # exactly one target-axis authority
-    cmp r8d,0; je .srdam_coeff_ok
-    cmp r8d,1; jne .srdam_no              # optional +n is modulo-neutral
-.srdam_coeff_ok:
-    mov r15,rdx                            # signed logical offset C
 
-    call s_ast_shape_q_new; test rax,rax; jz .srdam_fail
-    mov r14,rax                            # physical product coordinate q
+    mov rdi,[rbx+SN_A]
+    call s_shapefact_rewrite
+    test rax,rax; jz .srdam_fail
+    mov r14,rax
+    mov r15,qword ptr [rip+s_shape_static_product]
+    test r15,r15; jz .srdam_fail
+    cmp r15,1; jbe .srdam_have_scaled
+    mov rdi,r15; call s_ast_u64_imm; test rax,rax; jz .srdam_fail
+    mov edi,OP_MUL; mov rsi,r14; mov rdx,rax; call s_ast_binary_new
+    test rax,rax; jz .srdam_fail
+    mov r14,rax
+.srdam_have_scaled:
     call s_ast_shape_product_new; test rax,rax; jz .srdam_fail
-    mov rbx,rax                            # physical runtime extent
-    mov r12,qword ptr [rip+s_shape_static_product]
-    test r12,r12; jz .srdam_fail
-
-    # Magnitude of C times static product stride. Negative offsets are realized
-    # in the physical ring as q + physical_n - |C|*S.
-    mov r13d,0                             # 0 nonnegative, 1 negative
-    test r15,r15; jns .srdam_have_mag
-    mov r13d,1
-    neg r15
-    jo .srdam_no
-.srdam_have_mag:
-    mov rax,r15; mul r12
-    test rdx,rdx; jnz .srdam_fail
-    mov r15,rax
-
-    test r13d,r13d; jnz .srdam_minus
-    test r15,r15; jz .srdam_lhs_ready
-    mov rdi,r15; call s_ast_u64_imm; test rax,rax; jz .srdam_fail
-    mov edi,OP_ADD; mov rsi,r14; mov rdx,rax; call s_ast_binary_new
-    test rax,rax; jz .srdam_fail
-    mov r14,rax; jmp .srdam_lhs_ready
-.srdam_minus:
-    mov edi,OP_ADD; mov rsi,r14; mov rdx,rbx; call s_ast_binary_new
+    mov edi,OP_MOD; mov rsi,r14; mov rdx,rax; call s_ast_binary_new
     test rax,rax; jz .srdam_fail
     mov r14,rax
-    test r15,r15; jz .srdam_lhs_ready
-    mov rdi,r15; call s_ast_u64_imm; test rax,rax; jz .srdam_fail
-    mov edi,OP_SUB; mov rsi,r14; mov rdx,rax; call s_ast_binary_new
-    test rax,rax; jz .srdam_fail
-    mov r14,rax
-.srdam_lhs_ready:
-    mov edi,OP_MOD; mov rsi,r14; mov rdx,rbx; call s_ast_binary_new
-    test rax,rax; jz .srdam_fail
-    mov r14,rax
-
-    # Remove the original static suffix from q; the remaining term is exactly
-    # periodic(dynamic_coordinate)*S.
-    cmp r12,1; jbe .srdam_success
-    call s_ast_shape_q_new; test rax,rax; jz .srdam_fail
-    mov r13,rax
-    mov rdi,r12; call s_ast_u64_imm; test rax,rax; jz .srdam_fail
-    mov edi,OP_MOD; mov rsi,r13; mov rdx,rax; call s_ast_binary_new
-    test rax,rax; jz .srdam_fail
-    mov edi,OP_SUB; mov rsi,r14; mov rdx,rax; call s_ast_binary_new
-    test rax,rax; jz .srdam_fail
-    mov r14,rax
-.srdam_success:
     mov rax,r14; mov ecx,2; jmp .srdam_done
 .srdam_fail:
     mov dword ptr [rip+s_error],1
