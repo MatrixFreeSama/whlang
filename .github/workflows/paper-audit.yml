@@ -9,17 +9,18 @@ jobs:
       - uses: actions/checkout@v4
       - run: |
           set -e
-          rm -rf /tmp/w127proto
-          unzip -q dist/Wheelchair-1.3.127.zip -d /tmp/w127proto
-          W=/tmp/w127proto/Wheelchair-1.3.127
-          for d in \
-            "$W/devtrash/benchmarks/localized_plasticity_13127" \
-            "$W/devtrash/benchmarks/levelset_regionset_13126"; do
-            echo "===== DIRECTORY: $d ====="
-            find "$d" -maxdepth 1 -type f -printf '%f\n' | sort
-            for f in "$d"/README.md "$d"/*.py "$d"/*.sh; do
-              [ -f "$f" ] || continue
-              echo "===== FILE: $f ====="
-              sed -n '1,320p' "$f"
-            done
+          rm -rf /tmp/w127src
+          unzip -q dist/Wheelchair-1.3.127.zip -d /tmp/w127src
+          W=/tmp/w127src/Wheelchair-1.3.127
+          for f in \
+            "$W/devtrash/benchmarks/localized_plasticity_13127/plasticity.whex" \
+            "$W/devtrash/benchmarks/localized_plasticity_13127/plasticity.c" \
+            "$W/devtrash/benchmarks/localized_plasticity_13127/plasticity.f90" \
+            "$W/devtrash/benchmarks/localized_plasticity_13127/plasticity_ceiling.c" \
+            "$W/devtrash/benchmarks/levelset_regionset_13126/levelset_two_regions.whex" \
+            "$W/devtrash/benchmarks/levelset_regionset_13126/levelset.c" \
+            "$W/devtrash/benchmarks/levelset_regionset_13126/levelset.f90" \
+            "$W/devtrash/benchmarks/levelset_regionset_13126/levelset_ceiling.c"; do
+            echo "===== FILE: $f ====="
+            sed -n '1,260p' "$f"
           done
