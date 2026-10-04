@@ -1,0 +1,92 @@
+name: align-package-1.3.128
+on:
+  push:
+    paths:
+      - '.github/workflows/align-package-1.3.128.yml'
+permissions:
+  contents: write
+jobs:
+  align:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Align versionless production README
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('main/README.md'); s=p.read_text()
+          s=s.replace('# Wheelchair 1.3.127','# Wheelchair 1.3.128',1)
+          s=s.replace('![Release](https://img.shields.io/badge/release-1.3.127-blue)','![Release](https://img.shields.io/badge/release-1.3.128-blue)',1)
+          sec='''## 1.3.128: native256 canonical packet CoordinateFact aging\n\nThe native256 generic Field realization no longer rediscovers Rank-N packet coordinates independently for every AddressFact. When SIMD register pressure cannot retain a Rank-N coordinate bank, one canonical packet CoordinateFact is materialized in compact execution-local storage and shared by all AddressFacts. The obsolete coordinate-offset stack transport and generic `field_load_f32` authority are removed rather than retained beside the new path. There is no non-power-of-two backend, extent threshold, stencil/workload matcher, JIT, scheduler, or source-visible parallel route.\n\nOn the retained Strict miniAMR-27 / miniFE-21 one-CPU sweep, 1.3.128 is bit-identical to 1.3.127 at every tested size. At 192^3 the former generic-address cliff falls from **180.160 ms to 43.186 ms (4.17x)** for miniAMR-27 and from **146.466 ms to 37.644 ms (3.89x)** for miniFE-21. The matched GCC C controls are 65.734 ms and 40.101 ms respectively, so the repaired paths measure **1.52x** and **1.07x** the C throughput on that hosted-runner pilot. The 256^3 mature path also improves by **1.15x / 1.11x** over 1.3.127 rather than regressing.\n\n'''
+          if '## 1.3.128: native256 canonical packet CoordinateFact aging' not in s:
+              i=s.index('## 1.3.127:')
+              s=s[:i]+sec+s[i:]
+          p.write_text(s)
+          PY
+      - name: Repack exact production source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/w128pkg
+          mkdir -p /tmp/w128pkg/Wheelchair-1.3.128
+          shopt -s dotglob
+          for x in main/*; do
+            [ "$(basename "$x")" = build ] && continue
+            cp -a "$x" /tmp/w128pkg/Wheelchair-1.3.128/
+          done
+          cat > /tmp/w128pkg/Wheelchair-1.3.128/RELEASE_NOTES_1_3_128.md <<'EOF'
+          # Wheelchair 1.3.128 — Canonical Packet CoordinateFact Aging
+
+          Wheelchair 1.3.128 removes a native256 generic-Field physical redundancy exposed by the 1.3.127 paper experiment.
+
+          - A generic AVX2 packet now owns one canonical Rank-N CoordinateFact. Register pressure changes its physical carrier to compact execution-local storage; it no longer causes every AddressFact to rediscover `q -> coordinates`.
+          - AddressFacts consume the same packet CoordinateFact and perform only their necessary delta / periodic-wrap / physical-stride realization.
+          - The obsolete AVX2 coordinate-offset stack transport and generic `field_load_f32` runtime authority are deleted rather than retained as compatibility paths.
+          - No stencil or workload matcher, extent threshold/class, non-power-of-two backend, JIT, scheduler, parallel DSL surface, or benchmark-specific branch is introduced.
+          - Direct Region execution, Strict floating-point order, RankFact, RegionFact, GroupFact, Physical DAG, execution admission, and heterogeneous-silicon authorities remain unchanged.
+          - Strict 1.3.127 -> 1.3.128 checksums are bit-identical across the retained miniAMR-27 / miniFE-21 shape sweep.
+
+          The release is an architecture-aging repair: one semantic fact is materialized once and shared; carrier scarcity may alter placement but not multiply mathematical work.
+          EOF
+          rm -f dist/Wheelchair-1.3.128.zip dist/Wheelchair-1.3.128.zip.sha256
+          (cd /tmp/w128pkg && zip -qr "$GITHUB_WORKSPACE/dist/Wheelchair-1.3.128.zip" Wheelchair-1.3.128)
+          sha=$(sha256sum dist/Wheelchair-1.3.128.zip | awk '{print $1}')
+          printf '%s  Wheelchair-1.3.128.zip\n' "$sha" > dist/Wheelchair-1.3.128.zip.sha256
+          ! unzip -l dist/Wheelchair-1.3.128.zip | grep -q '/build/'
+          unzip -p dist/Wheelchair-1.3.128.zip Wheelchair-1.3.128/README.md | grep -q '^# Wheelchair 1.3.128$'
+          echo "$sha" >/tmp/w128sha
+      - name: Align top README and commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha=$(cat /tmp/w128sha)
+          python3 - "$sha" <<'PY'
+          from pathlib import Path
+          import sys,re
+          sha=sys.argv[1]; p=Path('README.md'); s=p.read_text()
+          # Replace only the current archive code block immediately following its label.
+          s=re.sub(r'(Archive SHA-256:\n\n```text\n)[0-9a-f]{64}(\n```)',r'\g<1>'+sha+r'\g<2>',s,count=1)
+          p.write_text(s)
+          PY
+          rm -f .github/workflows/align-package-1.3.128.yml
+          git config user.name 'Wheelchair Release Bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add main/README.md README.md dist/Wheelchair-1.3.128.zip dist/Wheelchair-1.3.128.zip.sha256 .github/workflows
+          git commit -m 'Align Wheelchair 1.3.128 main and package authority'
+          git push origin HEAD:main
+      - name: Replace release assets and notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git pull --ff-only origin main
+          unzip -p dist/Wheelchair-1.3.128.zip Wheelchair-1.3.128/RELEASE_NOTES_1_3_128.md >/tmp/notes.md
+          gh release delete-asset v1.3.128 Wheelchair-1.3.128.zip -y || true
+          gh release delete-asset v1.3.128 Wheelchair-1.3.128.zip.sha256 -y || true
+          gh release upload v1.3.128 dist/Wheelchair-1.3.128.zip dist/Wheelchair-1.3.128.zip.sha256
+          gh release edit v1.3.128 --notes-file /tmp/notes.md --title 'Wheelchair 1.3.128 — Canonical Packet CoordinateFact Aging'
