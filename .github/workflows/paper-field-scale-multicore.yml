@@ -1,0 +1,31 @@
+name: paper-field-scale-multicore
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/paper-field-scale-multicore.yml
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run Field scale and CPU-set experiment
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 experiments/paper_1_3_127/run_field_scale_multicore.py
+          echo '=== RESULTS ==='
+          cat experiments/paper_1_3_127/field_scale_multicore_20261005/RESULTS.md
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add experiments/paper_1_3_127/field_scale_multicore_20261005
+          git rm .github/workflows/paper-field-scale-multicore.yml
+          git commit -m 'Record Wheelchair 1.3.127 Field scale paper results'
+          git push origin HEAD:main
