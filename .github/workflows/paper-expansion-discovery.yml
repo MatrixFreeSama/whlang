@@ -1,0 +1,38 @@
+name: paper-expansion-discovery
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/paper-expansion-discovery.yml
+
+permissions:
+  contents: write
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Discover retained benchmark sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$RUNNER_TEMP/w127"
+          mkdir -p "$tmp"
+          unzip -q dist/Wheelchair-1.3.127.zip -d "$tmp"
+          root="$tmp/Wheelchair-1.3.127"
+          if [ ! -d "$root" ]; then root="$(find "$tmp" -mindepth 1 -maxdepth 1 -type d | head -n1)"; fi
+          echo '=== MATCHING DIRECTORIES ==='
+          find "$root" -type d | grep -Ei 'mini(amr|fe)|field|periodic|coordinate|permutation|entropy|fsi|clover' | sort | head -n 200 || true
+          echo '=== MATCHING FILES ==='
+          find "$root" -type f | grep -Ei 'mini(amr|fe)|periodic|coordinate|permutation|entropy|fsi|clover' | sort | head -n 300 || true
+          echo '=== BENCHMARK DIRS ==='
+          find "$root/devtrash/benchmarks" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort || true
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/paper-expansion-discovery.yml
+          git commit -m 'Complete paper benchmark discovery'
+          git push origin HEAD:main
