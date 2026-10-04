@@ -16,140 +16,42 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Freeze 1.3.127 as paper snapshot
+      - name: Release 1.3.127 paper snapshot
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-
           archive='dist/Wheelchair-1.3.127.zip'
           test -f "$archive"
-
           sha="$(sha256sum "$archive" | awk '{print $1}')"
           printf '%s  %s\n' "$sha" 'Wheelchair-1.3.127.zip' > dist/Wheelchair-1.3.127.zip.sha256
           echo "1.3.127 SHA-256: $sha"
-
           historical_target="$(git log --diff-filter=A --format=%H -- "$archive" | head -n1)"
           test -n "$historical_target"
           echo "1.3.127 historical target: $historical_target"
-
           work="$RUNNER_TEMP/wheelchair-1.3.127"
           rm -rf "$work"
           mkdir -p "$work"
           unzip -q "$archive" -d "$work"
-
           src="$work/Wheelchair-1.3.127"
-          if [ ! -d "$src" ]; then
-            first="$(find "$work" -mindepth 1 -maxdepth 1 -type d | head -n1 || true)"
-            if [ -n "$first" ]; then src="$first"; else src="$work"; fi
-          fi
-
+          if [ ! -d "$src" ]; then first="$(find "$work" -mindepth 1 -maxdepth 1 -type d | head -n1 || true)"; if [ -n "$first" ]; then src="$first"; else src="$work"; fi; fi
           rm -rf main
           mkdir -p main
-          for p in bin compiler runtime surface tools build.sh README.md; do
-            if [ -e "$src/$p" ]; then cp -a "$src/$p" main/; fi
-          done
-
-          python3 - "$sha" <<'PY'
-          from pathlib import Path
-          import re, sys
-
-          sha = sys.argv[1]
-          p = Path('README.md')
-          s = p.read_text(encoding='utf-8')
-
-          s = re.sub(r'> Current release: \*\*1\.3\.126\*\*', '> Current release: **1.3.127**', s, count=1)
-          s = s.replace('[Download Wheelchair 1.3.126](./dist/Wheelchair-1.3.126.zip)',
-                        '[Download Wheelchair 1.3.127](./dist/Wheelchair-1.3.127.zip)', 1)
-
-          s = re.sub(
-              r'Archive SHA-256:\n\n```text\n[0-9a-f]{64}\n```',
-              f'Archive SHA-256:\n\n```text\n{sha}\n```',
-              s,
-              count=1,
-          )
-
-          paper_section = '''## Current release: 1.3.127 — paper snapshot
-
-Wheelchair 1.3.127 is the frozen research snapshot for the paper-facing evaluation of the current architecture. The paper baseline is not a new benchmark-specific execution family: it keeps the same Rank-N / ValueFact / Region / Physical Reality / Physical DAG design and the same AOT native-code authority, without adding a JIT, scheduler family, kernel-offload path, source-visible parallel DSL, workload-name dispatch, or fixed element-count threshold for the sake of publication.
-
-The paper question is deliberately narrower than the whole language: **can compile-time mathematical and causal structure reduce actual physical work toward the mathematical-physical requirement, and when does the metadata needed to do that repay its own cost?** Evaluation should therefore keep dense regular arithmetic, deep-causal scalar work, sparse/irregular structure, dynamic support, and real simulation workloads together instead of reporting only favorable kernels.
-
-The principal negative control is explicit. A Wheelchair `ValueFact` carries more structure than a bare C scalar, so value representation is wider and pure regular arithmetic may require modestly more metadata handling or instructions than highly optimized C. That cost is expected to be most visible when there is little structure to eliminate. The architecture earns that cost only when the retained facts allow redundant transport, address work, support, materialization, or execution itself to disappear. Dense scalar losses are therefore part of the paper evidence rather than treated as regressions to hide.
-
-The 1.3.127 archive, SHA-256, versionless `main/` production tree, top-level README, and GitHub Release are kept aligned so the paper baseline is independently identifiable and reproducible.
-
-'''
-
-          s = re.sub(
-              r'## Current release: 1\.3\.126\n.*?(?=## Features\n)',
-              paper_section,
-              s,
-              count=1,
-              flags=re.S,
-          )
-
-          landmark = '| **1.3.126** | Canonical unbounded `RegionSet` replaces coarse single-interval support; disconnected dead support is deleted before physical realization while Strict reduction structure is preserved. |'
-          paper_row = '| **1.3.127** | Paper snapshot: freezes the research baseline, makes the ValueFact/pure-arithmetic overhead an explicit negative control, and aligns archive, SHA, production `main/`, README, and Release for reproducibility. |'
-          if paper_row not in s:
-              if landmark in s:
-                  s = s.replace(landmark, landmark + '\n' + paper_row, 1)
-              else:
-                  marker = '## Landmark architecture releases\n'
-                  if marker in s:
-                      # Preserve the existing table structure if the exact 1.3.126 row changed.
-                      pos = s.find(marker)
-                      table_end = s.find('\n\n', pos)
-                      if table_end != -1:
-                          s = s[:table_end] + '\n' + paper_row + s[table_end:]
-
-          p.write_text(s, encoding='utf-8')
-          PY
-
+          for p in bin compiler runtime surface tools build.sh README.md; do if [ -e "$src/$p" ]; then cp -a "$src/$p" main/; fi; done
+          printf '%s\n' '## Current release: 1.3.127 — paper snapshot' '' 'Wheelchair 1.3.127 is the frozen research snapshot for the paper-facing evaluation of the current architecture. The paper baseline is not a new benchmark-specific execution family: it keeps the same Rank-N / ValueFact / Region / Physical Reality / Physical DAG design and the same AOT native-code authority, without adding a JIT, scheduler family, kernel-offload path, source-visible parallel DSL, workload-name dispatch, or fixed element-count threshold for publication.' '' 'The paper question is deliberately narrower than the whole language: **can compile-time mathematical and causal structure reduce actual physical work toward the mathematical-physical requirement, and when does the metadata needed to do that repay its own cost?** Evaluation therefore keeps dense regular arithmetic, deep-causal scalar work, sparse/irregular structure, dynamic support, and real simulation workloads together instead of reporting only favorable kernels.' '' 'The principal negative control is explicit. A Wheelchair `ValueFact` carries more structure than a bare C scalar, so value representation is wider and pure regular arithmetic may require modestly more metadata handling or instructions than highly optimized C. That cost is expected to be most visible when there is little structure to eliminate. The architecture earns that cost only when retained facts allow redundant transport, address work, support, materialization, or execution itself to disappear. Dense scalar losses are therefore part of the paper evidence rather than regressions to hide.' '' 'The 1.3.127 archive, SHA-256, versionless `main/` production tree, top-level README, and GitHub Release are kept aligned so the paper baseline is independently identifiable and reproducible.' '' > /tmp/paper-section.md
+          python3 -c 'from pathlib import Path; import re,sys; sha=sys.argv[1]; p=Path("README.md"); s=p.read_text(encoding="utf-8"); s=re.sub(r"> Current release: \*\*1\.3\.126\*\*", "> Current release: **1.3.127**", s, count=1); s=s.replace("[Download Wheelchair 1.3.126](./dist/Wheelchair-1.3.126.zip)", "[Download Wheelchair 1.3.127](./dist/Wheelchair-1.3.127.zip)", 1); s=re.sub(r"Archive SHA-256:\n\n```text\n[0-9a-f]{64}\n```", "Archive SHA-256:\n\n```text\n"+sha+"\n```", s, count=1); sec=Path("/tmp/paper-section.md").read_text(encoding="utf-8"); s=re.sub(r"## Current release: 1\.3\.126\n.*?(?=## Features\n)", sec, s, count=1, flags=re.S); old="| **1.3.126** | Canonical unbounded `RegionSet` replaces coarse single-interval support; disconnected dead support is deleted before physical realization while Strict reduction structure is preserved. |"; row="| **1.3.127** | Paper snapshot: freezes the research baseline, makes the ValueFact/pure-arithmetic overhead an explicit negative control, and aligns archive, SHA, production `main/`, README, and Release for reproducibility. |"; s=s if row in s else s.replace(old, old+"\n"+row, 1); p.write_text(s, encoding="utf-8")' "$sha"
           notes="$RUNNER_TEMP/release-1.3.127.md"
+          printf '%s\n' '# Wheelchair 1.3.127 — Paper Snapshot' '' 'Wheelchair 1.3.127 is the frozen paper-facing research snapshot. It keeps the existing general AOT architecture rather than introducing a publication-only fast path.' '' 'The paper baseline explicitly retains the principal negative control: Wheelchair ValueFacts are wider than C bare scalars, and dense pure arithmetic can carry a modest representation/instruction overhead. The evaluation asks whether structural facts repay that cost by eliminating unnecessary physical work in sparse, irregular, support-limited, or otherwise structurally rich programs.' '' "SHA-256: \`$sha\`" '' "Historical archive commit: \`$historical_target\`" > "$notes"
           native_notes=''
-          for candidate in \
-            "$src/RELEASE_NOTES_1_3_127.md" \
-            "$src/RELEASE_NOTES.md" \
-            "$src/RELEASE.md"; do
-            if [ -f "$candidate" ]; then native_notes="$candidate"; break; fi
-          done
-
-          cat > "$notes" <<EOF
-          # Wheelchair 1.3.127 — Paper Snapshot
-
-          Wheelchair 1.3.127 is the frozen paper-facing research snapshot. It keeps the existing general AOT architecture rather than introducing a publication-only fast path.
-
-          The paper baseline explicitly retains the principal negative control: Wheelchair ValueFacts are wider than C bare scalars, and dense pure arithmetic can carry a modest representation/instruction overhead. The intended evaluation asks whether structural facts repay that cost by eliminating unnecessary physical work in sparse, irregular, support-limited, or otherwise structurally rich programs.
-
-          SHA-256: \`$sha\`
-
-          Historical archive commit: \`$historical_target\`
-          EOF
-
-          if [ -n "$native_notes" ]; then
-            printf '\n---\n\n## Native 1.3.127 release notes\n\n' >> "$notes"
-            cat "$native_notes" >> "$notes"
-          fi
-
+          for candidate in "$src/RELEASE_NOTES_1_3_127.md" "$src/RELEASE_NOTES.md" "$src/RELEASE.md"; do if [ -f "$candidate" ]; then native_notes="$candidate"; break; fi; done
+          if [ -n "$native_notes" ]; then printf '\n---\n\n## Native 1.3.127 release notes\n\n' >> "$notes"; cat "$native_notes" >> "$notes"; fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add README.md main dist/Wheelchair-1.3.127.zip.sha256
           git rm .github/workflows/release-1.3.127-paper.yml
           git commit -m 'Freeze Wheelchair 1.3.127 paper snapshot'
           git push origin HEAD:main
-
-          if gh release view v1.3.127 >/dev/null 2>&1; then
-            gh release delete v1.3.127 --cleanup-tag -y
-          fi
-
-          gh release create v1.3.127 \
-            "$archive" dist/Wheelchair-1.3.127.zip.sha256 \
-            --target "$historical_target" \
-            --title 'Wheelchair 1.3.127 — Paper Snapshot' \
-            --notes-file "$notes"
-
-          echo '=== RELEASE ==='
+          if gh release view v1.3.127 >/dev/null 2>&1; then gh release delete v1.3.127 --cleanup-tag -y; fi
+          gh release create v1.3.127 "$archive" dist/Wheelchair-1.3.127.zip.sha256 --target "$historical_target" --title 'Wheelchair 1.3.127 — Paper Snapshot' --notes-file "$notes"
           gh release view v1.3.127 --json tagName,name,publishedAt,targetCommitish,assets,url
