@@ -11,6 +11,7 @@
 .equ SUPPORT_SHAPE_INC, 2
 .equ SUPPORT_SHAPE_DEC, 3
 .equ SUPPORT_SHAPE_BASIN, 4
+.equ SUPPORT_SHAPE_CAP, 5
 
 # support_resolve_identity_load(rdi=expr) -> rax=canonical expression.
 # Only direct same-axis map edges are transparent. Indexed maps remain real
@@ -366,6 +367,10 @@ support_shape_class:
     je .ssc_dec
     cmp edx,SUPPORT_SHAPE_DEC
     je .ssc_inc
+    cmp edx,SUPPORT_SHAPE_BASIN
+    je .ssc_cap
+    cmp edx,SUPPORT_SHAPE_CAP
+    je .ssc_basin
     jmp .ssc_no
 
     # MUL
@@ -388,12 +393,16 @@ support_shape_class:
     jne .ssc_mul_both_dec
     cmp edx,SUPPORT_SHAPE_INC
     je .ssc_basin
+    cmp edx,SUPPORT_SHAPE_DEC
+    je .ssc_cap
     jmp .ssc_mul_const
 .ssc_mul_both_dec:
     cmp eax,SUPPORT_SHAPE_DEC
     jne .ssc_mul_const
     cmp edx,SUPPORT_SHAPE_DEC
     je .ssc_basin
+    cmp edx,SUPPORT_SHAPE_INC
+    je .ssc_cap
 .ssc_mul_const:
     mov eax,dword ptr [rsp]
     mov edx,dword ptr [rsp+4]
@@ -427,7 +436,11 @@ support_shape_class:
     je .ssc_dec
     cmp eax,SUPPORT_SHAPE_DEC
     je .ssc_inc
-    jmp .ssc_no                    # negative basin becomes two outer supports
+    cmp eax,SUPPORT_SHAPE_BASIN
+    je .ssc_cap
+    cmp eax,SUPPORT_SHAPE_CAP
+    je .ssc_basin
+    jmp .ssc_no
 
     # DIV by one signed axis-independent constant.
 .ssc_div_probe:
@@ -456,6 +469,10 @@ support_shape_class:
     je .ssc_dec
     cmp eax,SUPPORT_SHAPE_DEC
     je .ssc_inc
+    cmp eax,SUPPORT_SHAPE_BASIN
+    je .ssc_cap
+    cmp eax,SUPPORT_SHAPE_CAP
+    je .ssc_basin
     jmp .ssc_no
 
 .ssc_const:
@@ -470,6 +487,9 @@ support_shape_class:
 .ssc_basin:
     mov eax,SUPPORT_SHAPE_BASIN
     jmp .ssc_done
+.ssc_cap:
+    mov eax,SUPPORT_SHAPE_CAP
+    jmp .ssc_done
 .ssc_no:
     xor eax,eax
 .ssc_done:
@@ -479,6 +499,37 @@ support_shape_class:
     pop r13
     pop r12
     pop rbx
+    ret
+
+# support_shape_sublevel_ok(eax=shape class) -> eax 0/1.
+# One contiguous true support after +shape minimum normalization.
+support_shape_sublevel_ok:
+    cmp eax,SUPPORT_SHAPE_INC
+    je .sslo_yes
+    cmp eax,SUPPORT_SHAPE_DEC
+    je .sslo_yes
+    cmp eax,SUPPORT_SHAPE_BASIN
+    je .sslo_yes
+    xor eax,eax
+    ret
+.sslo_yes:
+    mov eax,1
+    ret
+
+# support_shape_superlevel_ok(eax=shape class) -> eax 0/1.
+# CAP is the curvature-dual of BASIN; negating the witness turns its maximum
+# into the same minimum-oriented runtime proof.
+support_shape_superlevel_ok:
+    cmp eax,SUPPORT_SHAPE_INC
+    je .ssuo_yes
+    cmp eax,SUPPORT_SHAPE_DEC
+    je .ssuo_yes
+    cmp eax,SUPPORT_SHAPE_CAP
+    je .ssuo_yes
+    xor eax,eax
+    ret
+.ssuo_yes:
+    mov eax,1
     ret
 
 # support_prepare_leaf(rdi=expression) -> eax=1 iff expression is one exact
@@ -555,67 +606,96 @@ support_prepare_leaf:
     cmp qword ptr [rbx+32],0
     jne .spl_no
 
-    # LT/LE: shape(lhs) < constant(rhs).
+    # Normalize every ordered predicate to one extremum witness whose global
+    # minimum lies inside the true support. Sublevel uses +shape; superlevel
+    # uses -shape. This keeps runtime boundary discovery topology-generic.
+    mov dword ptr [rip+tensor_support_negate],0
     mov rdi,[r13+8]
     mov rsi,[r13+16]
     lea rdx,[rip+v_lt]
     mov ecx,v_lt_end-v_lt
     call span_eq
     test eax,eax
-    jnz .spl_lhs_shape
+    jnz .spl_lt_le
     mov rdi,[r13+8]
     mov rsi,[r13+16]
     lea rdx,[rip+v_le]
     mov ecx,v_le_end-v_le
     call span_eq
     test eax,eax
-    jnz .spl_lhs_shape
-    # GT/GE: constant(lhs) > shape(rhs), the same sublevel topology.
+    jnz .spl_lt_le
     mov rdi,[r13+8]
     mov rsi,[r13+16]
     lea rdx,[rip+v_gt]
     mov ecx,v_gt_end-v_gt
     call span_eq
     test eax,eax
-    jnz .spl_rhs_shape
+    jnz .spl_gt_ge
     mov rdi,[r13+8]
     mov rsi,[r13+16]
     lea rdx,[rip+v_ge]
     mov ecx,v_ge_end-v_ge
     call span_eq
     test eax,eax
-    jnz .spl_rhs_shape
+    jnz .spl_gt_ge
     jmp .spl_no
-.spl_lhs_shape:
+
+.spl_lt_le:
+    # lhs shape < rhs const => sublevel; lhs const < rhs shape => superlevel.
     mov rdi,r15
     call support_shape_class
-    cmp eax,SUPPORT_SHAPE_INC
-    je .spl_lhs_ok
-    cmp eax,SUPPORT_SHAPE_DEC
-    je .spl_lhs_ok
-    cmp eax,SUPPORT_SHAPE_BASIN
-    jne .spl_no
-.spl_lhs_ok:
+    mov r12d,eax
     mov rdi,rbx
     call support_shape_class
-    cmp eax,SUPPORT_SHAPE_CONST
-    jne .spl_no
+    mov edx,eax
+    cmp edx,SUPPORT_SHAPE_CONST
+    je .spl_accept_lhs_sub
+    cmp r12d,SUPPORT_SHAPE_CONST
+    je .spl_accept_rhs_super
+    jmp .spl_no
+
+.spl_gt_ge:
+    # lhs shape > rhs const => superlevel; lhs const > rhs shape => sublevel.
+    mov rdi,r15
+    call support_shape_class
+    mov r12d,eax
+    mov rdi,rbx
+    call support_shape_class
+    mov edx,eax
+    cmp edx,SUPPORT_SHAPE_CONST
+    je .spl_accept_lhs_super
+    cmp r12d,SUPPORT_SHAPE_CONST
+    je .spl_accept_rhs_sub
+    jmp .spl_no
+
+.spl_accept_lhs_sub:
+    mov eax,r12d
+    call support_shape_sublevel_ok
+    test eax,eax
+    jz .spl_no
     mov qword ptr [rip+tensor_support_basin],r15
     jmp .spl_accept
-.spl_rhs_shape:
-    mov rdi,rbx
-    call support_shape_class
-    cmp eax,SUPPORT_SHAPE_INC
-    je .spl_rhs_ok
-    cmp eax,SUPPORT_SHAPE_DEC
-    je .spl_rhs_ok
-    cmp eax,SUPPORT_SHAPE_BASIN
-    jne .spl_no
-.spl_rhs_ok:
-    mov rdi,r15
-    call support_shape_class
-    cmp eax,SUPPORT_SHAPE_CONST
-    jne .spl_no
+.spl_accept_rhs_sub:
+    mov eax,edx
+    call support_shape_sublevel_ok
+    test eax,eax
+    jz .spl_no
+    mov qword ptr [rip+tensor_support_basin],rbx
+    jmp .spl_accept
+.spl_accept_lhs_super:
+    mov eax,r12d
+    call support_shape_superlevel_ok
+    test eax,eax
+    jz .spl_no
+    mov dword ptr [rip+tensor_support_negate],1
+    mov qword ptr [rip+tensor_support_basin],r15
+    jmp .spl_accept
+.spl_accept_rhs_super:
+    mov eax,edx
+    call support_shape_superlevel_ok
+    test eax,eax
+    jz .spl_no
+    mov dword ptr [rip+tensor_support_negate],1
     mov qword ptr [rip+tensor_support_basin],rbx
 .spl_accept:
     mov qword ptr [rip+tensor_support_predicate],r14
@@ -631,10 +711,37 @@ support_prepare_leaf:
     pop rbx
     ret
 
+# support_positive_finite_literal(rdi=expr) -> eax=1 only for a strictly
+# positive finite f64 literal. Such a scalar preserves exact +0 outside an
+# operand support, so execution support may pass through multiplication.
+support_positive_finite_literal:
+    push rbx
+    call expr_literal_f64_bits
+    test edx,edx
+    jnz .spfl_no
+    test rax,rax
+    jz .spfl_no
+    test rax,rax
+    js .spfl_no
+    mov rbx,rax
+    mov rax,0x7ff0000000000000
+    and rbx,rax
+    cmp rbx,rax
+    je .spfl_no
+    mov eax,1
+    pop rbx
+    ret
+.spfl_no:
+    xor eax,eax
+    pop rbx
+    ret
+
 # support_count_terms(rdi=expr) -> eax=count, edx=1 proven RegionSet algebra;
 # edx=0 means the expression support is not representable by this authority.
-# Addition/subtraction use the conservative exact execution support union:
-# supp(a +/- b) is a subset of supp(a) union supp(b). No cancellation is guessed.
+# Addition/subtraction use conservative execution-support union. Multiplication
+# transports a proven RegionSet through a strictly positive finite scalar, or
+# unions two proven operand supports; outside that union both operands are exact
+# +0, so the product is exact +0. No cancellation or workload identity is guessed.
 support_count_terms:
     push rbx
     push r12
@@ -677,7 +784,15 @@ support_count_terms:
     mov ecx,v_sub_end-v_sub
     call span_eq
     test eax,eax
-    jz .sct_leaf
+    jnz .sct_union
+    mov rdi,[r13+8]
+    mov rsi,[r13+16]
+    lea rdx,[rip+v_mul]
+    mov ecx,v_mul_end-v_mul
+    call span_eq
+    test eax,eax
+    jnz .sct_mul
+    jmp .sct_leaf
 .sct_union:
     mov rdi,r12
     lea rsi,[rip+k_args]
@@ -705,6 +820,53 @@ support_count_terms:
     add eax,r13d
     jc .sct_unsupported
     mov edx,1
+    jmp .sct_done
+.sct_mul:
+    mov rdi,r12
+    lea rsi,[rip+k_args]
+    mov edx,k_args_end-k_args
+    call obj_get
+    test rax,rax
+    jz .sct_unsupported
+    mov r14,[rax+24]
+    test r14,r14
+    jz .sct_unsupported
+    mov rbx,[r14+32]
+    test rbx,rbx
+    jz .sct_unsupported
+    cmp qword ptr [rbx+32],0
+    jne .sct_unsupported
+    mov rdi,r14
+    call support_positive_finite_literal
+    test eax,eax
+    jnz .sct_mul_right
+    mov rdi,rbx
+    call support_positive_finite_literal
+    test eax,eax
+    jnz .sct_mul_left
+    # If both operands already have proven +0-outside RegionSets, their product
+    # is +0 outside the union. Union is conservative and requires no new runtime
+    # algebra; identical supports canonicalize back to one Region.
+    mov rdi,r14
+    call support_count_terms
+    test edx,edx
+    jz .sct_unsupported
+    mov r13d,eax
+    mov rdi,rbx
+    call support_count_terms
+    test edx,edx
+    jz .sct_unsupported
+    add eax,r13d
+    jc .sct_unsupported
+    mov edx,1
+    jmp .sct_done
+.sct_mul_right:
+    mov rdi,rbx
+    call support_count_terms
+    jmp .sct_done
+.sct_mul_left:
+    mov rdi,r14
+    call support_count_terms
     jmp .sct_done
 .sct_leaf:
     mov rdi,r12
@@ -734,6 +896,7 @@ tensor_support_analyze_root:
     mov dword ptr [rip+tensor_support_count],0
     mov qword ptr [rip+tensor_support_predicate],0
     mov qword ptr [rip+tensor_support_basin],0
+    mov dword ptr [rip+tensor_support_negate],0
     mov r12,rdi
     call support_count_terms
     test edx,edx
@@ -764,6 +927,26 @@ tensor_emit_support_leaf:
     call emit_float_reg
     test eax,eax
     jnz .tesl_fail
+    cmp dword ptr [rip+tensor_support_negate],0
+    je .tesl_witness_ready
+    # Negate the scalar witness exactly by flipping the IEEE sign bit:
+    # movq rax,xmm0 ; btc rax,63 ; movq xmm0,rax.
+    mov edi,0x66; call emit_u8
+    mov edi,0x48; call emit_u8
+    mov edi,0x0F; call emit_u8
+    mov edi,0x7E; call emit_u8
+    mov edi,0xC0; call emit_u8
+    mov edi,0x48; call emit_u8
+    mov edi,0x0F; call emit_u8
+    mov edi,0xBA; call emit_u8
+    mov edi,0xF8; call emit_u8
+    mov edi,0x3F; call emit_u8
+    mov edi,0x66; call emit_u8
+    mov edi,0x48; call emit_u8
+    mov edi,0x0F; call emit_u8
+    mov edi,0x6E; call emit_u8
+    mov edi,0xC0; call emit_u8
+.tesl_witness_ready:
     mov rdi,qword ptr [rip+tensor_support_predicate]
     xor esi,esi
     call emit_int_reg
@@ -824,7 +1007,15 @@ support_emit_terms:
     mov ecx,v_sub_end-v_sub
     call span_eq
     test eax,eax
-    jz .set_leaf
+    jnz .set_union
+    mov rdi,[r13+8]
+    mov rsi,[r13+16]
+    lea rdx,[rip+v_mul]
+    mov ecx,v_mul_end-v_mul
+    call span_eq
+    test eax,eax
+    jnz .set_mul
+    jmp .set_leaf
 .set_union:
     mov rdi,r12
     lea rsi,[rip+k_args]
@@ -845,6 +1036,44 @@ support_emit_terms:
     test eax,eax
     jnz .set_fail
     mov rdi,rbx
+    call support_emit_terms
+    jmp .set_done
+.set_mul:
+    mov rdi,r12
+    lea rsi,[rip+k_args]
+    mov edx,k_args_end-k_args
+    call obj_get
+    test rax,rax
+    jz .set_fail
+    mov r14,[rax+24]
+    test r14,r14
+    jz .set_fail
+    mov rbx,[r14+32]
+    test rbx,rbx
+    jz .set_fail
+    cmp qword ptr [rbx+32],0
+    jne .set_fail
+    mov rdi,r14
+    call support_positive_finite_literal
+    test eax,eax
+    jnz .set_mul_right
+    mov rdi,rbx
+    call support_positive_finite_literal
+    test eax,eax
+    jnz .set_mul_left
+    mov rdi,r14
+    call support_emit_terms
+    test eax,eax
+    jnz .set_fail
+    mov rdi,rbx
+    call support_emit_terms
+    jmp .set_done
+.set_mul_right:
+    mov rdi,rbx
+    call support_emit_terms
+    jmp .set_done
+.set_mul_left:
+    mov rdi,r14
     call support_emit_terms
     jmp .set_done
 .set_leaf:

@@ -5787,6 +5787,7 @@ tensor_tolerant_fp:.skip 4
 tensor_support_mode:.skip 4
 tensor_support_count:.skip 4
 tensor_support_emit_index:.skip 4
+tensor_support_negate:.skip 4
 .p2align 3
 tensor_support_predicate:.skip 8
 tensor_support_basin:.skip 8

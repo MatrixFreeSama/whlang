@@ -1,6 +1,6 @@
-# Wheelchair 1.3.126
+# Wheelchair 1.3.127
 
-![Build](https://img.shields.io/badge/build-36%2F36%20PASS-brightgreen) ![Release](https://img.shields.io/badge/release-1.3.126-blue)
+![Build](https://img.shields.io/badge/build-37%2F37%20PASS-brightgreen) ![Release](https://img.shields.io/badge/release-1.3.127-blue)
 
 Wheelchair is an HPC- and simulation-first general-purpose AOT language built around Rank-N semantics, matrix-free execution, ValueFacts, StateFacts, AddressFacts, RegionFacts, CoordinateFacts, GroupFact, Physical Reality, Traffic Reality, Silicon Domain Graphs, and Physical DAG execution.
 
@@ -13,6 +13,12 @@ physical work / mathematical-physical lower bound -> 1
 Idle silicon is valid whenever another materialization costs more than the remaining necessary work.
 
 
+
+## 1.3.127: SupportFact becomes an expression algebra
+
+1.3.126 could contract additive/subtractive RegionSets but still lost support on a real localized elastoplastic update: the yield function is a single **CAP** tested as a superlevel (`shape > constant`), and the surviving plastic increment then passes through scalar multiplication and products before reduction. 1.3.127 closes those general facts. BASIN/CAP are curvature duals; ordered predicates are normalized to one extremum witness; positive finite scalar multiplication preserves exact +0 support; products of proven zero-outside RegionSets conservatively retain the operand union and rely on the existing canonical RegionSet merge. No plasticity/yield-zone matcher, second support backend, active-set DSL, or workload threshold is added.
+
+On the retained localized elastoplastic benchmark (`n=8,000,000`, about 3999 yielded integration points), pinned one-CPU median falls from **110.463 ms in 1.3.126 to 2.150 ms in 1.3.127 (51.37x)** with the same Wheelchair strict checksum. Natural serial C/Fortran measure 11.773/12.924 ms; hand-bounded active-zone controls measure 3.176/4.427 ms. Across 1M/4M/8M/16M total domains, the 1.3.126 path grows with the elastic background while 1.3.127 remains near the fixed plastic support cost.
 
 ## 1.3.126: SupportFact becomes a canonical RegionSet
 

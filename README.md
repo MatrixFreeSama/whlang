@@ -13,26 +13,28 @@
 
 Wheelchair targets the same broad numerical-computing territory as C and Fortran, but it does not start from a mandatory sequential instruction stream and then try to recover parallelism afterward. Its compiler treats mathematical structure, value identity, causal dependence, precision, locality, and physical realization as first-class compile-time information.
 
-> Current release: **1.3.126**  
+> Current release: **1.3.127**  
 > Target: **Linux x86-64, static ELF64**  
 > Source surfaces: **WH (`.wh`)** and **WHEX (`.whex`)**  
-> [Download Wheelchair 1.3.126](./dist/Wheelchair-1.3.126.zip)
+> [Download Wheelchair 1.3.127](./dist/Wheelchair-1.3.127.zip)
 
 Archive SHA-256:
 
 ```text
-d2ed180aa9825761b2d3237fa0c4142147b482930bd26b09c32b25b46c2a9f9f
+e4b7090a48f5751748fb0eaf6e072c0874939f5bc76a8b4f4ceb252b1847bfeb
 ```
 
 ---
 
-## Current release: 1.3.126
+## Current release: 1.3.127 — paper snapshot
 
-Wheelchair 1.3.126 replaces the previous single-interval `[lo, hi)` SupportFact with one source-derived canonical `RegionSet`. Support is no longer forced through a bounded interval approximation: ADD/SUB compose support by region union, runtime canonicalization sorts and merges those regions while deleting empty pieces, and Physical Reality reprices only the work that survives. The legacy interval backend is deleted rather than retained as a compatibility route.
+Wheelchair 1.3.127 is the frozen research snapshot for the paper-facing evaluation of the current architecture. The paper baseline is not a new benchmark-specific execution family: it keeps the same Rank-N / ValueFact / Region / Physical Reality / Physical DAG design and the same AOT native-code authority, without adding a JIT, scheduler family, kernel-offload path, source-visible parallel DSL, workload-name dispatch, or fixed element-count threshold for publication.
 
-Strict reduction keeps the existing canonical reduction tree. Regions proved dead collapse to exact `+0`; surviving regions retain the same Strict ordering and closure semantics. No workload-name dispatch, fixed element-count threshold, scheduler family, JIT path, kernel-offload route, or source-visible parallel construct is introduced. The change is a general support representation inside the existing Rank-N / Physical DAG architecture.
+The paper question is deliberately narrower than the whole language: **can compile-time mathematical and causal structure reduce actual physical work toward the mathematical-physical requirement, and when does the metadata needed to do that repay its own cost?** Evaluation therefore keeps dense regular arithmetic, deep-causal scalar work, sparse/irregular structure, dynamic support, and real simulation workloads together instead of reporting only favorable kernels.
 
-On the retained Level-Set workload, the 8M case moves from **7.236 ms in 1.3.125 to 0.939 ms in 1.3.126 (7.70x)**. The 1.3.126 size curve is **0.813 / 0.776 / 0.848 ms** at 4M / 8M / 16M, and the four-core measurement is **0.911 ms** versus **6.357 ms** for the native C OpenMP control on the same experiment. All **36/36** retained gates pass. The speedup comes from representing and deleting disconnected support directly instead of inflating it into one coarse interval.
+The principal negative control is explicit. A Wheelchair `ValueFact` carries more structure than a bare C scalar, so value representation is wider and pure regular arithmetic may require modestly more metadata handling or instructions than highly optimized C. That cost is expected to be most visible when there is little structure to eliminate. The architecture earns that cost only when retained facts allow redundant transport, address work, support, materialization, or execution itself to disappear. Dense scalar losses are therefore part of the paper evidence rather than regressions to hide.
+
+The 1.3.127 archive, SHA-256, versionless `main/` production tree, top-level README, and GitHub Release are kept aligned so the paper baseline is independently identifiable and reproducible.
 
 ## Features
 
@@ -939,6 +941,7 @@ These milestones record changes in semantics, execution, and release verificatio
 | **1.3.111** | Big/big Rank-N division uses compact u32 digits, exact live object spans replace the old envelope, and quotient high-water facts feed the existing closure without rediscovery. |
 | **1.3.112** | Program-level `tolerance N` becomes one conservative `ToleranceFact` for `P > 64` Rank-N convergent mathematics; Strict/RNE primitive arithmetic remains the only high-precision arithmetic authority. |
 | **1.3.126** | Canonical unbounded `RegionSet` replaces coarse single-interval support; disconnected dead support is deleted before physical realization while Strict reduction structure is preserved. |
+| **1.3.127** | Paper snapshot: freezes the research baseline, makes the ValueFact/pure-arithmetic overhead an explicit negative control, and aligns archive, SHA, production `main/`, README, and Release for reproducibility. |
 
 The table selects turning points rather than listing every patch. Versioned benchmark results above remain observations of their original releases and hosts, not measurements of the current compiler unless explicitly labeled as the current snapshot.
 
