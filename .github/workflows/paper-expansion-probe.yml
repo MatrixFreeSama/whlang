@@ -1,0 +1,42 @@
+name: paper-expansion-probe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/paper-expansion-probe.yml
+
+permissions:
+  contents: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Probe benchmark invocation
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$RUNNER_TEMP/w127"
+          mkdir -p "$tmp"
+          unzip -q dist/Wheelchair-1.3.127.zip -d "$tmp"
+          root="$tmp/Wheelchair-1.3.127"
+          echo '=== REAL SPARSE FILES ==='
+          ls -la "$root/devtrash/benchmarks/real_sparse_1326"
+          echo '=== REAL SPARSE RELEASE TESTS ==='
+          for f in "$root"/devtrash/release_tests/*1326* "$root"/devtrash/release_tests/*real_sparse*; do [ -f "$f" ] && { echo "--- $f"; sed -n '1,240p' "$f"; }; done
+          echo '=== PERIODIC README ==='
+          sed -n '1,240p' "$root/devtrash/benchmarks/periodic_affine_aging_13124/README.md"
+          echo '=== PERIODIC TEST ==='
+          sed -n '1,280p' "$root/devtrash/release_tests/test_periodic_affine_aging_13124.sh"
+          echo '=== HIGH ENTROPY WHEX COMPAT TEST ==='
+          chmod +x "$root/bin/whexc" "$root/bin/topologyc" "$root/bin/topologyc-native256" "$root/bin/fieldc" "$root/bin/fieldc-native256" || true
+          "$root/bin/whexc" benchmarks/high_entropy_sparse_permutation_13102/perm_strict.whex -o "$RUNNER_TEMP/perm_wh" && file "$RUNNER_TEMP/perm_wh"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/paper-expansion-probe.yml
+          git commit -m 'Complete paper benchmark invocation probe'
+          git push origin HEAD:main
