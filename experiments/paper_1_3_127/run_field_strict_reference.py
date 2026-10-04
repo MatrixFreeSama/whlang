@@ -60,9 +60,9 @@ def make_reference(src,dst):
     s=s.replace('sum += s*s;', 'sum += (double)s*(double)s;')
     # Replace final f32 checksum print block in either compact or expanded source.
     s=re.sub(r'uint32_t b;memcpy\(&b,&sum,4\);printf\("checksum_f32_bits=0x%08x\\n",b\);',
-             'printf("reference_f64=%.17g\\n",sum);',s)
+             lambda _: 'printf("reference_f64=%.17g\\n",sum);',s)
     s=re.sub(r'uint32_t bits; memcpy\(&bits,&sum,4\);\s*printf\("checksum_f32_bits=0x%08x\\n",bits\);',
-             'printf("reference_f64=%.17g\\n",sum);',s)
+             lambda _: 'printf("reference_f64=%.17g\\n",sum);',s)
     dst.write_text(s)
 
 
