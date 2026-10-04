@@ -1,0 +1,22 @@
+program chem6_mass_action
+input steps: u64
+iterate sim limit steps {
+    state a: f64 = 1.0
+    state b: f64 = 0.5
+    state c: f64 = 0.1
+    state d: f64 = 0.7
+    state e: f64 = 0.2
+    state f: f64 = 0.05
+    state i: u64 = 0
+    while i < steps
+    update a = a + (((0.03 * c) - ((0.1 * a) * b)) - ((0.04 * e) * a)) * 0.00001
+    update b = b + (((0.03 * c) - ((0.1 * a) * b)) + (0.01 * f)) * 0.00001
+    update c = c + ((((0.1 * a) * b) - (0.03 * c)) - ((0.07 * c) * d) + (0.02 * e)) * 0.00001
+    update d = d + (((0.02 * e) - ((0.07 * c) * d)) + (0.01 * f)) * 0.00001
+    update e = e + ((((0.07 * c) * d) - (0.02 * e)) - ((0.04 * e) * a)) * 0.00001
+    update f = f + (((0.04 * e) * a) - (0.01 * f)) * 0.00001
+    update i = i + 1
+    result f
+}
+publish sim
+test (0) => { sim = 0.05 }
