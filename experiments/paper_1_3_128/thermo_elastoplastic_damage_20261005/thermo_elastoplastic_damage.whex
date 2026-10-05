@@ -1,0 +1,46 @@
+program localized_thermo_elastoplastic_damage
+strict
+input n: u64 range 16384..20000000
+field x[i in n]: f64 = (cast(f64, i) - cast(f64, n) * 0.5) * 0.000001
+field heat_over[i in n]: f64 = 900.0 - 100000000.0 * x[i] * x[i]
+field dtemp[i in n]: f64 = select(heat_over[i] > 0.0, heat_over[i], 0.0)
+field eth[i in n]: f64 = 0.000012 * dtemp[i]
+field strain_over[i in n]: f64 = 0.018 - 4500.0 * x[i] * x[i]
+field exx[i in n]: f64 = select(strain_over[i] > 0.0, strain_over[i], 0.0)
+field eyy[i in n]: f64 = -0.25 * exx[i]
+field ezz[i in n]: f64 = -0.20 * exx[i]
+field gxy[i in n]: f64 = 0.15 * exx[i]
+field gyz[i in n]: f64 = 0.05 * exx[i]
+field gzx[i in n]: f64 = -0.08 * exx[i]
+field emxx[i in n]: f64 = exx[i] - eth[i]
+field emyy[i in n]: f64 = eyy[i] - eth[i]
+field emzz[i in n]: f64 = ezz[i] - eth[i]
+field tr[i in n]: f64 = emxx[i] + emyy[i] + emzz[i]
+field sxx0[i in n]: f64 = 121153846153.84615 * tr[i] + 161538461538.46155 * emxx[i]
+field syy0[i in n]: f64 = 121153846153.84615 * tr[i] + 161538461538.46155 * emyy[i]
+field szz0[i in n]: f64 = 121153846153.84615 * tr[i] + 161538461538.46155 * emzz[i]
+field sxy0[i in n]: f64 = 80769230769.23077 * gxy[i]
+field syz0[i in n]: f64 = 80769230769.23077 * gyz[i]
+field szx0[i in n]: f64 = 80769230769.23077 * gzx[i]
+field meanp[i in n]: f64 = (sxx0[i] + syy0[i] + szz0[i]) / 3.0
+field dxx[i in n]: f64 = sxx0[i] - meanp[i]
+field dyy[i in n]: f64 = syy0[i] - meanp[i]
+field dzz[i in n]: f64 = szz0[i] - meanp[i]
+field j2q[i in n]: f64 = 1.5 * (dxx[i] * dxx[i] + dyy[i] * dyy[i] + dzz[i] * dzz[i] + 2.0 * (sxy0[i] * sxy0[i] + syz0[i] * syz0[i] + szx0[i] * szx0[i]))
+field seq[i in n]: f64 = sqrt(j2q[i])
+field yield_over[i in n]: f64 = seq[i] - 350000000.0
+field dlambda[i in n]: f64 = select(yield_over[i] > 0.0, yield_over[i] / 243307692307.69232, 0.0)
+field epxx[i in n]: f64 = 1.5 * dlambda[i] * dxx[i] / (seq[i] + 1.0)
+field plastic_work[i in n]: f64 = seq[i] * dlambda[i]
+field plastic_heat[i in n]: f64 = 0.9 * plastic_work[i] / 3744000.0
+field energy[i in n]: f64 = 0.5 * (sxx0[i] * emxx[i] + syy0[i] * emyy[i] + szz0[i] * emzz[i] + sxy0[i] * gxy[i] + syz0[i] * gyz[i] + szx0[i] * gzx[i])
+field damage_over[i in n]: f64 = energy[i] - 5000000.0
+field damage_raw[i in n]: f64 = select(damage_over[i] > 0.0, damage_over[i] * 0.00000002, 0.0)
+field damage[i in n]: f64 = select(damage_raw[i] > 0.95, 0.95, damage_raw[i])
+field divsig[i in n]: f64 = (sxx0[periodic(i + 1, n)] - sxx0[periodic(i + n - 1, n)]) * 500000.0
+field accel[i in n]: f64 = divsig[i] / 7800.0
+field dv[i in n]: f64 = 0.000000001 * accel[i]
+field laptemp[i in n]: f64 = (dtemp[periodic(i + 1, n)] - 2.0 * dtemp[i] + dtemp[periodic(i + n - 1, n)]) * 1000000000000.0
+field observable[i in n]: f64 = 3900.0 * dv[i] * dv[i] + plastic_work[i] + damage[i] * energy[i] + 100000000000.0 * epxx[i] * epxx[i] + plastic_heat[i] * plastic_heat[i] + dtemp[i] * dtemp[i] + laptemp[i] * laptemp[i] * 0.000000000000000001
+sum checksum[i in n]: f64 = observable[i]
+output checksum

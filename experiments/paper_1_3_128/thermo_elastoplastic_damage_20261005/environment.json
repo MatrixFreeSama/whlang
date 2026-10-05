@@ -1,0 +1,18 @@
+{
+  "cpu": "Model name:                              INTEL(R) XEON(R) PLATINUM 8573C",
+  "cpus": "CPU(s):                                  5",
+  "gcc": "gcc (Debian 14.2.0-19) 14.2.0",
+  "gfortran": "GNU Fortran (Debian 14.2.0-19) 14.2.0",
+  "kernel": "6.18.44",
+  "wheelchair_zip_sha256": "9110b357e9e5eafcd07df8751e803a7fb4f209b4332fc2b7f4e6a02e0b9ac761",
+  "pin": "taskset -c 0",
+  "repetitions": 9,
+  "sizes": [
+    1000000,
+    4000000,
+    8000000,
+    16000000
+  ],
+  "c_flags": "-O3 -march=native -fno-fast-math -ffp-contract=off",
+  "fortran_flags": "-O3 -march=native -fno-fast-math -ffp-contract=off -ffree-line-length-none"
+}
