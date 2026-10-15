@@ -293,18 +293,16 @@ _start:
     jmp .surface_probe_ws
 .surface_canonical_ready:
 
-    # Compile-lane authority is explicit before lowering.  Unrecovered .wh
-    # programs carry a transport-only wheelchair.general/1 marker and enter the
-    # sovereign general frontend exactly once.  GTR/WHEX topology graphs carry
-    # no such marker and a wheelchair.tensor/1 graph enters the tensor frontend
-    # exactly once.  There is no failure-driven cross-lane fallback.
-    mov rdi, [rip+source_ptr]
-    mov rsi, [rip+source_length]
-    lea rdx, [rip+general_lane_marker]
-    mov ecx, general_lane_marker_end-general_lane_marker
-    call memfind_scalar
-    test rax,rax
-    jnz .route_general_direct
+    # Format and transport facts belong to structural members, never strings
+    # inside program names, labels, operands, or unrelated nested metadata.
+    mov rdi,[rip+source_ptr]; mov rsi,[rip+source_length]
+    lea rdx,[rip+route_lane_key]; mov ecx,route_lane_key_end-route_lane_key
+    call surface_json_member
+    test rax,rax; jz .route_tensor_format
+    mov rdi,rax; mov rsi,rdx
+    lea rdx,[rip+general_lane_marker]; mov ecx,general_lane_marker_end-general_lane_marker
+    call surface_json_string_equal
+    test eax,eax; jnz .route_general_direct
     jmp .route_tensor_format
 
 .route_general_direct:
@@ -317,13 +315,14 @@ _start:
     jmp structured_compile_error
 
 .route_tensor_format:
-    mov rdi, [rip+source_ptr]
-    mov rsi, [rip+source_length]
-    lea rdx, [rip+tensor_fmt_marker]
-    mov ecx, tensor_fmt_marker_end-tensor_fmt_marker
-    call memfind_scalar
-    test rax, rax
-    jz .seed_scalar_path
+    mov rdi,[rip+source_ptr]; mov rsi,[rip+source_length]
+    lea rdx,[rip+route_format_key]; mov ecx,route_format_key_end-route_format_key
+    call surface_json_member
+    test rax,rax; jz .seed_scalar_path
+    mov rdi,rax; mov rsi,rdx
+    lea rdx,[rip+tensor_fmt_marker]; mov ecx,tensor_fmt_marker_end-tensor_fmt_marker
+    call surface_json_string_equal
+    test eax,eax; jz .seed_scalar_path
 
     mov rdi,r14
     call compile_tensor_source
@@ -582,15 +581,6 @@ usage_error:
     mov esi, msg_usage_end-msg_usage
     call print_stderr
     mov edi, 64
-    jmp exit_group
-source_too_large_close:
-    mov eax, SYS_close
-    mov rdi, [rip+input_fd]
-    syscall
-    lea rdi, [rip+msg_source_large]
-    mov esi, msg_source_large_end-msg_source_large
-    call print_stderr
-    mov edi, 65
     jmp exit_group
 input_error_close:
     mov eax, SYS_close
@@ -2388,99 +2378,6 @@ synthesize_resource_schedule:
     # before GroupFact rank/form closure. No legacy width handoff exists.
     ret
 
-synthesize_group_fact:
-    # Inputs are sparse facts only: logical rank and relation mask from the
-    # semantic frontend, lane factor from the target physicalizer, and the
-    # already-proven resource replication/carrier factors.  No fixed rank or
-    # group-size candidate set exists.
-    mov eax,dword ptr [rip+group_body_factor]
-    test eax,eax
-    jnz .sgf_body_ready
-    mov eax,1
-.sgf_body_ready:
-    mov dword ptr [rip+group_body_factor],eax
-    mov eax,dword ptr [rip+group_carrier_factor]
-    test eax,eax
-    jnz .sgf_carrier_ready
-    mov eax,1
-.sgf_carrier_ready:
-    mov dword ptr [rip+group_carrier_factor],eax
-
-    # Realization closure: a carrier witness cannot exceed the body episode that
-    # physically feeds it.  Resource scheduling has already priced recurrence
-    # demand against the same front-end/L1I fit, so closure only contracts stale
-    # carrier demand; it never widens the body after the cost proof.
-    mov edx,dword ptr [rip+group_relation_mask]
-    test edx,GF_REL_REDUCTION
-    jz .sgf_reduction_closed
-    mov eax,dword ptr [rip+group_carrier_factor]
-    mov ecx,dword ptr [rip+group_body_factor]
-    cmp eax,ecx
-    jbe .sgf_reduction_closed
-    mov dword ptr [rip+group_carrier_factor],ecx
-.sgf_reduction_closed:
-
-    mov eax,dword ptr [rip+group_lane_factor]
-    test eax,eax
-    jnz .sgf_lane_ready
-    mov eax,1
-    mov dword ptr [rip+group_lane_factor],eax
-.sgf_lane_ready:
-
-    # Rank is derived, never stored as a capacity. ShapeFact-N retains logical
-    # axis identity. Operation-affine replication and an independent reduction
-    # carrier each contribute an additional nontrivial group axis.
-    mov ecx,dword ptr [rip+group_logical_rank]
-    test ecx,ecx
-    jnz .sgf_have_logical_rank
-    cmp eax,1
-    jbe .sgf_have_logical_rank
-    mov ecx,1
-.sgf_have_logical_rank:
-    cmp dword ptr [rip+group_body_factor],1
-    jbe .sgf_no_body_axis
-    inc ecx
-.sgf_no_body_axis:
-    mov edx,dword ptr [rip+group_relation_mask]
-    test edx,GF_REL_REDUCTION
-    jz .sgf_no_carrier_axis
-    cmp dword ptr [rip+group_carrier_factor],1
-    jbe .sgf_no_carrier_axis
-    inc ecx
-.sgf_no_carrier_axis:
-    mov dword ptr [rip+group_rank],ecx
-
-    # Scalar and Vector are not sibling optimizers. They are the rank-0/rank-1
-    # degradations of the recovered group.
-    mov eax,GF_FORM_SCALAR
-    test ecx,ecx
-    jz .sgf_form_ready
-    mov eax,GF_FORM_VECTOR
-    cmp ecx,1
-    je .sgf_form_ready
-    mov eax,GF_FORM_GROUP
-.sgf_form_ready:
-    mov dword ptr [rip+group_form],eax
-
-    # Cardinality is diagnostic only. Overflow means unknown/unbounded at AOT,
-    # never rejection or a hidden admission threshold.
-    mov dword ptr [rip+group_cardinality_exact],1
-    mov eax,dword ptr [rip+group_lane_factor]
-    mov ecx,dword ptr [rip+group_body_factor]
-    mul rcx
-    test rdx,rdx
-    jnz .sgf_card_unknown
-    mov ecx,dword ptr [rip+group_carrier_factor]
-    mul rcx
-    test rdx,rdx
-    jnz .sgf_card_unknown
-    mov qword ptr [rip+group_cardinality],rax
-    ret
-.sgf_card_unknown:
-    mov qword ptr [rip+group_cardinality],0
-    mov dword ptr [rip+group_cardinality_exact],0
-    ret
-
 print_resource_schedule_json:
     lea rdi, [rip+sched_head]
     mov esi, sched_head_end-sched_head
@@ -2902,6 +2799,8 @@ isa_name_avx512dq: .asciz "avx512dq"
 isa_name_avx2: .asciz "avx2"
 fmt_marker: .ascii "wheelchair.scalar/1"
 fmt_marker_end:
+route_lane_key: .ascii "_compiler_lane"; route_lane_key_end:
+route_format_key: .ascii "format"; route_format_key_end:
 general_lane_marker: .ascii "wheelchair.general/1"
 general_lane_marker_end:
 tensor_fmt_marker: .ascii "wheelchair.tensor/1"
@@ -2999,8 +2898,6 @@ msg_usage: .ascii "usage: topologyc --probe | --isa-capabilities | --silicon-aud
 msg_usage_end:
 msg_input: .ascii "topologyc: input open/read failed\n"
 msg_input_end:
-msg_source_large: .ascii "topologyc: source exceeds assembly-seed 64 MiB admission bound\n"
-msg_source_large_end:
 msg_format: .ascii "topologyc: unsupported source format; sovereign assembly seed rejects\n"
 msg_format_end:
 msg_parse: .ascii "topologyc: malformed or out-of-range exit_code\n"

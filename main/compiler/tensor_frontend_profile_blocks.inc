@@ -62,7 +62,13 @@
 .eir_var:
     mov rdi,r12; lea rsi,[rip+k_var]; mov edx,k_var_end-k_var; call obj_get
     test rax,rax; jz .eir_op
-    mov rdi,[rax+8]; mov rsi,[rax+16]; call tensor_domain_var_match
+    mov rbx,rax
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; call tensor_find_input
+    cmp edx,TYPE_U64; jne .eir_domain_alias
+    mov esi,eax; mov edi,r13d; call tensor_emit_scalar_input_int
+    jmp .eir_done
+.eir_domain_alias:
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; call tensor_domain_var_match
     test eax,eax; jz .eir_fail
     mov edi,r13d; mov esi,9; call gen_mov_rr
     xor eax,eax; jmp .eir_done
@@ -363,78 +369,9 @@
 # rdi=disp32 address, rsi=target. eax=0/1.
 .endm
 
-.macro TFP_01_vec_vex2_rrr
-    # EVEX.512 generic map=0F, W=1, regs 0..31. r8d carries pp.
-    push rbx
-    mov ebx,edi
-    mov edi,0x62; call vec_emit_u8
-    xor eax,eax
-    mov r9d,esi; shr r9d,3; and r9d,1; xor r9d,1; shl r9d,7; or eax,r9d
-    mov r9d,ecx; shr r9d,4; and r9d,1; xor r9d,1; shl r9d,6; or eax,r9d
-    mov r9d,ecx; shr r9d,3; and r9d,1; xor r9d,1; shl r9d,5; or eax,r9d
-    mov r9d,esi; shr r9d,4; and r9d,1; xor r9d,1; shl r9d,4; or eax,r9d
-    or eax,1
-    mov edi,eax; call vec_emit_u8
-    mov eax,edx; not eax; and eax,0xF; shl eax,3
-    or eax,0x84                    # W=1, fixed bit2
-    or eax,r8d
-    mov edi,eax; call vec_emit_u8
-    mov eax,edx; shr eax,4; and eax,1; xor eax,1; shl eax,3
-    or eax,0x40                    # LL=512 (10b)
-    mov edi,eax; call vec_emit_u8
-    mov edi,ebx; call vec_emit_u8
-    mov eax,esi; and eax,7; shl eax,3
-    mov r9d,ecx; and r9d,7; or eax,r9d; or eax,0xC0
-    mov edi,eax; call vec_emit_u8
-    # Account the AVX-512 operation that was actually emitted.
-    cmp ebx,0x58
-    je .vv2_fp_add
-    cmp ebx,0x5C
-    je .vv2_fp_add
-    cmp ebx,0x59
-    je .vv2_fp_mul
-    cmp ebx,0x5E
-    je .vv2_fp_div
-    inc dword ptr [rip+schedule_counts+4*4] # integer/logical ALU
-    jmp .vv2_count_done
-.vv2_fp_add:
-    inc dword ptr [rip+schedule_counts+0]
-    jmp .vv2_count_done
-.vv2_fp_mul:
-    inc dword ptr [rip+schedule_counts+4]
-    jmp .vv2_count_done
-.vv2_fp_div:
-    inc dword ptr [rip+schedule_counts+8]
-.vv2_count_done:
-    pop rbx
-    ret
 
-# Low-register VEX3 map=0F38: edi=opcode, esi=dst, edx=src1, ecx=src2, r8d=pp.
-# Native unary vector sqrt on the existing AVX-512 carrier. edi=dst, esi=src.
-.endm
 
-.macro TFP_01_vec_sqrtpd
-    push rbx; push r12
-    mov ebx,edi; mov r12d,esi
-    mov edi,0x62; call vec_emit_u8
-    xor eax,eax
-    mov r9d,ebx; shr r9d,3; and r9d,1; xor r9d,1; shl r9d,7; or eax,r9d
-    mov r9d,r12d; shr r9d,4; and r9d,1; xor r9d,1; shl r9d,6; or eax,r9d
-    mov r9d,r12d; shr r9d,3; and r9d,1; xor r9d,1; shl r9d,5; or eax,r9d
-    mov r9d,ebx; shr r9d,4; and r9d,1; xor r9d,1; shl r9d,4; or eax,r9d
-    or eax,1
-    mov edi,eax; call vec_emit_u8
-    mov edi,0xFD; call vec_emit_u8       # W1, reserved vvvv, pp=66
-    mov edi,0x48; call vec_emit_u8       # LL=512, no masking
-    mov edi,0x51; call vec_emit_u8
-    mov eax,ebx; and eax,7; shl eax,3
-    mov ecx,r12d; and ecx,7; or eax,ecx; or eax,0xC0
-    mov edi,eax; call vec_emit_u8
-    inc dword ptr [rip+schedule_counts+8]
-    xor eax,eax
-    pop r12; pop rbx; ret
 
-.endm
 
 .macro TFP_01_vec_mov_ext
     push rbx
@@ -525,10 +462,10 @@
     jae .vfc_patch
     lea rcx,[rax+8]
     cmp rcx,[rip+vec_emit_end]
-    jbe .tcgrow_ok_13
+    jbe .Lconstant_finalize_room\@
     mov dword ptr [rip+tensor_code_overflow],1
     jmp .vfc_fail
-.tcgrow_ok_13:
+.Lconstant_finalize_room\@:
     mov qword ptr [r13+r12*8],rax
     mov rdx,qword ptr [r8+r12*8]
     mov qword ptr [rax],rdx
@@ -870,206 +807,22 @@
     pop rbx
     ret
 
-# Generic signed i64-vector -> f64-vector conversion.
+# Complete unsigned tensor conversion is owned by the shared consumer.
 # The semantic operation is independent of AVX512DQ.  DQ contributes the
 # one-instruction VCVTQQ2PD realization; AVX512F can synthesize the identical
 # correctly-rounded result from exact 32-bit pieces without any scalar lane.
 # edi=dst zmm, esi=src zmm -> eax=0/1.
 .endm
 
-.macro TFP_01_vec_vcvtqq2pd_synth
-    push rbx
-    push r12
-    push r13
-    push r14
-    push r15
-    mov ebx,edi                    # destination
-    mov r12d,esi                   # source
-
-    # Reserve every temporary before emitting code. Resource pressure may
-    # change the physical recipe, never the semantic result or parallel width.
-    call vec_alloc
-    cmp eax,-1
-    je .vcq2pds_fail
-    mov r13d,eax                   # signed hi32
-    call vec_alloc
-    cmp eax,-1
-    je .vcq2pds_free_hi
-    mov r14d,eax                   # low32 sign correction (0/1)
-
-    # 2^32 as exact binary64, consumed through the shared immutable pool.
-    mov rsi,0x41F0000000000000
-    call vec_const_intern
-    cmp eax,-1
-    je .vcq2pds_free_both
-    mov r15d,eax
-
-    # Extract high signed dword and low unsigned-sign bit before dst can alias src.
-    mov edi,r13d; mov esi,r12d; mov edx,32; call vec_vpsrlq_imm
-    mov edi,r14d; mov esi,r12d; mov edx,31; call vec_vpsrld_imm
-
-    # Pack one dword from each qword lane, then use AVX512F dword->double.
-    mov edi,ebx;   mov esi,r12d; call vec_vpmovqd_ymm_from_zmm
-    mov edi,r13d;  mov esi,r13d; call vec_vpmovqd_ymm_from_zmm
-    mov edi,r14d;  mov esi,r14d; call vec_vpmovqd_ymm_from_zmm
-    mov edi,ebx;   mov esi,ebx;  call vec_vcvtdq2pd_zmm_from_ymm
-    mov edi,r13d;  mov esi,r13d; call vec_vcvtdq2pd_zmm_from_ymm
-    mov edi,r14d;  mov esi,r14d; call vec_vcvtdq2pd_zmm_from_ymm
-
-    # signed(lo32) + sign(lo32)*2^32 = unsigned(lo32), exactly.
-    mov edi,r14d; mov esi,r14d; mov edx,r15d; call vec_vmulpd_mem_const
-    test eax,eax
-    jnz .vcq2pds_free_both
-    mov edi,0x58; mov esi,ebx; mov edx,ebx; mov ecx,r14d; mov r8d,1
-    call vec_vex2_rrr
-
-    # hi32*2^32 is exact. The final add performs the required int64->f64 rounding.
-    mov edi,r13d; mov esi,r13d; mov edx,r15d; call vec_vmulpd_mem_const
-    test eax,eax
-    jnz .vcq2pds_free_both
-    mov edi,0x58; mov esi,ebx; mov edx,ebx; mov ecx,r13d; mov r8d,1
-    call vec_vex2_rrr
-
-    mov edi,r14d; call vec_free
-    mov edi,r13d; call vec_free
-    xor eax,eax
-    jmp .vcq2pds_done
-.vcq2pds_free_both:
-    mov edi,r14d; call vec_free
-.vcq2pds_free_hi:
-    mov edi,r13d; call vec_free
-.vcq2pds_fail:
-    mov eax,1
-.vcq2pds_done:
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    ret
-
-# AVX512F VPMOVQD ymmDST,zmmSRC.  The 256-bit destination width is intrinsic
-# to the 512-bit narrowing instruction and does not require AVX512VL.
-.endm
-
-.macro TFP_01_vec_vpmovqd_ymm_from_zmm
-    push rbx
-    mov ebx,edi                    # ymm destination physical id
-    mov r10d,esi                   # zmm source physical id
-    mov edi,0x62; call vec_emit_u8
-    xor eax,eax
-    mov ecx,r10d; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,7; or eax,ecx
-    mov ecx,ebx;  shr ecx,4; and ecx,1; xor ecx,1; shl ecx,6; or eax,ecx
-    mov ecx,ebx;  shr ecx,3; and ecx,1; xor ecx,1; shl ecx,5; or eax,ecx
-    mov ecx,r10d; shr ecx,4; and ecx,1; xor ecx,1; shl ecx,4; or eax,ecx
-    or eax,2
-    mov edi,eax; call vec_emit_u8
-    mov edi,0x7E; call vec_emit_u8
-    mov edi,0x48; call vec_emit_u8
-    mov edi,0x35; call vec_emit_u8
-    mov eax,r10d; and eax,7; shl eax,3
-    mov ecx,ebx; and ecx,7; or eax,ecx; or eax,0xC0
-    mov edi,eax; call vec_emit_u8
-    inc dword ptr [rip+schedule_counts+4*4]
-    pop rbx
-    xor eax,eax
-    ret
-
-# AVX512F VCVTDQ2PD zmmDST,ymmSRC.
-.endm
-
-.macro TFP_01_vec_vcvtdq2pd_zmm_from_ymm
-    push rbx
-    mov ebx,edi
-    mov r10d,esi
-    mov edi,0x62; call vec_emit_u8
-    xor eax,eax
-    mov ecx,ebx;  shr ecx,3; and ecx,1; xor ecx,1; shl ecx,7; or eax,ecx
-    mov ecx,r10d; shr ecx,4; and ecx,1; xor ecx,1; shl ecx,6; or eax,ecx
-    mov ecx,r10d; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,5; or eax,ecx
-    mov ecx,ebx;  shr ecx,4; and ecx,1; xor ecx,1; shl ecx,4; or eax,ecx
-    or eax,1
-    mov edi,eax; call vec_emit_u8
-    mov edi,0x7E; call vec_emit_u8
-    mov edi,0x48; call vec_emit_u8
-    mov edi,0xE6; call vec_emit_u8
-    mov eax,ebx; and eax,7; shl eax,3
-    mov ecx,r10d; and ecx,7; or eax,ecx; or eax,0xC0
-    mov edi,eax; call vec_emit_u8
-    inc dword ptr [rip+schedule_counts+4*3]
-    pop rbx
-    xor eax,eax
-    ret
-
-# AVX512F VPSRLD zmmDST,zmmSRC,imm8.
-.endm
-
-.macro TFP_01_vec_vpsrld_imm
-    push rbx
-    mov ebx,edi
-    mov r10d,esi
-    mov r11d,edx
-    mov edi,0x62; call vec_emit_u8
-    mov eax,0xF1
-    bt r10d,4
-    jnc .vsrdi_no_b4
-    and eax,0xBF
-.vsrdi_no_b4:
-    bt r10d,3
-    jnc .vsrdi_no_b3
-    and eax,0xDF
-.vsrdi_no_b3:
-    mov edi,eax; call vec_emit_u8
-    mov eax,ebx; not eax; and eax,0xF; shl eax,3; or eax,0x05
-    mov edi,eax; call vec_emit_u8
-    mov eax,ebx; shr eax,4; and eax,1; xor eax,1; shl eax,3; or eax,0x40
-    mov edi,eax; call vec_emit_u8
-    mov edi,0x72; call vec_emit_u8
-    mov eax,r10d; and eax,7; or eax,0xD0
-    mov edi,eax; call vec_emit_u8
-    mov edi,r11d; call vec_emit_u8
-    inc dword ptr [rip+schedule_counts+4*4]
-    pop rbx
-    xor eax,eax
-    ret
 
 
-# Generic property-constrained conversion used after a proof that every lane is
-# finite, non-negative and <2^52. DQ can realize it with VCVTTPD2QQ; AVX512F
-# synthesizes the same truncation by rounding toward zero in FP, adding the
-# exact 2^52 bias, then extracting the mantissa as an integer. No scalar lane.
-# edi=dst zmm, esi=src zmm -> eax=0/1.
-# Scalar f64 carrier truncate toward zero. edi=dst xmm, esi=src xmm.
-# SSE4.1 ROUNDSD is emitted directly; this is the same old register-native lane.
-.endm
 
-.macro TFP_01_vec_vrndscalepd_trunc
-    push rbx
-    mov ebx,edi
-    mov r10d,esi
-    mov edi,0x62; call vec_emit_u8
-    xor eax,eax
-    mov ecx,ebx;  shr ecx,3; and ecx,1; xor ecx,1; shl ecx,7; or eax,ecx
-    mov ecx,r10d; shr ecx,4; and ecx,1; xor ecx,1; shl ecx,6; or eax,ecx
-    mov ecx,r10d; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,5; or eax,ecx
-    mov ecx,ebx;  shr ecx,4; and ecx,1; xor ecx,1; shl ecx,4; or eax,ecx
-    or eax,3
-    mov edi,eax; call vec_emit_u8
-    mov edi,0xFD; call vec_emit_u8
-    mov edi,0x48; call vec_emit_u8
-    mov edi,0x09; call vec_emit_u8
-    mov eax,ebx; and eax,7; shl eax,3
-    mov ecx,r10d; and ecx,7; or eax,ecx; or eax,0xC0
-    mov edi,eax; call vec_emit_u8
-    mov edi,0x03; call vec_emit_u8
-    inc dword ptr [rip+schedule_counts+4*3]
-    pop rbx
-    xor eax,eax
-    ret
 
-# EVEX vaddpd zmm dst,src1,QWORD BCST [rip+const].
-# edi=dst, esi=src1, edx=constant-pool index -> eax=0/1.
-.endm
+
+
+
+
+
 
 .macro TFP_01_vec_cmp_eq_maskvec
     push rbx
@@ -1127,24 +880,6 @@
     pop r13
     pop r12
     pop rbx
-    ret
-
-# vec_cmp_f64_maskvec(edi=dst, esi=lhs, edx=rhs, ecx=VCMPPD predicate imm8)
-# Value consumers materialize the same PredicateFact into all-ones/zero lanes.
-.endm
-
-.macro TFP_01_vec_cmp_f64_maskvec
-    push rbx
-    mov ebx,edi
-    call vec_cmp_f64_k1
-    test eax,eax; jnz .vcfm_fail
-    mov edi,ebx
-    call vec_mask_k1_to_qvec
-    pop rbx
-    ret
-.vcfm_fail:
-    pop rbx
-    mov eax,1
     ret
 
 # vec_mask_k1_to_qvec(edi=dst) -> eax=0/1
@@ -1800,8 +1535,9 @@
     mov r12d,eax
     mov rcx,qword ptr [rip+vec_cache_reg_ptr]
     mov edi,dword ptr [rcx+r12*4]
+    test edi,edi; js 1f
     call vec_cache_reg_free
-    mov dword ptr [rip+vec_cache_count],r12d
+1:  mov dword ptr [rip+vec_cache_count],r12d
     jmp .vcf_loop
 .vcf_done:
     pop r12
@@ -1846,12 +1582,212 @@
 # Literal constants and already-proven direct-axis CSE values are immutable sources.
 .endm
 
+.macro TFP_130_vec_pressure_helpers
+# One pressure-carrier authority shared by wide tensor frontends.  The runtime
+# stack is used only when every architectural ZMM is live; it is another carrier
+# location in the same AOT vector Physical Reality, never a scalar/backend route.
+vec_spill_pair_push:
+    mov edi,0x48; call vec_emit_u8
+    mov edi,0x81; call vec_emit_u8
+    mov edi,0xEC; call vec_emit_u8
+    mov edi,0x80; call vec_emit_u8
+    xor edi,edi; call vec_emit_u8
+    xor edi,edi; call vec_emit_u8
+    xor edi,edi; call vec_emit_u8
+    xor eax,eax; ret
+vec_spill_pair_pop:
+    mov edi,0x48; call vec_emit_u8
+    mov edi,0x81; call vec_emit_u8
+    mov edi,0xC4; call vec_emit_u8
+    mov edi,0x80; call vec_emit_u8
+    xor edi,edi; call vec_emit_u8
+    xor edi,edi; call vec_emit_u8
+    xor edi,edi; call vec_emit_u8
+    xor eax,eax; ret
+
+# vec_spill_store_rsp(edi=zmm, esi=slot 0/1) -> eax=0/1.
+vec_spill_store_rsp:
+    push rbx; push r12
+    mov ebx,edi; mov r12d,esi
+    cmp r12d,1; ja .vss130_fail
+    mov edi,0x62; call vec_emit_u8
+    xor eax,eax
+    mov ecx,ebx; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,7; or eax,ecx
+    or eax,0x60
+    mov ecx,ebx; shr ecx,4; and ecx,1; xor ecx,1; shl ecx,4; or eax,ecx
+    or eax,1
+    mov edi,eax; call vec_emit_u8
+    mov edi,0xFE; call vec_emit_u8
+    mov edi,0x48; call vec_emit_u8
+    mov edi,0x7F; call vec_emit_u8
+    mov eax,ebx; and eax,7; shl eax,3; or eax,4
+    test r12d,r12d; jz .vss130_nodisp
+    or eax,0x40
+.vss130_nodisp:
+    mov edi,eax; call vec_emit_u8
+    mov edi,0x24; call vec_emit_u8
+    test r12d,r12d; jz .vss130_count
+    mov edi,1; call vec_emit_u8
+.vss130_count:
+    inc dword ptr [rip+schedule_counts+4*7]
+    inc dword ptr [rip+schedule_counts+4*8]
+    xor eax,eax; jmp .vss130_done
+.vss130_fail:
+    mov eax,1
+.vss130_done:
+    pop r12; pop rbx; ret
+
+# vec_spill_load_rsp(edi=zmm, esi=slot 0/1) -> eax=0/1.
+vec_spill_load_rsp:
+    push rbx; push r12
+    mov ebx,edi; mov r12d,esi
+    cmp r12d,1; ja .vsl130_fail
+    mov edi,0x62; call vec_emit_u8
+    xor eax,eax
+    mov ecx,ebx; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,7; or eax,ecx
+    or eax,0x60
+    mov ecx,ebx; shr ecx,4; and ecx,1; xor ecx,1; shl ecx,4; or eax,ecx
+    or eax,1
+    mov edi,eax; call vec_emit_u8
+    mov edi,0xFE; call vec_emit_u8
+    mov edi,0x48; call vec_emit_u8
+    mov edi,0x6F; call vec_emit_u8
+    mov eax,ebx; and eax,7; shl eax,3; or eax,4
+    test r12d,r12d; jz .vsl130_nodisp
+    or eax,0x40
+.vsl130_nodisp:
+    mov edi,eax; call vec_emit_u8
+    mov edi,0x24; call vec_emit_u8
+    test r12d,r12d; jz .vsl130_count
+    mov edi,1; call vec_emit_u8
+.vsl130_count:
+    inc dword ptr [rip+schedule_counts+4*7]
+    inc dword ptr [rip+schedule_counts+4*8]
+    xor eax,eax; jmp .vsl130_done
+.vsl130_fail:
+    mov eax,1
+.vsl130_done:
+    pop r12; pop rbx; ret
+
+# vec_bin_rsp(edi=map0F opcode, esi=dst/src1, edx=slot) -> eax=0/1.
+# Covers the existing strict FP binary family and exact integer vpsubq.
+vec_bin_rsp:
+    push rbx; push r12
+    mov ebx,edi; mov r12d,edx
+    cmp r12d,1; ja .vbr130_fail
+    mov edi,0x62; call vec_emit_u8
+    xor eax,eax
+    mov ecx,esi; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,7; or eax,ecx
+    or eax,0x60
+    mov ecx,esi; shr ecx,4; and ecx,1; xor ecx,1; shl ecx,4; or eax,ecx
+    or eax,1
+    mov edi,eax; call vec_emit_u8
+    mov eax,esi; not eax; and eax,0xF; shl eax,3; or eax,0x85
+    mov edi,eax; call vec_emit_u8
+    mov eax,esi; shr eax,4; and eax,1; xor eax,1; shl eax,3; or eax,0x40
+    mov edi,eax; call vec_emit_u8
+    mov edi,ebx; call vec_emit_u8
+    mov eax,esi; and eax,7; shl eax,3; or eax,4
+    test r12d,r12d; jz .vbr130_nodisp
+    or eax,0x40
+.vbr130_nodisp:
+    mov edi,eax; call vec_emit_u8
+    mov edi,0x24; call vec_emit_u8
+    test r12d,r12d; jz .vbr130_count
+    mov edi,1; call vec_emit_u8
+.vbr130_count:
+    cmp ebx,0x58; je .vbr130_add
+    cmp ebx,0x5C; je .vbr130_add
+    cmp ebx,0x59; je .vbr130_mul
+    cmp ebx,0x5E; je .vbr130_div
+    cmp ebx,0xFB; je .vbr130_int
+    jmp .vbr130_fail
+.vbr130_add:
+    inc dword ptr [rip+schedule_counts+0]; jmp .vbr130_mem
+.vbr130_mul:
+    inc dword ptr [rip+schedule_counts+4]; jmp .vbr130_mem
+.vbr130_div:
+    inc dword ptr [rip+schedule_counts+8]; jmp .vbr130_mem
+.vbr130_int:
+    inc dword ptr [rip+schedule_counts+4*4]
+.vbr130_mem:
+    inc dword ptr [rip+schedule_counts+4*7]
+    inc dword ptr [rip+schedule_counts+4*8]
+    xor eax,eax; jmp .vbr130_done
+.vbr130_fail:
+    mov eax,1
+.vbr130_done:
+    pop r12; pop rbx; ret
+
+# vec_vpminuq_rsp(edi=dst/src1, esi=slot) -> eax=0/1.
+vec_vpminuq_rsp:
+    push rbx; push r12
+    mov ebx,edi; mov r12d,esi
+    cmp r12d,1; ja .vpmr130_fail
+    mov edi,0x62; call vec_emit_u8
+    xor eax,eax
+    mov ecx,ebx; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,7; or eax,ecx
+    or eax,0x60
+    mov ecx,ebx; shr ecx,4; and ecx,1; xor ecx,1; shl ecx,4; or eax,ecx
+    or eax,2
+    mov edi,eax; call vec_emit_u8
+    mov eax,ebx; not eax; and eax,0xF; shl eax,3; or eax,0x85
+    mov edi,eax; call vec_emit_u8
+    mov eax,ebx; shr eax,4; and eax,1; xor eax,1; shl eax,3; or eax,0x40
+    mov edi,eax; call vec_emit_u8
+    mov edi,0x3B; call vec_emit_u8
+    mov eax,ebx; and eax,7; shl eax,3; or eax,4
+    test r12d,r12d; jz .vpmr130_nodisp
+    or eax,0x40
+.vpmr130_nodisp:
+    mov edi,eax; call vec_emit_u8
+    mov edi,0x24; call vec_emit_u8
+    test r12d,r12d; jz .vpmr130_count
+    mov edi,1; call vec_emit_u8
+.vpmr130_count:
+    inc dword ptr [rip+schedule_counts+4*4]
+    inc dword ptr [rip+schedule_counts+4*7]
+    inc dword ptr [rip+schedule_counts+4*8]
+    xor eax,eax; jmp .vpmr130_done
+.vpmr130_fail:
+    mov eax,1
+.vpmr130_done:
+    pop r12; pop rbx; ret
+.endm
+
+.macro TFP_130_vec_predicate_pressure_helpers
+# Predicate-only memory compare. Stack ownership itself is the unified 128-byte
+# pressure carrier above.
+vec_pred_cmp_f64_k1_rsp:
+    push rbx
+    mov ebx,esi
+    push rcx
+    mov edi,0x62; call vec_emit_u8
+    mov edi,0xF1; call vec_emit_u8
+    mov eax,ebx; not eax; and eax,0xF; shl eax,3; or eax,0x85
+    mov edi,eax; call vec_emit_u8
+    mov eax,ebx; shr eax,4; and eax,1; xor eax,1; shl eax,3; or eax,0x40
+    mov edi,eax; call vec_emit_u8
+    mov edi,0xC2; call vec_emit_u8
+    mov edi,0x0C; call vec_emit_u8
+    mov edi,0x24; call vec_emit_u8
+    pop rcx
+    mov edi,ecx; call vec_emit_u8
+    inc dword ptr [rip+schedule_counts+4*7]
+    inc dword ptr [rip+schedule_counts+4*8]
+    xor eax,eax
+    pop rbx
+    ret
+.endm
+
 .macro TFP_01_emit_vec_predicate_k1
+    push rbp
     push rbx
     push r12
     push r13
     push r14
     push r15
+    mov ebp,esi                    # caller-owned scratch/destination carrier
     mov r12,rdi
     cmp qword ptr [r12],J_OBJECT; jne .evpk_unsupported
     mov rdi,r12; lea rsi,[rip+k_op]; mov edx,k_op_end-k_op; call obj_get
@@ -1867,7 +1803,7 @@
     test eax,eax; jz .evpk_ne; mov ebx,0; jmp .evpk_kind
 .evpk_ne:
     mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_ne]; mov ecx,v_ne_end-v_ne; call span_eq
-    test eax,eax; jz .evpk_lt; mov ebx,12; jmp .evpk_kind
+    test eax,eax; jz .evpk_lt; mov ebx,PHYSICAL_FP_NE_PREDICATE; jmp .evpk_kind
 .evpk_lt:
     mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_lt]; mov ecx,v_lt_end-v_lt; call span_eq
     test eax,eax; jz .evpk_le; mov ebx,1; jmp .evpk_kind
@@ -1883,24 +1819,89 @@
 .evpk_kind:
     mov rdi,r14; call expr_is_float_value
     test eax,eax; jz .evpk_unsupported
-    call vec_alloc; cmp eax,-1; je .evpk_failure; mov r12d,eax
-    call vec_alloc; cmp eax,-1; je .evpk_free_lhs_failure; mov r13d,eax
-    mov rdi,r14; mov esi,r12d; call emit_vec_float
-    test eax,eax; jnz .evpk_free2_failure
-    mov rdi,r15; mov esi,r13d; call emit_vec_float
-    test eax,eax; jnz .evpk_free2_failure
+
+    # Resident ValueFacts are direct predicate sources.  They must not consume a
+    # new carrier merely because a predicate reads them.
+    mov rdi,r14; call vec_try_float_source; mov r12d,eax
+    mov rdi,r15; call vec_try_float_source; mov r13d,eax
+    cmp r12d,-1; je .evpk_lhs_not_resident
+    cmp r13d,-1; je .evpk_rhs_not_resident
     mov esi,r12d; mov edx,r13d; mov ecx,ebx; call vec_cmp_f64_k1
+    test eax,eax; jnz .evpk_failure
+    xor eax,eax; jmp .evpk_done
+
+.evpk_rhs_not_resident:
+    # LHS is resident.  The caller destination is dead until the selected true
+    # arm executes, so it is the natural scratch for the RHS.
+    mov rdi,r15; mov esi,ebp; call emit_vec_float
+    test eax,eax; jnz .evpk_failure
+    mov esi,r12d; mov edx,ebp; mov ecx,ebx; call vec_cmp_f64_k1
+    test eax,eax; jnz .evpk_failure
+    xor eax,eax; jmp .evpk_done
+
+.evpk_lhs_not_resident:
+    cmp r13d,-1; je .evpk_neither_resident
+    mov rdi,r14; mov esi,ebp; call emit_vec_float
+    test eax,eax; jnz .evpk_failure
+    mov esi,ebp; mov edx,r13d; mov ecx,ebx; call vec_cmp_f64_k1
+    test eax,eax; jnz .evpk_failure
+    xor eax,eax; jmp .evpk_done
+
+.evpk_neither_resident:
+    # Compute the first operand into the caller-owned carrier.  Borrow a second
+    # carrier only if the Physical Reality has one.  Optional CSE may be retired
+    # by vec_alloc before this point.
+    mov rdi,r14; mov esi,ebp; call emit_vec_float
+    test eax,eax; jnz .evpk_failure
+    call vec_alloc
+    cmp eax,-1; je .evpk_stack
+    mov r12d,eax
+    mov rdi,r15; mov esi,r12d; call emit_vec_float
+    test eax,eax; jnz .evpk_free_failure
+    mov esi,ebp; mov edx,r12d; mov ecx,ebx; call vec_cmp_f64_k1
     push rax
-    mov edi,r13d; call vec_free
     mov edi,r12d; call vec_free
     pop rax
     test eax,eax; jnz .evpk_failure
-    xor eax,eax
-    jmp .evpk_done
-.evpk_free2_failure:
-    mov edi,r13d; call vec_free
-.evpk_free_lhs_failure:
+    xor eax,eax; jmp .evpk_done
+.evpk_free_failure:
     mov edi,r12d; call vec_free
+    jmp .evpk_failure
+
+.evpk_stack:
+    # No ZMM is free even after optional CSE retirement.  Preserve exactly one
+    # Strict operand in a short-lived stack carrier, reuse the caller ZMM for the
+    # other operand, and invert the ordered relation because the register/memory
+    # operands are reversed.  No source-depth threshold exists.
+    call vec_spill_pair_push
+    test eax,eax; jnz .evpk_failure
+    mov edi,ebp; xor esi,esi; call vec_spill_store_rsp
+    test eax,eax; jnz .evpk_stack_pop_failure
+    mov rdi,r15; mov esi,ebp; call emit_vec_float
+    test eax,eax; jnz .evpk_stack_pop_failure
+    cmp ebx,1; jne .evpk_inv_le
+    mov ecx,14; jmp .evpk_cmp_stack
+.evpk_inv_le:
+    cmp ebx,2; jne .evpk_inv_gt
+    mov ecx,13; jmp .evpk_cmp_stack
+.evpk_inv_gt:
+    cmp ebx,14; jne .evpk_inv_ge
+    mov ecx,1; jmp .evpk_cmp_stack
+.evpk_inv_ge:
+    cmp ebx,13; jne .evpk_inv_sym
+    mov ecx,2; jmp .evpk_cmp_stack
+.evpk_inv_sym:
+    mov ecx,ebx
+.evpk_cmp_stack:
+    mov esi,ebp; call vec_pred_cmp_f64_k1_rsp
+    push rax
+    call vec_spill_pair_pop
+    pop rdx
+    or eax,edx
+    test eax,eax; jnz .evpk_failure
+    xor eax,eax; jmp .evpk_done
+.evpk_stack_pop_failure:
+    call vec_spill_pair_pop
 .evpk_failure:
     mov eax,2
     jmp .evpk_done
@@ -1912,10 +1913,11 @@
     pop r13
     pop r12
     pop rbx
+    pop rbp
     ret
+.endm
 
 # emit_vec_int(rdi=expr, esi=dst ymm low) -> eax 0/1
-.endm
 
 .macro TFP_02_vec_emit_periodic_key
     push rbx
@@ -1929,94 +1931,12 @@
     mov r14,rcx                    # mod token
     xor r15d,r15d                  # dynamic-ring normalization multiple k
 
-    # A canonical Z/nZ CoordinateFact may carry a negative signed offset.
-    # Choose the smallest compile-time k with k*n+d >= 0 for every admitted n.
-    # Adding k*n does not change the residue; it only gives the reciprocal
-    # materializer one non-negative physical representative.  This is a ring
-    # normalization, not a special case for backward shifts.
-    cmp r14,-1
-    jne .vepk_affine_emit
-    test r13,r13
-    jns .vepk_affine_emit
-    mov rax,r13
-    neg rax
-    jo .vepk_fail
-    mov rcx,qword ptr [rip+tensor_shape_extent_min]
-    test rcx,rcx
-    jz .vepk_fail
-    xor edx,edx
-    div rcx                        # |d| / n_min
-    test rdx,rdx
-    jz .vepk_norm_k_ready
-    inc rax
-    jz .vepk_fail
-.vepk_norm_k_ready:
-    mov r15,rax
-
-.vepk_affine_emit:
-    # Dynamic modulo has two physical realizations under one PeriodicAffineFact.
-    # Keep the existing reciprocal path only when its strict exactness proof is
-    # valid. Otherwise emit exact integer ring arithmetic before any affine hot
-    # bytes are produced; physical precision must never become a source limit.
-    cmp r14,-1
-    jne .vepk_affine_emit_ready
-    mov rax,r12
-    add rax,r15                    # effective non-negative coefficient bound
-    jc .vepk_exact_n
-    mov rcx,rax
-    mul qword ptr [rip+tensor_shape_extent_max]
-    test rdx,rdx
-    jnz .vepk_exact_n
-    test r15,r15
-    jnz .vepk_recip_first_ready
-    add rax,r13                    # positive d; negative d always has k>0
-    jc .vepk_exact_n
-.vepk_recip_first_ready:
-    # The mature reciprocal quotient needs an exact integer conversion only
-    # for its one-sided proof.  The bidirectional correction stays exact when
-    # the signed binary64 quotient estimate is within one integer.  Prove that
-    # from the physical range instead of rejecting the PeriodicAffineFact.
-    # When n < 2^53 its scalar conversion is exact; x conversion, reciprocal
-    # rounding and the multiply contribute three binary64 roundings.  Thus
-    #   x < 2^63, n_max < 2^53, floor(x/n_min) < 2^52
-    # gives |q_hat-q| < 2 under the conservative 4u relative-error bound.
-    # Two bidirectional integer corrections close that bounded uncertainty.
-    # Values outside the proof domain fall through to exact ring arithmetic.
-    mov rdx,0x0020000000000000     # exact integer -> binary64 domain
-    cmp rax,rdx
-    jb .vepk_affine_emit_ready
-    # Unsigned conversion removes the artificial x<2^63 wall.  Bound the
-    # quotient from the affine relation itself instead of combining incompatible
-    # extrema x(n_max) and n_min: for 0<=i<n,
-    #   floor((c*i + k*n + d)/n) < c+k+ceil(max(d,0)/n).
-    mov rdx,qword ptr [rip+tensor_shape_extent_max]
-    mov rcx,0x0020000000000000     # n < 2^53 => exact scalar binary64 n
-    cmp rdx,rcx
-    jae .vepk_exact_n
-    mov rax,r12
-    add rax,r15
-    jc .vepk_exact_n
-    test r13,r13
-    jle .vepk_q_bound_ready
-    mov rcx,qword ptr [rip+tensor_shape_extent_min]
-    test rcx,rcx
-    jz .vepk_exact_n
-    mov rdx,r13
-    dec rdx
-    js .vepk_exact_n
-    xor r8d,r8d
-    # ceil(d/n_min) = 1 + floor((d-1)/n_min), d>0.
-    mov r9,rax
-    mov rax,rdx
-    xor edx,edx
-    div rcx
-    inc rax
-    add rax,r9
-    jc .vepk_exact_n
-.vepk_q_bound_ready:
-    mov rdx,0x0010000000000000     # q_bound < 2^52 => 4u*q < 2
-    cmp rax,rdx
-    jae .vepk_exact_n
+    cmp r14,-1; jne .vepk_affine_emit_ready
+    mov rdi,r12; mov rsi,r13
+    call vec_periodic_range_class
+    mov r15,rdx
+    cmp eax,2; je .vepk_fail
+    test eax,eax; jnz .vepk_exact_n
     jmp .vepk_affine_emit_ready
 .vepk_exact_n:
     # Exact periodic facts reuse the same persistent AffineFact authority as
@@ -2126,7 +2046,20 @@
     jz .vepk_ok
     lea rax,[r14-1]
     test rax,r14
-    jnz .vepk_fail
+    jz .vepk_literal_mask
+    mov rax,r12
+    mul qword ptr [rip+tensor_shape_extent_max]
+    test rdx,rdx; jnz .vepk_fail
+    add rax,r13; jc .vepk_fail
+    mov r8,rax
+    mov rax,0x0001000000000000
+    cmp r8,rax; jae .vepk_fail
+    cmp r14,rax; jae .vepk_fail
+    mov edi,ebx; mov esi,ebx; mov rdx,r14; mov ecx,1
+    call vec_udivmod_literal_exact
+    test eax,eax; jnz .vepk_fail
+    jmp .vepk_ok
+.vepk_literal_mask:
     mov rsi,rax                    # mask=m-1
     call vec_const_intern
     cmp eax,-1; je .vepk_fail
@@ -2151,20 +2084,62 @@
     mov rdx,0x0004000000000000
     cmp rax,rdx
     jae .vepk_mod_n_wide
-    call vec_alloc; cmp eax,-1; je .vepk_fail
-    mov r15d,eax                   # quotient / q*n
-    call vec_alloc; cmp eax,-1; je .vepk_free_q
-    mov r14d,eax                   # correction temp
-    mov edi,r15d; mov esi,ebx; call vec_vcvtqq2pd
+    call vec_alloc
+    cmp eax,-1; jne .vepk_mod_n_have_temp
+    .if TENSOR_PHYSICAL_LANES == 8
+    jmp .vepk_mod_n_stack
+    .else
+    jmp .vepk_fail
+    .endif
+.vepk_mod_n_have_temp:
+    mov r15d,eax                   # quotient / q*n, then recycled correction
+    mov edi,r15d; mov esi,ebx; call vec_vcvtuqq2pd
     mov edi,0x59; mov esi,r15d; mov edx,r15d; mov ecx,15; mov r8d,1; call vec_vex2_rrr
     mov edi,r15d; mov esi,r15d; call vec_trunc_nonneg_pd_to_u64
     mov edi,r15d; mov esi,r15d; mov edx,r15d; mov ecx,7; call vec_vpmullq
     mov edi,0xFB; mov esi,ebx; mov edx,ebx; mov ecx,r15d; mov r8d,1; call vec_vex2_rrr
-    mov edi,0xFB; mov esi,r14d; mov edx,ebx; mov ecx,7; mov r8d,1; call vec_vex2_rrr
-    mov edi,ebx; mov esi,ebx; mov edx,ebx; mov ecx,r14d; call vec_vpminuq
-    mov edi,r14d; call vec_free
+    # q*n is dead after the remainder is formed.  Reuse the same carrier for
+    # r-n instead of demanding a second ZMM solely for exact correction.
+    mov edi,0xFB; mov esi,r15d; mov edx,ebx; mov ecx,7; mov r8d,1; call vec_vex2_rrr
+    mov edi,ebx; mov esi,ebx; mov edx,ebx; mov ecx,r15d; call vec_vpminuq
     mov edi,r15d; call vec_free
     jmp .vepk_ok
+    .if TENSOR_PHYSICAL_LANES == 8
+.vepk_mod_n_stack:
+    # Every ZMM is live.  Preserve the one input ValueFact in a stack carrier,
+    # recycle the destination through quotient/product/remainder, then perform
+    # the exact correction with memory as the second physical carrier.  This is
+    # the same modulo algebra with a different carrier location.
+    call vec_spill_pair_push
+    test eax,eax; jnz .vepk_fail
+    mov edi,ebx; mov esi,1; call vec_spill_store_rsp   # original x
+    test eax,eax; jnz .vepk_mod_n_stack_fail
+    mov edi,ebx; mov esi,ebx; call vec_vcvtuqq2pd
+    mov edi,0x59; mov esi,ebx; mov edx,ebx; mov ecx,15; mov r8d,1; call vec_vex2_rrr
+    mov edi,ebx; mov esi,ebx; call vec_trunc_nonneg_pd_to_u64
+    mov edi,ebx; mov esi,ebx; mov edx,ebx; mov ecx,7; call vec_vpmullq
+    mov edi,ebx; xor esi,esi; call vec_spill_store_rsp # q*n
+    test eax,eax; jnz .vepk_mod_n_stack_fail
+    mov edi,ebx; mov esi,1; call vec_spill_load_rsp    # original x
+    test eax,eax; jnz .vepk_mod_n_stack_fail
+    mov edi,0xFB; mov esi,ebx; xor edx,edx; call vec_bin_rsp # r=x-q*n
+    test eax,eax; jnz .vepk_mod_n_stack_fail
+    mov edi,ebx; mov esi,1; call vec_spill_store_rsp   # preserve r
+    test eax,eax; jnz .vepk_mod_n_stack_fail
+    mov edi,0xFB; mov esi,ebx; mov edx,ebx; mov ecx,7; mov r8d,1; call vec_vex2_rrr # r-n
+    mov edi,ebx; xor esi,esi; call vec_spill_store_rsp # candidate r-n
+    test eax,eax; jnz .vepk_mod_n_stack_fail
+    mov edi,ebx; mov esi,1; call vec_spill_load_rsp    # r
+    test eax,eax; jnz .vepk_mod_n_stack_fail
+    mov edi,ebx; xor esi,esi; call vec_vpminuq_rsp
+    test eax,eax; jnz .vepk_mod_n_stack_fail
+    call vec_spill_pair_pop
+    test eax,eax; jnz .vepk_fail
+    jmp .vepk_ok
+.vepk_mod_n_stack_fail:
+    call vec_spill_pair_pop
+    jmp .vepk_fail
+    .endif
 .vepk_mod_n_wide:
     mov edi,ebx
     call vec_emit_reciprocal_mod_wide
@@ -2575,6 +2550,8 @@
 .endm
 
 .macro TFP_02_emit_fused_reduce_carrier
+    cmp dword ptr [rip+tensor_ordered_reduction],0
+    jne tensor_emit_reduce_bytes
     push rbx
     mov ebx,edi
     cmp dword ptr [rip+vec_product_subtract_contractions],0
@@ -2598,7 +2575,7 @@
     lea rdi,[rip+vec_fused_mask_reduce_carrier1_fragment]
     mov esi,vec_fused_mask_reduce_carrier1_fragment_end-vec_fused_mask_reduce_carrier1_fragment
 .efrc_emit:
-    call vec_emit_bytes
+    call tensor_emit_reduce_bytes
     pop rbx
     ret
 
@@ -2646,44 +2623,7 @@
     vpbroadcastq zmm7,rdi
 .endm
 
-.macro TFP_123_tensor_prepare_binding_arena
-    push rbx
-    mov ebx,edi
-    test ebx,ebx
-    jz .tpba_fail
-    mov rdi,[rip+tensor_bindings_ptr]
-    test rdi,rdi
-    jz .tpba_size
-    mov rsi,[rip+tensor_binding_arena_bytes]
-    mov eax,SYS_munmap
-    syscall
-.tpba_size:
-    mov eax,ebx
-    shl rax,6
-    mov [rip+tensor_binding_arena_bytes],rax
-    mov rsi,rax
-    mov eax,SYS_mmap
-    xor edi,edi
-    mov edx,PROT_READ_WRITE
-    mov r10d,MAP_PRIVATE_ANON
-    mov r8,-1
-    xor r9d,r9d
-    syscall
-    test rax,rax
-    js .tpba_fail
-    mov [rip+tensor_bindings_ptr],rax
-    mov dword ptr [rip+tensor_binding_capacity],ebx
-    xor eax,eax
-    pop rbx
-    ret
-.tpba_fail:
-    mov eax,1
-    pop rbx
-    ret
 
-# ---------------- binding lookup ----------------
-# find_binding(rdi=nameptr,rsi=len) -> rax binding/0
-.endm
 
 .macro TFP_13_emit_int_reg
     push rbx
@@ -2707,7 +2647,13 @@
 .eir_var:
     mov rdi,r12; lea rsi,[rip+k_var]; mov edx,k_var_end-k_var; call obj_get
     test rax,rax; jz .eir_op
-    mov rdi,[rax+8]; mov rsi,[rax+16]; lea rdx,[rip+v_shape_product]; mov ecx,v_shape_product_end-v_shape_product; call span_eq
+    mov rbx,rax
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; call tensor_find_input
+    cmp edx,TYPE_U64; jne .eir_domain_alias
+    mov esi,eax; mov edi,r13d; call tensor_emit_scalar_input_int
+    jmp .eir_done
+.eir_domain_alias:
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; call tensor_domain_var_match
     test eax,eax; jz .eir_fail
     mov edi,r13d; mov esi,9; call gen_mov_rr
     xor eax,eax; jmp .eir_done
@@ -3353,7 +3299,20 @@
     jz .vepk_ok
     lea rax,[r14-1]
     test rax,r14
-    jnz .vepk_fail
+    jz .vepk_literal_mask
+    mov rax,r12
+    mul qword ptr [rip+tensor_shape_extent_max]
+    test rdx,rdx; jnz .vepk_fail
+    add rax,r13; jc .vepk_fail
+    mov r8,rax
+    mov rax,0x0001000000000000
+    cmp r8,rax; jae .vepk_fail
+    cmp r14,rax; jae .vepk_fail
+    mov edi,ebx; mov esi,ebx; mov rdx,r14; mov ecx,1
+    call vec_udivmod_literal_exact
+    test eax,eax; jnz .vepk_fail
+    jmp .vepk_ok
+.vepk_literal_mask:
     mov rsi,rax                    # mask=m-1
     call vec_const_intern
     cmp eax,-1; je .vepk_fail
@@ -3378,7 +3337,7 @@
     mov r15d,eax                   # quotient / q*n
     call vec_alloc; cmp eax,-1; je .vepk_free_q
     mov r14d,eax                   # correction temp
-    mov edi,r15d; mov esi,ebx; call vec_vcvtqq2pd
+    mov edi,r15d; mov esi,ebx; call vec_vcvtuqq2pd
     mov edi,0x59; mov esi,r15d; mov edx,r15d; mov ecx,15; mov r8d,1; call vec_vex2_rrr
     mov edi,r15d; mov esi,r15d; call vec_trunc_nonneg_pd_to_u64
     mov edi,r15d; mov esi,r15d; mov edx,r15d; mov ecx,7; call vec_vpmullq
@@ -3450,121 +3409,7 @@
 .endm
 
 .macro TFP_13_vec_linear_compose_key
-    push rbx
-    push r12
-    push r13
-    push r14
-    push r15
-    mov r12,rdi                    # local c
-    mov r13,rsi                    # local d
-    mov r14,rdx                    # local mod token
-    mov r15,qword ptr [rip+vec_linear_ctx_mod]
-
-    # Decide resulting modulus domain.
-    test r15,r15
-    jz .vlck_ctx_plain
-    test r14,r14
-    jz .vlck_no                    # cannot erase an existing representative mod
-    cmp r14,r15
-    je .vlck_mod_same
-    # Distinct tokens are equivalent only when both resolve to the same fixed m.
-    mov rdi,r14
-    call vec_linear_modulus_value
-    test ecx,ecx; jz .vlck_no
-    mov rbx,rax
-    mov rdi,r15
-    call vec_linear_modulus_value
-    test ecx,ecx; jz .vlck_no
-    cmp rax,rbx
-    jne .vlck_no
-    mov r14,r15
-    jmp .vlck_mod_domain
-.vlck_mod_same:
-    mov r14,r15
-    jmp .vlck_mod_domain
-.vlck_ctx_plain:
-    test r14,r14
-    jnz .vlck_mod_domain
-    # Plain affine composition with exact overflow checks.
-    mov rax,r12
-    mul qword ptr [rip+vec_linear_ctx_c]
-    test rdx,rdx; jnz .vlck_no
-    mov r9,rax
-    mov rax,r12
-    mul qword ptr [rip+vec_linear_ctx_d]
-    test rdx,rdx; jnz .vlck_no
-    add rax,r13
-    jc .vlck_no
-    mov rdx,rax
-    mov rax,r9
-    xor r8d,r8d
-    mov ecx,1
-    jmp .vlck_done
-
-.vlck_mod_domain:
-    # If m is known, compute canonical residues with exact 128-bit modular math.
-    mov rdi,r14
-    call vec_linear_modulus_value
-    test ecx,ecx
-    jz .vlck_mod_symbolic
-    mov rbx,rax                    # m
-    mov rdi,r12
-    mov rsi,qword ptr [rip+vec_linear_ctx_c]
-    mov rdx,rbx
-    call vec_linear_mul_mod
-    mov r9,rax                     # composed c
-    mov rdi,r12
-    mov rsi,qword ptr [rip+vec_linear_ctx_d]
-    mov rdx,rbx
-    call vec_linear_mul_mod
-    mov r10,rax
-    mov rdi,r10
-    mov rsi,r13
-    mov rdx,rbx
-    call vec_linear_add_mod
-    mov rdx,rax                    # composed d
-    mov rax,r9
-    mov r8,r14
-    mov ecx,1
-    jmp .vlck_done
-
-.vlck_mod_symbolic:
-    # Dynamic external n: algebraic composition is valid in Z/nZ, but without a
-    # fixed modulus only exact non-overflowing representatives are canonicalized.
-    cmp r14,-1
-    jne .vlck_no
-    mov rax,r12
-    mul qword ptr [rip+vec_linear_ctx_c]
-    test rdx,rdx; jnz .vlck_no
-    mov r9,rax
-    mov rax,r12
-    mul qword ptr [rip+vec_linear_ctx_d]
-    test rdx,rdx; jnz .vlck_no
-    add rax,r13
-    jc .vlck_no
-    mov rdx,rax
-    mov rax,r9
-    mov r8,r14
-    mov ecx,1
-    jmp .vlck_done
-.vlck_no:
-    xor eax,eax
-    xor edx,edx
-    xor r8d,r8d
-    xor ecx,ecx
-.vlck_done:
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    ret
-
-# Caller sets vec_linear_term_mode before vec_linear_add_term. mode=1 means
-# emit the base binding body under the composed root axis; mode=0 preserves the
-# representative-load path.
-# vec_linear_add_term(rdi=binding,rsi=c,rdx=d,rcx=mod,r8=expr,r9=coeff_bits)
-# -> eax=0 success, 1 table full.
+TFC_vec_linear_compose_key
 .endm
 
 .macro TFP_123_vec_linear_emit_base_term
@@ -3781,69 +3626,9 @@
 
 .endm
 
-.macro TFP_23_vec_vex2_rrr
-    # edi=opcode, esi=dst, edx=src1, ecx=src2, r8d=pp. VEX3 map 0F, L=256.
-    push rbx
-    mov ebx,edi
-    mov r9d,esi
-    mov r10d,edx
-    mov r11d,ecx
-    mov edi,0xC4; call vec_emit_u8
-    mov eax,r9d; shr eax,3; and eax,1; xor eax,1; shl eax,7
-    or eax,0x40
-    mov ecx,r11d; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,5
-    or eax,ecx
-    or eax,1
-    mov edi,eax; call vec_emit_u8
-    mov eax,r10d; not eax; and eax,0xF; shl eax,3
-    or eax,0x04
-    or eax,r8d
-    mov edi,eax; call vec_emit_u8
-    mov edi,ebx; call vec_emit_u8
-    mov eax,r9d; and eax,7; shl eax,3
-    mov ecx,r11d; and ecx,7; or eax,ecx; or eax,0xC0
-    mov edi,eax; call vec_emit_u8
-    cmp ebx,0x58; je .v256_fp_add
-    cmp ebx,0x5C; je .v256_fp_add
-    cmp ebx,0x59; je .v256_fp_mul
-    cmp ebx,0x5E; je .v256_fp_div
-    inc dword ptr [rip+schedule_counts+4*4]
-    jmp .v256_done
-.v256_fp_add:
-    inc dword ptr [rip+schedule_counts+0]
-    jmp .v256_done
-.v256_fp_mul:
-    inc dword ptr [rip+schedule_counts+4]
-    jmp .v256_done
-.v256_fp_div:
-    inc dword ptr [rip+schedule_counts+8]
-.v256_done:
-    pop rbx
-    xor eax,eax
-    ret
 
-# Native unary vector sqrt on the existing AVX2 carrier. edi=dst, esi=src.
-.endm
 
-.macro TFP_23_vec_sqrtpd
-    push rbx; push r12
-    mov ebx,edi; mov r12d,esi
-    mov edi,0xC4; call vec_emit_u8
-    mov eax,ebx; shr eax,3; and eax,1; xor eax,1; shl eax,7
-    or eax,0x40
-    mov ecx,r12d; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,5
-    or eax,ecx; or eax,1
-    mov edi,eax; call vec_emit_u8
-    mov edi,0x7D; call vec_emit_u8       # W0, reserved vvvv, L256, pp=66
-    mov edi,0x51; call vec_emit_u8
-    mov eax,ebx; and eax,7; shl eax,3
-    mov ecx,r12d; and ecx,7; or eax,ecx; or eax,0xC0
-    mov edi,eax; call vec_emit_u8
-    inc dword ptr [rip+schedule_counts+8]
-    xor eax,eax
-    pop r12; pop rbx; ret
 
-.endm
 
 .macro TFP_23_vec_mov_ext
     # VEX3 vmovdqa ymm dst,ymm src, physical registers 0..15.
@@ -3925,55 +3710,7 @@
 # vec_emit_const_load_index(edi=dst zmm, r13d=constant index)
 .endm
 
-.macro TFP_23_vec_emit_const_load_index
-    # edi=dst YMM, r13d=constant index. AVX2 VPBROADCASTQ from RIP pool.
-    push rbx
-    push r12
-    mov ebx,edi
-    mov eax,dword ptr [rip+vec_fixup_count]
-    cmp eax,dword ptr [rip+tensor_fixup_capacity]
-    jb .tfix_cap_ok_1
-    mov dword ptr [rip+tensor_code_overflow],1
-    jmp .vecli256_fail
-.tfix_cap_ok_1:
-    mov r12d,eax
-    inc eax
-    mov dword ptr [rip+vec_fixup_count],eax
-    mov edi,0xC4; call vec_emit_u8
-    mov eax,ebx; shr eax,3; and eax,1; xor eax,1; shl eax,7
-    or eax,0x60
-    or eax,2
-    mov edi,eax; call vec_emit_u8
-    mov edi,0x7D; call vec_emit_u8
-    mov edi,0x59; call vec_emit_u8
-    mov eax,ebx; and eax,7; shl eax,3; or eax,5
-    mov edi,eax; call vec_emit_u8
-    mov rax,[rip+vec_emit_ptr]
-    mov r8,qword ptr [rip+tensor_fixup_ptr_base]
-    mov qword ptr [r8+r12*8],rax
-    mov r8,qword ptr [rip+tensor_fixup_const_base]
-    mov dword ptr [r8+r12*4],r13d
-    lea rcx,[rax+4]
-    cmp rcx,[rip+vec_emit_end]
-    jbe .tcgrow_ok_12
-    mov dword ptr [rip+tensor_code_overflow],1
-    jmp .vecli256_fail
-.tcgrow_ok_12:
-    mov dword ptr [rax],0
-    mov [rip+vec_emit_ptr],rcx
-    inc dword ptr [rip+schedule_counts+4*7]
-    inc dword ptr [rip+schedule_counts+4*8]
-    xor eax,eax
-    pop r12
-    pop rbx
-    ret
-.vecli256_fail:
-    mov eax,1
-    pop r12
-    pop rbx
-    ret
 
-.endm
 
 .macro TFP_23_vec_vpmullq
     push rbx
@@ -4449,210 +4186,15 @@
 
 .endm
 
-.macro TFP_23_vec_vcvtqq2pd_synth
-    # Exact signed i64 -> f64 using one allocator temp.
-    # Caller-generated uses have distinct dst/src. YMM13 is the native256 fixed
-    # physical scratch and never owns semantic state.
-    push rbx
-    push r12
-    push r13
-    push r14
-    mov ebx,edi                    # destination
-    mov r12d,esi                   # source
-    cmp ebx,r12d
-    je .vcq2pds256_fail
 
-    call vec_alloc
-    cmp eax,-1
-    je .vcq2pds256_fail
-    mov r13d,eax                   # one allocator-owned temporary
 
-    mov rsi,0x41F0000000000000     # exact binary64 2^32
-    call vec_const_intern
-    cmp eax,-1
-    je .vcq2pds256_free_fail
-    mov r14d,eax
 
-    # temp = high signed dword source; YMM13 = low-dword sign bit.
-    mov edi,r13d; mov esi,r12d; mov edx,32; call vec_vpsrlq_imm
-    test eax,eax; jnz .vcq2pds256_free_fail
-    mov edi,13; mov esi,r12d; mov edx,31; call vec_vpsrld_imm
-    test eax,eax; jnz .vcq2pds256_free_fail
 
-    # Convert high32 first, then retain the double vector in temp.
-    mov edi,ebx; mov esi,r13d; call vec_vpmovqd_ymm_from_zmm
-    test eax,eax; jnz .vcq2pds256_free_fail
-    mov edi,ebx; mov esi,ebx; call vec_vcvtdq2pd_zmm_from_ymm
-    test eax,eax; jnz .vcq2pds256_free_fail
-    mov edi,r13d; mov esi,ebx; call vec_mov_ext
 
-    # Convert low32 sign correction. Multiplying it by 2^32 may clobber YMM13
-    # inside the constant helper, which is fine after the packed sign is in dst.
-    mov edi,ebx; mov esi,13; call vec_vpmovqd_ymm_from_zmm
-    test eax,eax; jnz .vcq2pds256_free_fail
-    mov edi,ebx; mov esi,ebx; call vec_vcvtdq2pd_zmm_from_ymm
-    test eax,eax; jnz .vcq2pds256_free_fail
-    mov edi,ebx; mov esi,ebx; mov edx,r14d; call vec_vmulpd_mem_const
-    test eax,eax; jnz .vcq2pds256_free_fail
 
-    # Low signed dword -> YMM13, then add correction to form unsigned low32.
-    mov edi,13; mov esi,r12d; call vec_vpmovqd_ymm_from_zmm
-    test eax,eax; jnz .vcq2pds256_free_fail
-    mov edi,13; mov esi,13; call vec_vcvtdq2pd_zmm_from_ymm
-    test eax,eax; jnz .vcq2pds256_free_fail
-    mov edi,0x58; mov esi,ebx; mov edx,ebx; mov ecx,13; mov r8d,1
-    call vec_vex2_rrr
 
-    # high32*2^32 + unsigned_low32. Final add is the sole int64->f64 rounding.
-    mov edi,r13d; mov esi,r13d; mov edx,r14d; call vec_vmulpd_mem_const
-    test eax,eax; jnz .vcq2pds256_free_fail
-    mov edi,0x58; mov esi,ebx; mov edx,ebx; mov ecx,r13d; mov r8d,1
-    call vec_vex2_rrr
 
-    mov edi,r13d; call vec_free
-    xor eax,eax
-    jmp .vcq2pds256_done
-.vcq2pds256_free_fail:
-    mov edi,r13d; call vec_free
-.vcq2pds256_fail:
-    mov eax,1
-.vcq2pds256_done:
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    ret
 
-.endm
-
-.macro TFP_23_vec_vpmovqd_ymm_from_zmm
-    # Pack low dword of four qword lanes into XMM dst.
-    # dst must differ from src. The destination itself receives the high 128
-    # half first, then VSHUFPS combines low(src) and high(src). No hidden YMM
-    # scratch is consumed, which is important on AVX2's 16-register file.
-    push rbx
-    mov ebx,edi
-    mov r10d,esi
-    cmp ebx,r10d
-    je .vpack256_fail
-
-    # vextracti128 xmmDST,ymmSRC,1
-    mov edi,0xC4; call vec_emit_u8
-    mov eax,r10d; shr eax,3; and eax,1; xor eax,1; shl eax,7
-    or eax,0x40                    # X unused -> inverted one
-    mov ecx,ebx; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,5
-    or eax,ecx
-    or eax,3                       # map 0F3A
-    mov edi,eax; call vec_emit_u8
-    mov edi,0x7D; call vec_emit_u8 # L=256, pp=66
-    mov edi,0x39; call vec_emit_u8
-    mov eax,r10d; and eax,7; shl eax,3
-    mov ecx,ebx; and ecx,7; or eax,ecx; or eax,0xC0
-    mov edi,eax; call vec_emit_u8
-    mov edi,1; call vec_emit_u8
-
-    # vshufps xmmDST,xmmSRC,xmmDST,0x88
-    # => [src.d0,src.d2,upper.d0,upper.d2] = four low qword dwords.
-    mov edi,0xC4; call vec_emit_u8
-    mov eax,ebx; shr eax,3; and eax,1; xor eax,1; shl eax,7
-    or eax,0x40
-    mov ecx,ebx; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,5
-    or eax,ecx
-    or eax,1                       # map 0F
-    mov edi,eax; call vec_emit_u8
-    mov eax,r10d; not eax; and eax,0xF; shl eax,3
-    mov edi,eax; call vec_emit_u8  # L=128, pp=none
-    mov edi,0xC6; call vec_emit_u8
-    mov eax,ebx; and eax,7; shl eax,3
-    mov ecx,ebx; and ecx,7; or eax,ecx; or eax,0xC0
-    mov edi,eax; call vec_emit_u8
-    mov edi,0x88; call vec_emit_u8
-    inc dword ptr [rip+schedule_counts+4*4]
-    xor eax,eax
-    pop rbx
-    ret
-.vpack256_fail:
-    mov eax,1
-    pop rbx
-    ret
-
-.endm
-
-.macro TFP_23_vec_vcvtdq2pd_zmm_from_ymm
-    # AVX VCVTDQ2PD ymmDST,xmmSRC.
-    push rbx
-    mov ebx,edi
-    mov r10d,esi
-    mov edi,0xC4; call vec_emit_u8
-    mov eax,ebx; shr eax,3; and eax,1; xor eax,1; shl eax,7
-    or eax,0x40
-    mov ecx,r10d; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,5
-    or eax,ecx
-    or eax,1
-    mov edi,eax; call vec_emit_u8
-    mov edi,0x7E; call vec_emit_u8
-    mov edi,0xE6; call vec_emit_u8
-    mov eax,ebx; and eax,7; shl eax,3
-    mov ecx,r10d; and ecx,7; or eax,ecx; or eax,0xC0
-    mov edi,eax; call vec_emit_u8
-    inc dword ptr [rip+schedule_counts+4*3]
-    pop rbx
-    xor eax,eax
-    ret
-
-.endm
-
-.macro TFP_23_vec_vpsrld_imm
-    # AVX2 VPSRLD ymm dst,ymm src,imm8.
-    push rbx
-    mov ebx,edi
-    mov r10d,esi
-    mov r11d,edx
-    mov edi,0xC4; call vec_emit_u8
-    mov eax,0xC0
-    mov ecx,r10d; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,5
-    or eax,ecx
-    or eax,1
-    mov edi,eax; call vec_emit_u8
-    mov eax,ebx; not eax; and eax,0xF; shl eax,3; or eax,0x05
-    mov edi,eax; call vec_emit_u8
-    mov edi,0x72; call vec_emit_u8
-    mov eax,r10d; and eax,7; or eax,0xD0
-    mov edi,eax; call vec_emit_u8
-    mov edi,r11d; call vec_emit_u8
-    inc dword ptr [rip+schedule_counts+4*4]
-    pop rbx
-    xor eax,eax
-    ret
-
-# Scalar f64 carrier truncate toward zero. edi=dst xmm, esi=src xmm.
-# SSE4.1 ROUNDSD is emitted directly; this is the same old register-native lane.
-.endm
-
-.macro TFP_23_vec_vrndscalepd_trunc
-    # AVX VROUNDPD ymmDST,ymmSRC,truncate.
-    push rbx
-    mov ebx,edi
-    mov r10d,esi
-    mov edi,0xC4; call vec_emit_u8
-    mov eax,ebx; shr eax,3; and eax,1; xor eax,1; shl eax,7
-    or eax,0x40
-    mov ecx,r10d; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,5
-    or eax,ecx
-    or eax,3
-    mov edi,eax; call vec_emit_u8
-    mov edi,0x7D; call vec_emit_u8
-    mov edi,0x09; call vec_emit_u8
-    mov eax,ebx; and eax,7; shl eax,3
-    mov ecx,r10d; and ecx,7; or eax,ecx; or eax,0xC0
-    mov edi,eax; call vec_emit_u8
-    mov edi,3; call vec_emit_u8
-    inc dword ptr [rip+schedule_counts+4*3]
-    pop rbx
-    xor eax,eax
-    ret
-
-.endm
 
 .macro TFP_23_vec_vaddpd_mem_const
     push rbx
@@ -5111,15 +4653,17 @@
 .endm
 
 .macro TFP_23_emit_fused_reduce_carrier_full
+    cmp dword ptr [rip+tensor_ordered_reduction],0
+    jne tensor_emit_reduce_bytes
     test edi,edi
     jnz .efrcf_1
     lea rdi,[rip+vec_fused_full_reduce_fragment]
     mov esi,vec_fused_full_reduce_fragment_end-vec_fused_full_reduce_fragment
-    jmp vec_emit_bytes
+    jmp tensor_emit_reduce_bytes
 .efrcf_1:
     lea rdi,[rip+vec_fused_full_reduce_carrier1_fragment]
     mov esi,vec_fused_full_reduce_carrier1_fragment_end-vec_fused_full_reduce_carrier1_fragment
-    jmp vec_emit_bytes
+    jmp tensor_emit_reduce_bytes
 
 .endm
 
@@ -5349,4 +4893,123 @@
     pop r12
     pop rbx
     ret
+.endm
+
+# One constant producer for every admitted native-512 destination register.
+.macro TFP_01_vec_emit_init_const
+    push rbx
+    push r12
+    mov ebx,edi
+    mov r12,rsi
+    # movabs rax,imm64
+    mov edi,0x48; call vec_init_emit_u8
+    mov edi,0xB8; call vec_init_emit_u8
+    mov rax,[rip+vec_init_emit_ptr]
+    lea rcx,[rax+8]
+    cmp rcx,[rip+vec_init_emit_end]
+    jbe .tcgrow_ok_5
+    mov dword ptr [rip+tensor_code_overflow],1
+    jmp .veic_fail
+.tcgrow_ok_5:
+    mov [rax],r12
+    mov [rip+vec_init_emit_ptr],rcx
+    # Generic scalar->vector broadcast.  Use the 512-bit GPR-source form
+    # directly instead of staging through XMM20..31.  This removes the old
+    # accidental AVX512VL dependency: 512-bit tensor episodes only require the
+    # foundation broadcast capability, not 128/256-bit EVEX vector-length forms.
+    # Encoding: vpbroadcastq zmmD,rax (AVX512F).
+    mov edi,0x62; call vec_init_emit_u8
+    # Generic EVEX P0 for destination ZMM0..31. The previous emitter assumed
+    # constants lived only in ZMM16..31; 1.3.7 also uses otherwise-idle
+    # ZMM14..15, so both inverted R and R' destination bits are encoded.
+    mov eax,0xF2
+    test ebx,8
+    jz .veic_gpr_no_r
+    and eax,0x7F
+.veic_gpr_no_r:
+    test ebx,16
+    jz .veic_gpr_p0
+    and eax,0xEF
+.veic_gpr_p0:
+    mov edi,eax
+    call vec_init_emit_u8
+    mov edi,0xFD; call vec_init_emit_u8
+    mov edi,0x48; call vec_init_emit_u8
+    mov edi,0x7C; call vec_init_emit_u8
+    mov eax,ebx; and eax,7; shl eax,3; or eax,0xC0
+    mov edi,eax; call vec_init_emit_u8
+    xor eax,eax
+    pop r12
+    pop rbx
+    ret
+.veic_fail:
+    mov eax,1
+    pop r12
+    pop rbx
+    ret
+
+.endm
+
+.macro TFP_vec_emit_const_load_index
+    push rbx
+    push r12
+    mov ebx,edi
+    mov eax,dword ptr [rip+vec_fixup_count]
+    cmp eax,dword ptr [rip+tensor_fixup_capacity]
+    jb .Lconst_fixup_room
+    mov dword ptr [rip+tensor_code_overflow],1
+    jmp .vecli_fail
+.Lconst_fixup_room:
+    mov r12d,eax
+    inc eax
+    mov dword ptr [rip+vec_fixup_count],eax
+.if TENSOR_PHYSICAL_LANES == 8
+    mov edi,0x62; call vec_emit_u8
+    xor eax,eax
+    mov ecx,ebx; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,7; or eax,ecx
+    or eax,0x60
+    mov ecx,ebx; shr ecx,4; and ecx,1; xor ecx,1; shl ecx,4; or eax,ecx
+    or eax,2
+    mov edi,eax; call vec_emit_u8
+    mov edi,0xFD; call vec_emit_u8
+    mov edi,0x48; call vec_emit_u8
+    mov edi,0x59; call vec_emit_u8
+    mov eax,ebx; and eax,7; shl eax,3; or eax,5
+    mov edi,eax; call vec_emit_u8
+.else
+    mov edi,0xC4; call vec_emit_u8
+    mov eax,ebx; shr eax,3; and eax,1; xor eax,1; shl eax,7
+    or eax,0x60
+    or eax,2
+    mov edi,eax; call vec_emit_u8
+    mov edi,0x7D; call vec_emit_u8
+    mov edi,0x59; call vec_emit_u8
+    mov eax,ebx; and eax,7; shl eax,3; or eax,5
+    mov edi,eax; call vec_emit_u8
+.endif
+    mov rax,[rip+vec_emit_ptr]
+    mov r8,qword ptr [rip+tensor_fixup_ptr_base]
+    mov qword ptr [r8+r12*8],rax
+    mov r8,qword ptr [rip+tensor_fixup_const_base]
+    mov dword ptr [r8+r12*4],r13d
+    lea rcx,[rax+4]
+    cmp rcx,[rip+vec_emit_end]
+    jbe .Lconst_load_room
+    mov dword ptr [rip+tensor_code_overflow],1
+    jmp .vecli_fail
+.Lconst_load_room:
+    mov dword ptr [rax],0
+    mov [rip+vec_emit_ptr],rcx
+    inc dword ptr [rip+schedule_counts+4*7] # hot constant load
+    inc dword ptr [rip+schedule_counts+4*8] # RIP-relative AGU
+    xor eax,eax
+    pop r12
+    pop rbx
+    ret
+.vecli_fail:
+    mov eax,1
+    pop r12
+    pop rbx
+    ret
+
 .endm

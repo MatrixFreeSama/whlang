@@ -574,13 +574,13 @@
 .equ PR_TRAFFIC_OWNS_RECURRENCE_CARRIER_WIDTH,0
 .equ PR_TRANSPORT_COMPUTE_AXIS_COLLAPSE,0
 
-# 1.3.97 scalar StateFact generation authority closure.  A resident FP
-# generation may collapse old/next carrier identity only when the complete FP
-# state set proves one fixed-point authority under exact post-CSE liveness and
-# strict emitter order. Partial mixed-generation coalescing is not an execution
-# mode; failed proof retains the mature disjoint generation realization.
-.equ PR_FP_GENERATION_FIXED_POINT_AUTHORITY,1
-.equ PR_FP_GENERATION_PARTIAL_AUTHORITY_MIX,0
+# Scalar StateFact generation authority after the 1.3.136/1.3.137 lifetime
+# closure. Each next ValueFact follows its own proved last-use carrier relation.
+# Shared facts and retained next-StateFacts compete against the complete measured
+# anonymous peak in one physical pool; no whole-epoch mode, state-count route or
+# guessed pressure rebate participates in realization.
+.equ PR_FP_STATEFACT_LIFETIME_AUTHORITY,1
+.equ PR_FP_GENERATION_WHOLE_EPOCH_MODE,0
 .equ PR_FP_GENERATION_WORKLOAD_MATCHER,0
 .equ PR_FP_GENERATION_SECOND_BACKEND,0
 
@@ -593,3 +593,29 @@
 .equ PR_GENERAL_CONST_MOD_WORKLOAD_MATCHER,0
 .equ PR_GENERAL_CONST_MOD_RUNTIME_SELECTOR,0
 .equ PR_GENERAL_CONST_MOD_SECOND_BACKEND,0
+
+# 1.3.138 General scalar memory-form closure. Immutable ConstantFacts may remain
+# AddressFacts and feed a legal scalar FP memory operand instead of creating a
+# synthetic XMM lifetime. StateFact frame transport likewise moves FP payloads
+# directly between XMM and its existing AddressFact. Constant residency may use
+# only genuinely spare carriers after StateFact/CSE lifetime closure; an
+# address-backed constant never evicts a StateFact carrier.
+.equ PR_GENERAL_IMMUTABLE_CONSTANT_ADDRESSFACT,1
+.equ PR_GENERAL_SCALAR_FP_MEMORY_OPERAND,1
+.equ PR_GENERAL_FP_STATEFRAME_DIRECT_TRANSPORT,1
+.equ PR_CONSTANTFACT_EVICTS_STATEFACT_CARRIER,0
+.equ PR_GENERAL_CONSTANT_SECOND_BACKEND,0
+
+# 1.3.139 General scalar source-position closure.  The semantic DAG is never
+# commuted or reassociated.  Only a nonresident finite FP literal on the left
+# of exact add/mul may project its already-existing immutable AddressFact into
+# x86 src2/rm while the other ValueFact occupies src1.  Nonfinite literals and
+# noncommutative relations retain source-position materialization.
+.equ PR_GENERAL_FP_FINITE_LITERAL_SOURCE_PLACEMENT,1
+.equ PR_GENERAL_FP_GLOBAL_COMMUTATIVE_REWRITE,0
+.equ PR_GENERAL_FP_REASSOCIATION,0
+
+# IEEE not-equal includes unordered operands in every vector geometry.
+.equ PHYSICAL_FP_NE_PREDICATE,4
+
+.include "compiler/physical_plan_layout.inc"

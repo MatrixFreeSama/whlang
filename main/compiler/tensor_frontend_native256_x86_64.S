@@ -5,6 +5,7 @@
 .include "compiler/shapefact_n.inc"
 .include "compiler/physical_reality.inc"
 .include "build/runtime_native256_offsets.inc"
+.include "compiler/tensor_math_consumer.inc"
 .include "compiler/tensor_frontend_common_blocks.inc"
 .include "compiler/tensor_frontend_profile_blocks.inc"
 
@@ -88,6 +89,7 @@
 .global span_eq
 .global node_parse_u64
 .global node_parse_f64_bits
+.global node_parse_f32_bits
 .global jcur
 .global jend
 .global json_node_count
@@ -121,6 +123,7 @@ compile_tensor_source:
     mov dword ptr [rip+tensor_binding_count],0
     mov qword ptr [rip+tensor_reduce_binding],0
     mov dword ptr [rip+tensor_error],0
+    mov dword ptr [rip+tensor_ordered_reduction],0
     mov dword ptr [rip+tensor_tolerant_fp],0
     # native probe used only to derive the exact resource graph; pass 1 is the
     # canonical machine image. No probe byte can reach the emitted ELF.
@@ -205,7 +208,7 @@ compile_tensor_source:
     # ShapeFact-N is accepted directly by the base physicalizer when the
     # physical subset is rank-1/product-1.  This prevents the human Surface from
     # having to emit a second legacy descriptor merely because this executable
-    # was invoked directly instead of through whexc.
+    # was invoked directly instead of through wheelchairc.
     mov dword ptr [rip+tensor_shape_active],0
     mov rdi,r12
     lea rsi,[rip+shapefn_k_root]
@@ -225,49 +228,12 @@ compile_tensor_source:
     jmp .shape_input_done
 .shape_rank1_input:
     mov rdi,r12
-    lea rsi,[rip+k_inputs]
-    mov edx,k_inputs_end-k_inputs
-    call obj_get
-    test rax,rax
-    jz .fail
-    cmp qword ptr [rax],J_ARRAY
-    jne .fail
-    mov r13,[rax+24]
-    test r13,r13
-    jz .fail
-    cmp qword ptr [r13],J_OBJECT
-    jne .fail
-    mov rdi,r13
-    lea rsi,[rip+k_type]
-    mov edx,k_type_end-k_type
-    call obj_get
-    test rax,rax
-    jz .fail
-    mov rdi,[rax+8]
-    mov rsi,[rax+16]
-    lea rdx,[rip+v_u64]
-    mov ecx,v_u64_end-v_u64
-    call span_eq
-    test eax,eax
-    jz .fail
-    mov rdi,r13
-    lea rsi,[rip+k_min]
-    mov edx,k_min_end-k_min
-    call obj_get
-    call node_parse_u64
-    test edx,edx
-    jnz .fail
-    mov [rip+tensor_shape_extent_min],rax
-    mov rdi,r13
-    lea rsi,[rip+k_max]
-    mov edx,k_max_end-k_max
-    call obj_get
-    call node_parse_u64
-    test edx,edx
-    jnz .fail
-    mov [rip+tensor_shape_extent_max],rax
-
+    call tensor_prepare_rank1_shape
+    test eax,eax; jnz .fail
 .shape_input_done:
+    mov rdi,r12
+    call tensor_prepare_input_facts
+    test eax,eax; jnz .fail
 
     # bindings[] structural extraction.
     mov rdi,r12
@@ -383,6 +349,13 @@ compile_tensor_source:
     call obj_get
     test rax,rax
     jz .fail
+    cmp qword ptr [rax],J_STRING
+    jne .reduce_tree_contract
+    mov rdi,[rax+8]; mov rsi,[rax+16]; lea rdx,[rip+v_f64]; mov ecx,v_f64_end-v_f64; call span_eq
+    test eax,eax; jz .fail
+    mov dword ptr [rip+tensor_ordered_reduction],1
+    jmp .reduce_contract_ready
+.reduce_tree_contract:
     mov rdi,rax
     lea rsi,[rip+k_mode]
     mov edx,k_mode_end-k_mode
@@ -396,6 +369,7 @@ compile_tensor_source:
     call span_eq
     test eax,eax
     jz .fail
+.reduce_contract_ready:
     mov [rip+tensor_reduce_binding],r15
 .binding_common:
     # one axis: axes[0].name
@@ -456,6 +430,9 @@ compile_tensor_source:
     test r15,r15
     jz .fail
 
+    mov rdi,[r15+40]
+    call tensor_support_analyze_root
+
     # Mature WHEX tensor lane has no scalar-oracle compilation.  Building the
     # same tensor recursively as a scalar evaluator before parallel lowering was
     # dead work, imposed an artificial recursion ceiling, and violated the rule
@@ -464,6 +441,13 @@ compile_tensor_source:
     # no scalar machine instruction is generated or copied into the final ELF.
     mov rax,[rip+tensor_eval_base]
     mov [rip+emit_ptr],rax
+    call tensor_emit_support_probe
+    test eax,eax
+    jz .support_probe_ready
+    mov dword ptr [rip+tensor_support_mode],0
+    mov rax,[rip+tensor_eval_base]
+    mov [rip+emit_ptr],rax
+.support_probe_ready:
     lea rdi,[rip+schedule_counts]
     xor eax,eax
     mov ecx,10
@@ -804,7 +788,7 @@ compile_tensor_source:
     lea rdi,[rip+vec_fused_finish_resident_fragment]
     mov esi,vec_fused_finish_resident_fragment_end-vec_fused_finish_resident_fragment
 .vec_finish_resident_emit:
-    call vec_emit_bytes
+    call tensor_emit_finish_bytes
     test eax,eax
     jnz .fail
     jmp .vec_finish_recipe_done
@@ -818,7 +802,7 @@ compile_tensor_source:
     lea rdi,[rip+vec_fused_finish_fragment]
     mov esi,vec_fused_finish_fragment_end-vec_fused_finish_fragment
 .vec_finish_frozen_emit:
-    call vec_emit_bytes
+    call tensor_emit_finish_bytes
     test eax,eax
     jnz .fail
 .vec_finish_recipe_done:
@@ -859,6 +843,8 @@ compile_tensor_source:
     test eax,eax
     jnz .fail
 .vec_init_recipe_done:
+    call tensor_emit_reduction_init
+    test eax,eax; jnz .fail
     lea rdi,[rip+vec_prefix_fragment]
     mov esi,vec_prefix_fragment_end-vec_prefix_fragment
     call vec_emit_bytes
@@ -920,6 +906,7 @@ compile_tensor_source:
     # structure without committing bytes to the output image. The scheduler runs
     # here, before the canonical pass. The second pass restores that plan and
     # encodes the final ISA directly.
+    TFC_completed_code_stage
     cmp dword ptr [rip+physical_plan_pass],0
     jne .physical_plan_realize
 
@@ -961,6 +948,10 @@ compile_tensor_source:
     jne .physical_plan_width_done
     mov dword ptr [rip+group_carrier_factor],2
 .physical_plan_width_done:
+    cmp dword ptr [rip+tensor_ordered_reduction],0
+    je .ordered_carrier_ready
+    mov dword ptr [rip+group_carrier_factor],1
+.ordered_carrier_ready:
     call synthesize_group_fact
     lea rsi,[rip+schedule_counts]
     lea rdi,[rip+physical_plan_counts]
@@ -1055,19 +1046,6 @@ obj_get:
 TFC_obj_get
 node_parse_u64:
 TFC_node_parse_u64
-node_u64_to_f64:
-    test rax,rax
-    js .nu64_large
-    cvtsi2sd xmm0,rax
-    ret
-.nu64_large:
-    mov rdx,rax
-    and edx,1
-    shr rax,1
-    or rax,rdx
-    cvtsi2sd xmm0,rax
-    addsd xmm0,xmm0
-    ret
 
 # parse f64 number node in rax -> rax IEEE bits, edx error.
 # Decimal mantissa/scale are accumulated as unsigned u64. Values outside that
@@ -1077,7 +1055,7 @@ node_u64_to_f64:
 # Exact compile-time binding arena.  Binding cardinality is represented by the
 # canonical list itself; no independent sixteen-entry frontend ceiling remains.
 tensor_prepare_binding_arena:
-TFP_123_tensor_prepare_binding_arena
+TFC_tensor_prepare_binding_arena
 find_binding:
 TFC_find_binding
 alloc_gpr:
@@ -1167,10 +1145,12 @@ vec_patch_rel32:
 TFC_vec_patch_rel32
 vec_emit_jmp_to:
 TFC_vec_emit_jmp_to
+vec_rrr_descriptor:
+TFC_vec_rrr_descriptor
 vec_vex2_rrr:
-TFP_23_vec_vex2_rrr
+TFC_vec_vex2_rrr
 vec_sqrtpd:
-TFP_23_vec_sqrtpd
+TFC_vec_sqrtpd
 vec_vex3_0f38_rrr:
 TFC_vec_vex3_0f38_rrr
 vec_mov_ext:
@@ -1182,7 +1162,7 @@ TFC_vec_const_intern
 vec_const_get_reg:
 TFP_23_vec_const_get_reg
 vec_emit_const_load_index:
-TFP_23_vec_emit_const_load_index
+TFP_vec_emit_const_load_index
 vec_finalize_constants:
 TFP_023_vec_finalize_constants
 vec_vpmullq:
@@ -1215,18 +1195,12 @@ vec_vfmadd231pd_mem_const:
 TFP_23_vec_vfmadd231pd_mem_const
 vec_vpminuq:
 TFP_23_vec_vpminuq
-vec_vcvtqq2pd:
-TFC_vec_vcvtqq2pd
-vec_vcvtqq2pd_native:
-TFC_vec_vcvtqq2pd_native
-vec_vcvtqq2pd_synth:
-TFP_23_vec_vcvtqq2pd_synth
-vec_vpmovqd_ymm_from_zmm:
-TFP_23_vec_vpmovqd_ymm_from_zmm
-vec_vcvtdq2pd_zmm_from_ymm:
-TFP_23_vec_vcvtdq2pd_zmm_from_ymm
-vec_vpsrld_imm:
-TFP_23_vec_vpsrld_imm
+vec_vcvtuqq2pd:
+TFC_vec_vcvtuqq2pd
+vec_vcvtuqq2pd_native:
+TFC_vec_vcvtuqq2pd_native
+vec_vcvtuqq2pd_synth:
+TFC_vec_vcvtuqq2pd_synth
 vec_roundpd_trunc_scalar_reg:
 TFC_vec_roundpd_trunc_scalar_reg
 vec_trunc_nonneg_pd_to_u64:
@@ -1234,7 +1208,7 @@ TFC_vec_trunc_nonneg_pd_to_u64
 vec_trunc_nonneg_pd_to_u64_synth:
 TFC_vec_trunc_nonneg_pd_to_u64_synth
 vec_vrndscalepd_trunc:
-TFP_23_vec_vrndscalepd_trunc
+TFC_vec_vrndscalepd_trunc
 vec_vaddpd_mem_const:
 TFP_23_vec_vaddpd_mem_const
 vec_vcvttpd2qq:
@@ -1336,17 +1310,31 @@ emit_vec_int:
     mov edi,r13d; mov esi,dword ptr [rip+vec_axis_reg]; call vec_mov_ext
     jmp .evi_ok
 .evi_axis_fact:
+    mov edi,1; xor esi,esi
+    call vec_interior_affine_residue_safe
+    push rax
     mov edi,r13d
     mov rsi,qword ptr [rip+vec_axis_root_c]
     mov rdx,qword ptr [rip+vec_axis_root_d]
     mov rcx,qword ptr [rip+vec_axis_root_mod]
+    pop rax
+    cmp rcx,-1; jne .evi_axis_realize
+    test eax,eax; jz .evi_axis_realize
+    xor ecx,ecx                     # proven canonical residue needs no mod
+.evi_axis_realize:
     call vec_emit_periodic_key
     test eax,eax; jnz .evi_fail
     jmp .evi_ok
 .evi_var:
     mov rdi,r12; lea rsi,[rip+k_var]; mov edx,k_var_end-k_var; call obj_get
     test rax,rax; jz .evi_op
-    mov rdi,[rax+8]; mov rsi,[rax+16]; call tensor_domain_var_match
+    mov rbx,rax
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; call tensor_find_input
+    cmp edx,TYPE_U64; jne .evi_domain_alias
+    mov edi,r13d; mov esi,eax; call tensor_emit_vec_input
+    jmp .evi_done
+.evi_domain_alias:
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; call tensor_domain_var_match
     test eax,eax; jz .evi_fail
     mov edi,r13d; mov esi,7; call vec_mov_ext
     jmp .evi_ok
@@ -1380,7 +1368,7 @@ emit_vec_int:
     test eax,eax; jz .evi_cmp_ne; mov ebx,0; jmp .evi_compare
 .evi_cmp_ne:
     mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+v_ne]; mov ecx,v_ne_end-v_ne; call span_eq
-    test eax,eax; jz .evi_cmp_lt; mov ebx,12; jmp .evi_compare
+    test eax,eax; jz .evi_cmp_lt; mov ebx,PHYSICAL_FP_NE_PREDICATE; jmp .evi_compare
 .evi_cmp_lt:
     mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+v_lt]; mov ecx,v_lt_end-v_lt; call span_eq
     test eax,eax; jz .evi_cmp_le; mov ebx,1; jmp .evi_compare
@@ -1473,7 +1461,7 @@ emit_vec_int:
     mov rdi,rbx; call expr_literal_u64
     test edx,edx; jnz .evi_mod_varn
     test rax,rax; jz .evi_fail
-    mov rcx,rax; dec rcx; test rax,rcx; jnz .evi_fail
+    mov rcx,rax; dec rcx; test rax,rcx; jnz .evi_literal_exact
     mov r12,rcx
     mov rdi,r15; mov esi,r13d; call emit_vec_int; test eax,eax; jnz .evi_fail
     mov rsi,r12; call vec_const_get_reg
@@ -1493,6 +1481,14 @@ emit_vec_int:
     mov edi,r13d
     mov esi,r13d
     call vec_vpandq_mem_const
+    test eax,eax; jnz .evi_fail
+    jmp .evi_ok
+.evi_literal_exact:
+    # AffineFact and the shared periodic physicalizer own the lane bound.
+    mov rdi,r12; call expr_index_key_u64
+    test ecx,ecx; jz .evi_fail
+    mov rsi,rax; mov rcx,r8; mov edi,r13d
+    call vec_emit_periodic_key
     test eax,eax; jnz .evi_fail
     jmp .evi_ok
 .evi_mod_varn:
@@ -1562,7 +1558,7 @@ emit_vec_int:
     mov rdi,r15; mov esi,r13d; call emit_vec_int; test eax,eax; jnz .evi_fail
     call vec_alloc; cmp eax,-1; je .evi_fail; mov ebx,eax       # quotient / q*n
     call vec_alloc; cmp eax,-1; je .evi_mod_free_q; mov r14d,eax # correction t
-    mov edi,ebx; mov esi,r13d; call vec_vcvtqq2pd
+    mov edi,ebx; mov esi,r13d; call vec_vcvtuqq2pd
     mov edi,0x59; mov esi,ebx; mov edx,ebx; mov ecx,15; mov r8d,1; call vec_vex2_rrr
     mov edi,ebx; mov esi,ebx; call vec_trunc_nonneg_pd_to_u64
     mov edi,ebx; mov esi,ebx; mov edx,ebx; mov ecx,7; call vec_vpmullq
@@ -1683,8 +1679,10 @@ vec_periodic_induct_get_reg:
 # ZMM6. This is a realization of the generic key, not a periodic-workload fast
 # path. modtoken=-1 denotes external n; positive literal moduli use exact
 # power-of-two masking in the current native slice.
+.include "compiler/tensor_literal_divmod_exact.inc"
 .include "compiler/tensor_frontend_periodic_exact.inc"
 
+.include "compiler/tensor_periodic_cost.inc"
 vec_emit_periodic_key:
 TFP_02_vec_emit_periodic_key
 vec_linear_operator_expr:
@@ -1696,115 +1694,7 @@ TFC_vec_linear_mul_mod
 vec_linear_add_mod:
 TFC_vec_linear_add_mod
 vec_linear_compose_key:
-    push rbx
-    push r12
-    push r13
-    push r14
-    push r15
-    mov r12,rdi                    # local c
-    mov r13,rsi                    # local d
-    mov r14,rdx                    # local mod token
-    mov r15,qword ptr [rip+vec_linear_ctx_mod]
-
-    # Decide resulting modulus domain.
-    test r15,r15
-    jz .vlck_ctx_plain
-    test r14,r14
-    jz .vlck_no                    # cannot erase an existing representative mod
-    cmp r14,r15
-    je .vlck_mod_same
-    # Distinct tokens are equivalent only when both resolve to the same fixed m.
-    mov rdi,r14
-    call vec_linear_modulus_value
-    test ecx,ecx; jz .vlck_no
-    mov rbx,rax
-    mov rdi,r15
-    call vec_linear_modulus_value
-    test ecx,ecx; jz .vlck_no
-    cmp rax,rbx
-    jne .vlck_no
-    mov r14,r15
-    jmp .vlck_mod_domain
-.vlck_mod_same:
-    mov r14,r15
-    jmp .vlck_mod_domain
-.vlck_ctx_plain:
-    test r14,r14
-    jnz .vlck_mod_domain
-    # Plain affine composition with exact overflow checks.
-    mov rax,r12
-    mul qword ptr [rip+vec_linear_ctx_c]
-    test rdx,rdx; jnz .vlck_no
-    mov r9,rax
-    mov rax,r12
-    mul qword ptr [rip+vec_linear_ctx_d]
-    test rdx,rdx; jnz .vlck_no
-    add rax,r13
-    jc .vlck_no
-    mov rdx,rax
-    mov rax,r9
-    xor r8d,r8d
-    mov ecx,1
-    jmp .vlck_done
-
-.vlck_mod_domain:
-    # If m is known, compute canonical residues with exact 128-bit modular math.
-    mov rdi,r14
-    call vec_linear_modulus_value
-    test ecx,ecx
-    jz .vlck_mod_symbolic
-    mov rbx,rax                    # m
-    mov rdi,r12
-    mov rsi,qword ptr [rip+vec_linear_ctx_c]
-    mov rdx,rbx
-    call vec_linear_mul_mod
-    mov r9,rax                     # composed c
-    mov rdi,r12
-    mov rsi,qword ptr [rip+vec_linear_ctx_d]
-    mov rdx,rbx
-    call vec_linear_mul_mod
-    mov r10,rax
-    mov rdi,r10
-    mov rsi,r13
-    mov rdx,rbx
-    call vec_linear_add_mod
-    mov rdx,rax                    # composed d
-    mov rax,r9
-    mov r8,r14
-    mov ecx,1
-    jmp .vlck_done
-
-.vlck_mod_symbolic:
-    # Dynamic external n: algebraic composition is valid in Z/nZ, but without a
-    # fixed modulus only exact non-overflowing representatives are canonicalized.
-    cmp r14,-1
-    jne .vlck_no
-    mov rax,r12
-    mul qword ptr [rip+vec_linear_ctx_c]
-    test rdx,rdx; jnz .vlck_no
-    mov r9,rax
-    mov rax,qword ptr [rip+vec_linear_ctx_d]
-    imul rax,r12
-    jo .vlck_no
-    add rax,r13
-    jo .vlck_no
-    mov rdx,rax
-    mov rax,r9
-    mov r8,r14
-    mov ecx,1
-    jmp .vlck_done
-.vlck_no:
-    xor eax,eax
-    xor edx,edx
-    xor r8d,r8d
-    xor ecx,ecx
-.vlck_done:
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    ret
+TFC_vec_linear_compose_key
 
 # Caller sets vec_linear_term_mode before vec_linear_add_term. mode=1 means
 # emit the base binding body under the composed root axis; mode=0 preserves the
@@ -1988,11 +1878,20 @@ emit_vec_float:
     push r15
     mov r12,rdi
     mov r13d,esi
+    mov eax,[rip+tensor_expression_live]; push rax
+    bts dword ptr [rip+tensor_expression_live],r13d
     mov rdi,r12; call expr_literal_f64_bits
     test edx,edx; jnz .evf_load
     mov rsi,rax; mov edi,r13d; call vec_broadcast_imm64
     jmp .evf_done
 .evf_load:
+    mov rdi,r12; lea rsi,[rip+k_var]; mov edx,k_var_end-k_var; call obj_get
+    test rax,rax; jz .evf_binding_load
+    mov rdi,[rax+8]; mov rsi,[rax+16]; call tensor_find_input
+    cmp edx,TYPE_F64; jne .evf_fail
+    mov edi,r13d; mov esi,eax; call tensor_emit_vec_input
+    jmp .evf_done
+.evf_binding_load:
     mov rdi,r12; lea rsi,[rip+k_load]; mov edx,k_load_end-k_load; call obj_get
     test rax,rax; jz .evf_op
     mov rdi,[rax+8]; mov rsi,[rax+16]; call find_binding
@@ -2057,10 +1956,11 @@ emit_vec_float:
     test eax,eax; jz .evf_sqrt_probe
     call vec_alloc; cmp eax,-1; je .evf_fail; mov ebx,eax
     mov rdi,r15; mov esi,ebx; call emit_vec_int; test eax,eax; jnz .evf_free_b_fail
-    mov edi,r13d; mov esi,ebx; call vec_vcvtqq2pd
+    mov edi,r13d; mov esi,ebx; call vec_vcvtuqq2pd
     mov edi,ebx; call vec_free
     xor eax,eax; jmp .evf_done
 .evf_sqrt_probe:
+    TFC_vector_sign_projection
     mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+v_sqrt]; mov ecx,v_sqrt_end-v_sqrt; call span_eq
     test eax,eax; jz .evf_square_probe
     cmp qword ptr [r15+32],0; jne .evf_fail
@@ -2079,12 +1979,13 @@ emit_vec_float:
     xor eax,eax; jmp .evf_done
 .evf_trunc_probe:
     mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+v_trunc]; mov ecx,v_trunc_end-v_trunc; call span_eq
-    test eax,eax; jz .evf_select_probe
+    test eax,eax; jz .evf_math_probe
     cmp qword ptr [r15+32],0; jne .evf_fail
     mov rdi,r15; mov esi,r13d; call emit_vec_float; test eax,eax; jnz .evf_fail
     mov edi,r13d; mov esi,r13d; call vec_vrndscalepd_trunc
     test eax,eax; jnz .evf_fail
     xor eax,eax; jmp .evf_done
+    TMC_vector_probe
 .evf_select_probe:
     mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+v_select]; mov ecx,v_select_end-v_select; call span_eq
     test eax,eax; jz .evf_binary
@@ -2126,16 +2027,10 @@ emit_vec_float:
     mov edi,ebx; call vec_free
     jmp .evf_fail
 .evf_binary:
-    xor ebx,ebx
-    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+v_add]; mov ecx,v_add_end-v_add; call span_eq
-    test eax,eax; jz 11f; mov ebx,0x58; jmp 15f
-11: mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+v_sub]; mov ecx,v_sub_end-v_sub; call span_eq
-    test eax,eax; jz 12f; mov ebx,0x5C; jmp 15f
-12: mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+v_mul]; mov ecx,v_mul_end-v_mul; call span_eq
-    test eax,eax; jz 13f; mov ebx,0x59; jmp 15f
-13: mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+v_div]; mov ecx,v_div_end-v_div; call span_eq
-    test eax,eax; jz .evf_fail; mov ebx,0x5E
-15:
+    mov rdi,r14
+    call tensor_fp_binary_opcode
+    test eax,eax; jz .evf_fail
+    mov ebx,eax
     mov r14,[r15+32]; test r14,r14; jz .evf_fail
     # Exact power-of-two division becomes multiply by exact reciprocal.
     cmp ebx,0x5E; jne .evf_normal_bin
@@ -2249,7 +2144,9 @@ emit_vec_float:
     mov edi,ebx; mov esi,r13d; mov edx,r13d; mov ecx,r12d; mov r8d,1; call vec_vex2_rrr
     xor eax,eax; jmp .evf_done
 .evf_regular_two:
-    mov rdi,r15; mov esi,r13d; call emit_vec_float; test eax,eax; jnz .evf_fail
+    TMC_equal_operands
+    mov rdi,r15; mov esi,r13d; call emit_vec_float
+    test eax,eax; jnz .evf_fail
     # Generic post-materialization ValueFact reuse. Avoid a spill/reload whenever
     # the completed left subtree establishes the right operand's authority.
     mov rdi,r14; call vec_try_float_source
@@ -2274,6 +2171,7 @@ emit_vec_float:
 .evf_fail:
     mov eax,1
 .evf_done:
+    pop rcx; mov [rip+tensor_expression_live],ecx
     pop r15
     pop r14
     pop r13
@@ -2298,354 +2196,7 @@ TFP_23_emit_push_imm64
 emit_bytes:
 TFP_23_emit_bytes
 emit_tensor_image:
-    push rbx
-    push r12
-    push r13
-    push r14
-    push r15
-
-    # Measure only machine code that is reachable in this generated image.
-    mov r12,[rip+emit_ptr]
-    mov rax,[rip+tensor_eval_base]
-    sub r12,rax                     # compile-time scalar oracle bytes
-    # Mature WHEX parallel contract: the scalar oracle is compiler-local only.
-    # It is not reachable runtime code and is physically erased from the final
-    # RX payload once the authoritative vector lowering exists.
-    cmp dword ptr [rip+tensor_vector_width],4
-    jne .eti_fail
-    xor r12d,r12d                   # runtime scalar evaluator bytes = 0
-
-    xor r13d,r13d                   # vector bytes
-    xor r14d,r14d                   # vector-init bytes
-    cmp dword ptr [rip+tensor_vector_width],4
-    jne .eti_lengths_ready
-    mov r13,[rip+vec_emit_ptr]
-    mov rax,[rip+tensor_vec_base]
-    sub r13,rax
-    mov r14,[rip+vec_init_emit_ptr]
-    mov rax,[rip+tensor_vec_init_base]
-    sub r14,rax
-.eti_lengths_ready:
-    mov r15,r12
-    add r15,r13
-    add r15,r14
-    test r15,r15
-    jz .eti_fail
-    mov [rip+image_eval_len],r12
-    mov [rip+image_vec_len],r13
-    mov [rip+image_init_len],r14
-    mov [rip+image_generated_len],r15
-
-    mov eax,SYS_openat
-    mov edi,AT_FDCWD
-    mov rsi,[rip+tensor_output_path]
-    mov edx,OUT_FLAGS
-    mov r10d,0755
-    syscall
-    test rax,rax
-    js .eti_fail
-    mov rbx,rax
-
-    # Write only the loadable runtime prefix.  Section/symbol tables and the
-    # one-byte link-time .generated anchor are not copied into the final image.
-    mov eax,SYS_write
-    mov rdi,rbx
-    lea rsi,[rip+runtime_template_blob]
-    mov edx,RUNTIME_TEMPLATE_SIZE
-    syscall
-    cmp rax,RUNTIME_TEMPLATE_SIZE
-    jne .eti_close_fail
-
-    # Final image deliberately has no section table.  Runtime loaders need only
-    # ELF + PHDRs, and dead compiler/debug metadata must not survive AOT output.
-    mov qword ptr [rip+image_zero_qword],0
-    mov eax,SYS_pwrite64
-    mov rdi,rbx
-    lea rsi,[rip+image_zero_qword]
-    mov edx,8
-    mov r10d,RUNTIME_ELF_SHOFF_OFF
-    syscall
-    cmp rax,8
-    jne .eti_close_fail
-    mov eax,SYS_pwrite64
-    mov rdi,rbx
-    lea rsi,[rip+image_zero_qword]
-    mov edx,6
-    mov r10d,RUNTIME_ELF_SHENTSIZE_OFF
-    syscall
-    cmp rax,6
-    jne .eti_close_fail
-
-    # Structural plan patches.
-    # 1.3.18 AOT emergent-expansion prices.
-    mov edi,dword ptr [rip+tensor_vector_width]
-    call derive_tensor_chunk_work_ticks
-
-    mov eax,SYS_pwrite64
-    mov rdi,rbx
-    lea rsi,[rip+execution_admission_capacity]
-    mov edx,4
-    mov r10d,RUNTIME_EXECUTION_ADMISSION_OFF
-    syscall
-    cmp rax,4
-    jne .eti_close_fail
-
-    # Reduction semantics are an AOT contract fact.  Runtime admission may change
-    # ownership multiplicity, never this strict/tolerant mathematical authority.
-    mov eax,SYS_pwrite64
-    mov rdi,rbx
-    lea rsi,[rip+tensor_tolerant_fp]
-    mov edx,4
-    mov r10d,RUNTIME_REDUCTION_TOLERANT_OFF
-    syscall
-    cmp rax,4
-    jne .eti_close_fail
-
-    # Burn the exact compile-time silicon-domain placement witness into the
-    # executable. Runtime only applies this inherited mask once; it never
-    # discovers, scores, or reallocates silicon.
-    mov eax,SYS_pwrite64
-    mov rdi,rbx
-    lea rsi,[rip+sd_static_placement_required]
-    mov edx,4
-    mov r10d,RUNTIME_STATIC_PLACEMENT_REQUIRED_OFF
-    syscall
-    cmp rax,4
-    jne .eti_close_fail
-    mov eax,SYS_pwrite64
-    mov rdi,rbx
-    lea rsi,[rip+sd_preferred_l3_mask_bytes]
-    mov edx,4
-    mov r10d,RUNTIME_STATIC_PLACEMENT_MASK_BYTES_OFF
-    syscall
-    cmp rax,4
-    jne .eti_close_fail
-    mov eax,SYS_pwrite64
-    mov rdi,rbx
-    lea rsi,[rip+sd_preferred_l3_mask]
-    mov edx,128
-    mov r10d,RUNTIME_STATIC_PLACEMENT_MASK_OFF
-    syscall
-    cmp rax,128
-    jne .eti_close_fail
-
-    mov eax,SYS_pwrite64
-    mov rdi,rbx
-    lea rsi,[rip+outward_materialization_ticks]
-    mov edx,8
-    mov r10d,RUNTIME_OUTWARD_MATERIALIZATION_TICKS_OFF
-    syscall
-    cmp rax,8
-    jne .eti_close_fail
-
-    mov eax,SYS_pwrite64
-    mov rdi,rbx
-    lea rsi,[rip+tensor_chunk_work_ticks]
-    mov edx,8
-    mov r10d,RUNTIME_CHUNK_WORK_TICKS_OFF
-    syscall
-    cmp rax,8
-    jne .eti_close_fail
-
-    mov eax,SYS_pwrite64
-    mov rdi,rbx
-    lea rsi,[rip+tensor_chunk_elements]
-    mov edx,8
-    mov r10d,RUNTIME_CHUNK_ELEMENTS_OFF
-    syscall
-    cmp rax,8
-    jne .eti_close_fail
-
-    mov eax,SYS_pwrite64
-    mov rdi,rbx
-    lea rsi,[rip+tensor_vector_width]
-    mov edx,4
-    mov r10d,RUNTIME_VECTOR_WIDTH_OFF
-    syscall
-    cmp rax,4
-    jne .eti_close_fail
-
-    mov eax,SYS_pwrite64
-    mov rdi,rbx
-    lea rsi,[rip+group_carrier_factor]
-    mov edx,4
-    mov r10d,RUNTIME_GROUP_CARRIER_FACTOR_OFF
-    syscall
-    cmp rax,4
-    jne .eti_close_fail
-
-    mov eax,SYS_pwrite64
-    mov rdi,rbx
-    lea rsi,[rip+group_body_factor]
-    mov edx,4
-    mov r10d,RUNTIME_GROUP_BODY_FACTOR_OFF
-    syscall
-    cmp rax,4
-    jne .eti_close_fail
-
-    # Independent realized-carrier contract.
-    mov eax,SYS_pwrite64
-    mov rdi,rbx
-    lea rsi,[rip+physical_realize_group_carriers]
-    mov edx,4
-    mov r10d,RUNTIME_REALIZED_GROUP_CARRIER_OFF
-    syscall
-    cmp rax,4
-    jne .eti_close_fail
-
-    # Independent execution-contract byte: corrupting both plan fields cannot
-    # disguise the Physical Tensor width actually realized by code generation.
-    mov eax,SYS_pwrite64
-    mov rdi,rbx
-    lea rsi,[rip+physical_realize_group_body]
-    mov edx,4
-    mov r10d,RUNTIME_REALIZED_GROUP_BODY_OFF
-    syscall
-    cmp rax,4
-    jne .eti_close_fail
-
-    mov eax,SYS_pwrite64
-    mov rdi,rbx
-    lea rsi,[rip+tensor_shape_extent_min]
-    mov edx,8
-    mov r10d,RUNTIME_EXTENT_MIN_OFF
-    syscall
-    cmp rax,8
-    jne .eti_close_fail
-
-    mov eax,SYS_pwrite64
-    mov rdi,rbx
-    lea rsi,[rip+tensor_shape_extent_max]
-    mov edx,8
-    mov r10d,RUNTIME_EXTENT_MAX_OFF
-    syscall
-    cmp rax,8
-    jne .eti_close_fail
-
-    # Append exact reachable AOT code: scalar evaluator, then optional vector
-    # evaluator and vector initialization.  No fixed evaluator capacity exists.
-    mov eax,SYS_pwrite64
-    mov rdi,rbx
-    mov rsi,[rip+tensor_eval_base]
-    mov rdx,r12
-    mov r10d,RUNTIME_GENERATED_FILE_OFF
-    syscall
-    cmp rax,r12
-    jne .eti_close_fail
-
-    test r13,r13
-    jz .eti_no_vec_payload
-    mov r10,RUNTIME_GENERATED_FILE_OFF
-    add r10,r12
-    mov eax,SYS_pwrite64
-    mov rdi,rbx
-    mov rsi,[rip+tensor_vec_base]
-    mov rdx,r13
-    syscall
-    cmp rax,r13
-    jne .eti_close_fail
-
-    mov r10,RUNTIME_GENERATED_FILE_OFF
-    add r10,r12
-    add r10,r13
-    mov eax,SYS_pwrite64
-    mov rdi,rbx
-    mov rsi,[rip+tensor_vec_init_base]
-    mov rdx,r14
-    syscall
-    cmp rax,r14
-    jne .eti_close_fail
-.eti_no_vec_payload:
-
-    # Make the generated RX segment exactly the appended byte length.
-    mov [rip+image_generated_len],r15
-    mov eax,SYS_pwrite64
-    mov rdi,rbx
-    lea rsi,[rip+image_generated_len]
-    mov edx,8
-    mov r10d,RUNTIME_GENERATED_FILESZ_PHDR_OFF
-    syscall
-    cmp rax,8
-    jne .eti_close_fail
-    mov eax,SYS_pwrite64
-    mov rdi,rbx
-    lea rsi,[rip+image_generated_len]
-    mov edx,8
-    mov r10d,RUNTIME_GENERATED_MEMSZ_PHDR_OFF
-    syscall
-    cmp rax,8
-    jne .eti_close_fail
-
-    # Direct rel32 AOT jumps.  No runtime function-pointer lookup or interpreter.
-    mov rax,RUNTIME_GENERATED_VA
-    sub rax,(0x400000 + RUNTIME_EVAL_OFF + 5)
-    mov dword ptr [rip+image_disp],eax
-    mov eax,SYS_pwrite64
-    mov rdi,rbx
-    lea rsi,[rip+image_disp]
-    mov edx,4
-    mov r10d,RUNTIME_EVAL_DISP_OFF
-    syscall
-    cmp rax,4
-    jne .eti_close_fail
-
-    test r13,r13
-    jz .eti_jumps_done
-    mov rax,RUNTIME_GENERATED_VA
-    add rax,r12
-    sub rax,(0x400000 + RUNTIME_VEC_OFF + 5)
-    mov dword ptr [rip+image_disp],eax
-    mov eax,SYS_pwrite64
-    mov rdi,rbx
-    lea rsi,[rip+image_disp]
-    mov edx,4
-    mov r10d,RUNTIME_VEC_DISP_OFF
-    syscall
-    cmp rax,4
-    jne .eti_close_fail
-
-    mov rax,RUNTIME_GENERATED_VA
-    add rax,r12
-    add rax,r13
-    sub rax,(0x400000 + RUNTIME_VEC_INIT_OFF + 5)
-    mov dword ptr [rip+image_disp],eax
-    mov eax,SYS_pwrite64
-    mov rdi,rbx
-    lea rsi,[rip+image_disp]
-    mov edx,4
-    mov r10d,RUNTIME_VEC_INIT_DISP_OFF
-    syscall
-    cmp rax,4
-    jne .eti_close_fail
-.eti_jumps_done:
-
-    mov eax,SYS_fchmod
-    mov rdi,rbx
-    mov esi,0755
-    syscall
-    mov eax,SYS_close
-    mov rdi,rbx
-    syscall
-    xor eax,eax
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    ret
-
-.eti_close_fail:
-    mov eax,SYS_close
-    mov rdi,rbx
-    syscall
-.eti_fail:
-    mov eax,1
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    ret
+TFC_emit_tensor_image
 
 emit_fused_vector_body:
 TFP_23_emit_fused_vector_body
@@ -2758,17 +2309,22 @@ emit_fused_advance4:
 # Direct canonical tensor/1 keeps historical `n`; ShapeFact-N uses one synthetic
 # product identity so arbitrary source extent names do not leak into codegen.
 tensor_domain_var_match:
-    cmp dword ptr [rip+tensor_shape_active],0
-    je .tdvm_legacy
-    lea rdx,[rip+v_shape_product]
-    mov ecx,v_shape_product_end-v_shape_product
-    jmp span_eq
-.tdvm_legacy:
-    lea rdx,[rip+v_n]
-    mov ecx,v_n_end-v_n
-    jmp span_eq
+    push rbx; push r12; push r13
+    mov r12,rdi; mov r13,rsi
+    mov rdx,[rip+tensor_shape_runtime_name_ptr]
+    mov rcx,[rip+tensor_shape_runtime_name_len]
+    call span_eq
+    test eax,eax; jnz .tdvm_done
+    cmp dword ptr [rip+tensor_shape_active],0; je .tdvm_done
+    mov rdi,r12; mov rsi,r13
+    lea rdx,[rip+v_shape_product]; mov ecx,v_shape_product_end-v_shape_product
+    call span_eq
+.tdvm_done:
+    pop r13; pop r12; pop rbx; ret
 
 .include "compiler/shapefact_n_frontend.inc"
+.include "compiler/tensor_support_frontend.inc"
+.include "compiler/tensor_input_facts.inc"
 
 .section .rodata
 # Four-lane native256 fused episode. All tail work remains vectorized.
@@ -2955,7 +2511,6 @@ k_args:.ascii "args"; k_args_end:
 v_tensor_format:.ascii "wheelchair.tensor/1"; v_tensor_format_end:
 v_u64:.ascii "u64"; v_u64_end:
 v_f64:.ascii "f64"; v_f64_end:
-v_n:.ascii "n"; v_n_end:
 v_shape_product:.ascii "__shape_product"; v_shape_product_end:
 v_map:.ascii "map"; v_map_end:
 v_reduce:.ascii "reduce"; v_reduce_end:
@@ -3125,3 +2680,6 @@ tensor_code_overflow:.skip 4
 tensor_fixup_ptr_base:.skip 8
 tensor_fixup_const_base:.skip 8
 tensor_fixup_capacity:.skip 4
+
+.text
+TMC_functions

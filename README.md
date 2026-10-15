@@ -13,24 +13,28 @@
 
 Wheelchair targets the same broad numerical-computing territory as C and Fortran, but it does not start from a mandatory sequential instruction stream and then try to recover parallelism afterward. Its compiler treats mathematical structure, value identity, causal dependence, precision, locality, and physical realization as first-class compile-time information.
 
-> Current release: **1.3.128**  
+> Current release: **1.3.178**  
 > Target: **Linux x86-64, static ELF64**  
 > Source surfaces: **WH (`.wh`)** and **WHEX (`.whex`)**  
-> [Download Wheelchair 1.3.128](./dist/Wheelchair-1.3.128.zip)
+> [Download Wheelchair 1.3.178](./dist/Wheelchair-1.3.178.zip) · [SHA-256](./dist/Wheelchair-1.3.178.zip.sha256) · [Release](https://github.com/MatrixFreeSama/whlang/releases/tag/v1.3.178) · [Production source](./main/)
 
 Archive SHA-256:
 
 ```text
-9110b357e9e5eafcd07df8751e803a7fb4f209b4332fc2b7f4e6a02e0b9ac761
+d223eae8f9bf285f2f922f0f1769811dd308dd3870e54ca82edbc734b9908460
 ```
 
 ---
 
-## Wheelchair 1.3.128
+## Wheelchair 1.3.178
 
-1.3.128 ages native256 generic Field AddressFact realization into one canonical packet CoordinateFact: non-power-of-two neighborhood accesses no longer re-derive Rank-N coordinates independently. The old coordinate-offset stack transport and generic Field load helper are removed; no workload matcher, extent threshold, second backend, JIT, scheduler, or parallel DSL surface is added.
+This release removes repeated checked scalar evaluation and register/stack transport within the existing fact and Physical Reality authorities. Ordered expression identity is separated from physical residency admission; dynamic division/remainder, casts and shifts share the scalar fact planner. Checked facts are produced at their first unconditional demand, preserving lazy errors, generation boundaries and strict floating-point order. Immutable scalar bits share the existing XMM carrier bank, and one register division relation supplies quotient and remainder. Iteration prices count the steady-state loop span while charging initialization/publication once. No workload selector, new execution backend, software out-of-order scheduler or parallel DSL is introduced.
 
-## Current release: 1.3.127 — paper snapshot
+In the measured 1.3.177 → 1.3.178 comparison, single-core battery scenarios improve **1.46–1.51×** and sensor scenarios **1.56–2.06×**. Battery/sensor repeated dynamic divisions fall from **6 to 1**, and associated push/pop instructions from **48 to 2**. These are same-environment revision comparisons, not hardware-peak claims: the tested sensor cases still take about **2.9–3.9×** the time of the fastest C/Fortran controls, and short parallel calls remain a known cost boundary. The report records 31,076 regression checks, additional independent output checks, and 90 resource-intervention runs; these counts are not independent mathematical proofs.
+
+See the [release notes](./main/RELEASE_NOTES_1_3_178.md) and [measured report](./dist/Wheelchair-1.3.178-report.md). The versionless `main/` directory matches all 120 production files in the release ZIP byte for byte. Build with `cd main && sh build.sh` using GNU binutils.
+
+## Historical research baseline: 1.3.127 — paper snapshot
 
 Wheelchair 1.3.127 is the frozen research snapshot for the paper-facing evaluation of the current architecture. The paper baseline is not a new benchmark-specific execution family: it keeps the same Rank-N / ValueFact / Region / Physical Reality / Physical DAG design and the same AOT native-code authority, without adding a JIT, scheduler family, kernel-offload path, source-visible parallel DSL, workload-name dispatch, or fixed element-count threshold for publication.
 
@@ -38,7 +42,7 @@ The paper question is deliberately narrower than the whole language: **can compi
 
 The principal negative control is explicit. A Wheelchair `ValueFact` carries more structure than a bare C scalar, so value representation is wider and pure regular arithmetic may require modestly more metadata handling or instructions than highly optimized C. That cost is expected to be most visible when there is little structure to eliminate. The architecture earns that cost only when retained facts allow redundant transport, address work, support, materialization, or execution itself to disappear. Dense scalar losses are therefore part of the paper evidence rather than regressions to hide.
 
-The 1.3.127 archive, SHA-256, versionless `main/` production tree, top-level README, and GitHub Release are kept aligned so the paper baseline is independently identifiable and reproducible.
+The 1.3.127 archive remains the historical research baseline. The versionless `main/` tree and current-release links now follow 1.3.178; historical benchmark results below retain their stated versions.
 
 ## Features
 
@@ -858,32 +862,20 @@ GPU support will therefore be reconsidered when it can preserve that machine-lev
 A current release ZIP is organized roughly as:
 
 ```text
-Wheelchair-1.3.79/
-├── README.md                         # release-internal engineering notes
-├── VERSION
+Wheelchair-1.3.178/
+├── README.md
+├── RELEASE_NOTES_1_3_178.md
+├── FDLIBM_NOTICE.txt
 ├── SHA256SUMS
 ├── build.sh
-├── test.sh                           # current release verification entry
-├── TESTING_1_3_79.md
-├── RELEASE_NOTES_1_3_79.md
-├── WHEELCHAIR_CHARTER_1_3_78.md
-├── PURE_ASSEMBLY_RELEASE_PROOF_1_3_78.md
-├── PRODUCTION_BIN_SHA256_1_3_79.txt
-├── bin/                              # production executables
-├── compiler/                         # current compiler source authority
-├── runtime/                          # current runtime source authority
-├── surface/                          # WH/WHEX examples and surface authority
-├── tools/                            # production build/inspection helpers
-└── devtrash/                         # tests, benchmarks, history, archaeology
+├── bin/              # seven canonical production tools
+├── compiler/         # current compiler source authority
+├── runtime/          # current runtime source authority
+├── surface/          # WH/WHEX examples and surface authority
+└── tools/            # production build and inspection helpers
 ```
 
-`devtrash/` is intentionally a **non-production archaeology zone**. Historical benchmarks, old release proofs, old source experiments, regression suites, and validation scripts can remain there without becoming active architecture again.
-
-The rule is:
-
-> Historical evidence may remain. Historical architecture does not regain production authority merely because the code still exists in the archive.
-
-The Git repository itself stays comparatively small; complete release trees are stored as versioned archives under `dist/` rather than expanding every historical compiler tree into `main`.
+`main/` contains this current production tree without a versioned enclosing directory. Versioned ZIPs remain under `dist/`; benchmark evidence is distributed separately from production source. Historical experiments do not regain production authority merely because they remain archived.
 
 ---
 
@@ -1031,7 +1023,8 @@ The project generally prefers an explicit rejection or visible performance gap o
 
 - `README.md` describes the language and stable architecture.
 - `dist/` stores versioned release archives.
-- the complete production tree, release proofs, raw benchmark evidence, and historical archaeology travel inside each release archive.
+- `main/` is the current expanded production ZIP; stale files are removed when synchronizing a release.
+- release reports and experiment evidence retain their stated versions and are kept separate from production source.
 - future README edits should normally be limited to the current-release line, a genuinely new architectural landmark, or a benchmark that changes the known performance boundary.
 
 That policy is deliberate: the README should describe **Wheelchair**, not narrate every patch release.

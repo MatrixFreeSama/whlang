@@ -36,11 +36,13 @@
 .equ OP_IMUL_CONST,13
 .equ OP_IDIV_CONST,14
 .equ OP_IMOD_CONST,15
-.equ OP_ITOF32,16
+.equ OP_ITOF,16
 .equ OP_FMA_ACC,17
+.equ OP_NATIVE_MATH,20
 .equ OP_SQRT,18
 .equ OP_TRUNC,19
 .equ OP_NOP,0
+.equ FF_PACKET_BYTES,FIELD_LANES*4
 .equ FF_VREG_BASE,1
 .equ FF_VREG_COUNT,4
 .equ FF_VREG_MAX,3
@@ -52,7 +54,11 @@
 .equ MODE_OUTPUT,1
 .equ MODE_INOUT,2
 .equ FF_CACHE_NONE,-1
-.equ FF_TRAFFIC_QUANTUM_ELEMENTS,(PRC_TRAFFIC_LINE_BYTES/4)
+ .if FIELD_LANES == 16
+.include "build/field_runtime_512_fact_layout.inc"
+.else
+.include "build/field_runtime_256_fact_layout.inc"
+.endif
 
 # Map one logical v0..v3 ID already present in REG32 to its physical SIMD carrier.
 # Native512 expands to the historical add-one mapping, preserving generated 512
@@ -73,7 +79,9 @@
 .extern obj_get
 .extern span_eq
 .extern node_parse_u64
+.extern node_parse_f32_bits
 .extern node_parse_f64_bits
+.extern field_runtime_f64_template_blob
 .extern jcur
 .extern jend
 .extern json_node_count
@@ -110,6 +118,7 @@ compile_field_source:
     mov dword ptr [rip+ff_fp_tolerant],0
     mov dword ptr [rip+ff_arith_fma_fused_count],0
     mov qword ptr [rip+ff_common_rank],0
+    mov dword ptr [rip+ff_element_bits],0
     mov qword ptr [rip+ff_access_delta_stride],0
     mov dword ptr [rip+ff_const_pool_count],0
     mov dword ptr [rip+ff_addr_pool_count],0
@@ -172,7 +181,7 @@ compile_field_source:
     mov rdi,r13; lea rsi,[rip+k_type]; mov edx,k_type_end-k_type; call obj_get
     test rax,rax; jz .ffs_bad
     cmp qword ptr [rax],J_STRING; jne .ffs_bad
-    mov rdi,[rax+8]; mov rsi,[rax+16]; lea rdx,[rip+v_f32]; mov ecx,v_f32_end-v_f32; call span_eq
+    mov rdi,[rax+8]; mov rsi,[rax+16]; call ff_accept_float_type
     test eax,eax; jz .ffs_bad
     # mode
     mov rdi,r13; lea rsi,[rip+k_mode]; mov edx,k_mode_end-k_mode; call obj_get
@@ -302,9 +311,19 @@ compile_field_source:
     test eax,eax; jnz .ffs_op_idiv_const
     mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+v_imod_const]; mov ecx,v_imod_const_end-v_imod_const; call span_eq
     test eax,eax; jnz .ffs_op_imod_const
-    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+v_itof32]; mov ecx,v_itof32_end-v_itof32; call span_eq
-    test eax,eax; jnz .ffs_op_itof32
+    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+v_itof]; mov ecx,v_itof_end-v_itof; call span_eq
+    test eax,eax; jnz .ffs_op_itof
+    mov rdi,[r14+8]; mov rsi,[r14+16]; mov edx,[rip+ff_element_bits]
+    call physical_math_fragment
+    test rax,rax; jnz .ffs_op_native_math
     jmp .ffs_bad
+.ffs_op_native_math:
+    mov dword ptr [r15],OP_NATIVE_MATH
+    mov [r15+16],edx
+    mov rdi,r13; call ff_parse_dst; test edx,edx; jnz .ffs_bad; mov [r15+4],eax
+    mov rdi,r13; lea rsi,[rip+k_a]; mov edx,k_a_end-k_a; call obj_get; call ff_parse_reg_node; test edx,edx; jnz .ffs_bad; mov [r15+8],eax
+    mov dword ptr [r15+12],0
+    jmp .ffs_op_addrec
 .ffs_op_load:
     mov dword ptr [r15],OP_LOAD
     mov rdi,r13; lea rsi,[rip+k_access]; mov edx,k_access_end-k_access; call obj_get
@@ -318,9 +337,8 @@ compile_field_source:
     mov rdi,r13; call ff_parse_dst; test edx,edx; jnz .ffs_bad
     mov [r15+4],eax
     mov rdi,r13; lea rsi,[rip+k_value]; mov edx,k_value_end-k_value; call obj_get
-    call node_parse_f64_bits; test edx,edx; jnz .ffs_bad
-    movq xmm0,rax; cvtsd2ss xmm0,xmm0; movd eax,xmm0
-    mov [r15+20],eax; jmp .ffs_op_addrec
+    call ff_parse_float_bits; test edx,edx; jnz .ffs_bad
+    mov [r15+20],rax; jmp .ffs_op_addrec
 .ffs_op_add: mov eax,OP_ADD; jmp .ffs_op_binary
 .ffs_op_sub: mov eax,OP_SUB; jmp .ffs_op_binary
 .ffs_op_mul: mov eax,OP_MUL; jmp .ffs_op_binary
@@ -384,8 +402,8 @@ compile_field_source:
     cmp dword ptr [r15],OP_IMOD_CONST; je .ffs_bad
     mov dword ptr [r15+20],0
     jmp .ffs_op_addrec
-.ffs_op_itof32:
-    mov dword ptr [r15],OP_ITOF32
+.ffs_op_itof:
+    mov dword ptr [r15],OP_ITOF
     mov rdi,r13; call ff_parse_dst; test edx,edx; jnz .ffs_bad; mov [r15+4],eax
     mov rdi,r13; lea rsi,[rip+k_ireg]; mov edx,k_ireg_end-k_ireg; call obj_get; call ff_parse_ireg_node; test edx,edx; jnz .ffs_bad; mov [r15+8],eax
 .ffs_op_addrec:
@@ -522,13 +540,14 @@ ff_optimize_arithmetic:
     cmp eax,OP_SUB; je .foa_read2
     cmp eax,OP_MUL; je .foa_read2
     cmp eax,OP_DIV; je .foa_read2
+    cmp eax,OP_NATIVE_MATH; je .foa_read1
     cmp eax,OP_SQRT; je .foa_read1
     cmp eax,OP_TRUNC; je .foa_read1
     cmp eax,OP_FMA_ACC; je .foa_read_fma
     cmp eax,OP_MOV; je .foa_read1
     cmp eax,OP_STORE; je .foa_read1
     cmp eax,OP_REDUCE; je .foa_read1
-    cmp eax,OP_ITOF32; je .foa_def_check
+    cmp eax,OP_ITOF; je .foa_def_check
     jmp .foa_def_check
 .foa_read2:
     cmp [rdx+8],r14d; je .foa_next
@@ -549,10 +568,11 @@ ff_optimize_arithmetic:
     cmp eax,OP_SUB; je .foa_maybe_def
     cmp eax,OP_MUL; je .foa_maybe_def
     cmp eax,OP_DIV; je .foa_maybe_def
+    cmp eax,OP_NATIVE_MATH; je .foa_maybe_def
     cmp eax,OP_SQRT; je .foa_maybe_def
     cmp eax,OP_TRUNC; je .foa_maybe_def
     cmp eax,OP_MOV; je .foa_maybe_def
-    cmp eax,OP_ITOF32; je .foa_maybe_def
+    cmp eax,OP_ITOF; je .foa_maybe_def
     cmp eax,OP_FMA_ACC; jne .foa_scan_next
 .foa_maybe_def:
     cmp [rdx+4],r14d
@@ -641,12 +661,13 @@ ff_contract_common_factors:
     cmp eax,OP_SUB; je .fcf_chk_bin
     cmp eax,OP_MUL; je .fcf_chk_bin
     cmp eax,OP_DIV; je .fcf_chk_bin
+    cmp eax,OP_NATIVE_MATH; je .fcf_chk_unary
     cmp eax,OP_SQRT; je .fcf_chk_unary
     cmp eax,OP_TRUNC; je .fcf_chk_unary
     cmp eax,OP_MOV; je .fcf_chk_mov
     cmp eax,OP_STORE; je .fcf_chk_read1
     cmp eax,OP_REDUCE; je .fcf_chk_read1
-    cmp eax,OP_ITOF32; je .fcf_chk_def
+    cmp eax,OP_ITOF; je .fcf_chk_def
     cmp eax,OP_FMA_ACC; je .fcf_chk_fma
     jmp .fcf_carrier_next
 .fcf_chk_def:
@@ -919,11 +940,12 @@ ff_contract_common_factors:
     cmp eax,OP_NOP; je .fcf_next
     cmp eax,OP_LOAD; je .fcf_up_def
     cmp eax,OP_CONST; je .fcf_up_def
-    cmp eax,OP_ITOF32; je .fcf_up_def
+    cmp eax,OP_ITOF; je .fcf_up_def
     cmp eax,OP_ADD; je .fcf_up_bin
     cmp eax,OP_SUB; je .fcf_up_bin
     cmp eax,OP_MUL; je .fcf_up_bin
     cmp eax,OP_DIV; je .fcf_up_bin
+    cmp eax,OP_NATIVE_MATH; je .fcf_up_unary
     cmp eax,OP_SQRT; je .fcf_up_unary
     cmp eax,OP_TRUNC; je .fcf_up_unary
     cmp eax,OP_MOV; je .fcf_up_mov
@@ -1010,26 +1032,19 @@ ff_contract_common_factors:
     pop rbx
     ret
 
-# Immutable-vector constant identity CSE for the proven cross-output path.
-# Float bits, not decimal spelling, define identity.  Constants are broadcast
-# once into the persistent generated-function stack frame and thereafter used
-# directly as FMA memory operands.  No runtime search or lookup decision exists.
+# Exact-bit constant identity; physical placement is decided by shared demand
+# and helper-preservation facts. No decimal spelling or client class owns it.
 ff_build_const_pool:
     push rbx
     push r12
     push r13
     push r15
     mov dword ptr [rip+ff_const_pool_count],0
-    mov rdi,[rip+ff_const_pool_use_count_ptr]
-    xor eax,eax
-    mov ecx,dword ptr [rip+ff_graph_capacity]
-    rep stosd
     mov rdi,[rip+ff_const_pool_resident_reg_ptr]
     mov eax,-1
     mov ecx,dword ptr [rip+ff_graph_capacity]
     rep stosd
-    # Every OP_CONST receives one exact-bit ConstantFact identity when capacity
-    # permits. There is no cross-output client class and no compatibility lane.
+    # Each OP_CONST receives an exact-bit identity within the graph-sized arena.
     mov rdi,[rip+ff_op_const_slot_ptr]
     mov eax,-1
     mov ecx,dword ptr [rip+ff_graph_capacity]
@@ -1044,32 +1059,34 @@ ff_build_const_pool:
     add r15,rax
     cmp dword ptr [r15],OP_CONST
     jne .fbcp_generic_next
-    mov r12d,[r15+20]
+    mov r12,[r15+20]
     xor r13d,r13d
 .fbcp_generic_search:
     cmp r13d,dword ptr [rip+ff_const_pool_count]
     jae .fbcp_generic_new
     mov rax,[rip+ff_const_pool_bits_ptr]
-    cmp [rax+r13*4],r12d
+    cmp [rax+r13*8],r12
     je .fbcp_generic_record
     inc r13d
     jmp .fbcp_generic_search
 .fbcp_generic_new:
     cmp r13d,dword ptr [rip+ff_graph_capacity]
-    jae .fbcp_generic_next
+    jae .fbcp_bad
     mov rax,[rip+ff_const_pool_bits_ptr]
-    mov [rax+r13*4],r12d
+    mov [rax+r13*8],r12
     inc dword ptr [rip+ff_const_pool_count]
 .fbcp_generic_record:
     mov rax,[rip+ff_op_const_slot_ptr]
     mov [rax+rbx*4],r13d
-    mov rax,[rip+ff_const_pool_use_count_ptr]
-    inc dword ptr [rax+r13*4]
 .fbcp_generic_next:
     inc ebx
     jmp .fbcp_generic_loop
+.fbcp_bad:
+    mov eax,1
+    jmp .fbcp_ret
 .fbcp_ok:
     xor eax,eax
+.fbcp_ret:
     pop r15
     pop r13
     pop r12
@@ -1196,6 +1213,7 @@ ff_build_global_physical_reality:
     cmp eax,OP_SUB; je .fgr_bin
     cmp eax,OP_MUL; je .fgr_bin
     cmp eax,OP_DIV; je .fgr_bin
+    cmp eax,OP_NATIVE_MATH; je .fgr_unary
     cmp eax,OP_SQRT; je .fgr_unary
     cmp eax,OP_TRUNC; je .fgr_unary
     cmp eax,OP_STORE; je .fgr_store
@@ -1206,13 +1224,14 @@ ff_build_global_physical_reality:
     cmp eax,OP_IMUL_CONST; je .fgr_imut
     cmp eax,OP_IDIV_CONST; je .fgr_imut
     cmp eax,OP_IMOD_CONST; je .fgr_imut
-    cmp eax,OP_ITOF32; je .fgr_itof
+    cmp eax,OP_ITOF; je .fgr_itof
     cmp eax,OP_FMA_ACC; je .fgr_fma
     jmp .fgr_fail
 
 .fgr_const:
     mov edi,OP_CONST
-    mov esi,[r12+20]
+    mov rax,[rip+ff_op_const_slot_ptr]
+    mov esi,[rax+rbx*4]
     xor edx,edx
     xor ecx,ecx
     mov r8d,ebx
@@ -1332,6 +1351,9 @@ ff_build_global_physical_reality:
     lea rax,[rip+ff_global_vreg_fact]
     mov esi,[rax+r14*4]
     xor edx,edx; xor ecx,ecx; mov r8d,ebx
+    cmp edi,OP_NATIVE_MATH; jne 1f
+    mov ecx,[r12+16]
+1:
     call ff_global_intern_fact
     cmp eax,-1; je .fgr_fail
     mov r13d,eax
@@ -1416,7 +1438,7 @@ ff_build_global_physical_reality:
     mov esi,[rax+r14*4]
     cmp esi,0; jl .fgr_fail
     mov edi,esi; mov esi,ebx; call ff_global_touch_fact
-    mov edi,OP_ITOF32
+    mov edi,OP_ITOF
     lea rax,[rip+ff_global_ireg_fact]
     mov esi,[rax+r14*4]
     xor edx,edx
@@ -1619,7 +1641,7 @@ ff_build_physical_plan:
     mov dword ptr [rip+ff_physical_max_depth],0
     mov dword ptr [rip+ff_physical_reordered_ops],0
     mov dword ptr [rip+ff_physical_artificial_edges],0
-    mov eax,FIELD_LANES
+    mov eax,[rip+ff_packet_lanes]
     mov dword ptr [rip+ff_physical_tensor_lanes],eax
 
     xor ebx,ebx
@@ -1639,6 +1661,7 @@ ff_build_physical_plan:
     cmp eax,OP_SUB; je .ffpd_bin_v
     cmp eax,OP_MUL; je .ffpd_bin_v
     cmp eax,OP_DIV; je .ffpd_bin_v
+    cmp eax,OP_NATIVE_MATH; je .ffpd_unary_v
     cmp eax,OP_SQRT; je .ffpd_unary_v
     cmp eax,OP_TRUNC; je .ffpd_unary_v
     cmp eax,OP_STORE; je .ffpd_store_v
@@ -1650,7 +1673,7 @@ ff_build_physical_plan:
     cmp eax,OP_IMUL_CONST; je .ffpd_mut_i
     cmp eax,OP_IDIV_CONST; je .ffpd_mut_i
     cmp eax,OP_IMOD_CONST; je .ffpd_mut_i
-    cmp eax,OP_ITOF32; je .ffpd_itof
+    cmp eax,OP_ITOF; je .ffpd_itof
     cmp eax,OP_FMA_ACC; je .ffpd_fma_acc
     jmp .ffpd_fail
 
@@ -1686,8 +1709,8 @@ ff_build_physical_plan:
     mov rdx,[rip+ff_access_field_ptr]
     movzx r15d,byte ptr [rdx+rax]
     cmp r15d,dword ptr [rip+ff_instance_capacity]; jae .ffpd_fail
-    mov rdx,[rip+ff_field_mode_ptr]
-    cmp byte ptr [rdx+r15],MODE_INPUT
+    mov rdx,[rip+ff_field_written_fact_ptr]
+    cmp byte ptr [rdx+r15],0
     je .ffpd_commit_vdef
     mov rdx,[rip+ff_physical_mem_depth_ptr]
     mov eax,[rdx+r15*4]
@@ -2075,10 +2098,9 @@ ff_prepare_graph_arena:
     mov [rip+ff_physical_depth_cursor_ptr],rax
     lea rax,[rax+rcx+4]
     mov [rip+ff_op_const_slot_ptr],rax; add rax,rcx
-    mov [rip+ff_const_pool_last_use_pos_ptr],rax; add rax,rcx
+    mov [rip+ff_const_pool_stack_offset_ptr],rax; add rax,rcx
     mov [rip+ff_const_pool_transport_demand_ptr],rax; add rax,rcx
-    mov [rip+ff_const_pool_bits_ptr],rax; add rax,rcx
-    mov [rip+ff_const_pool_use_count_ptr],rax; add rax,rcx
+    mov [rip+ff_const_pool_bits_ptr],rax; lea rax,[rax+rcx*2]
     mov [rip+ff_const_pool_resident_reg_ptr],rax
     xor eax,eax
     pop rbx
@@ -2109,7 +2131,7 @@ ff_prepare_instance_arena:
 .ffpia_size:
     # Fixed per-instance facts only. Axis deltas are not embedded here.
     mov rax,rbx
-    imul rax,rax,56
+    imul rax,rax,60
     jo .ffpia_fail
     add rax,63
     jc .ffpia_fail
@@ -2142,7 +2164,8 @@ ff_prepare_instance_arena:
     mov [rip+ff_field_version_fact_ptr],rax; add rax,rcx
     mov [rip+ff_physical_mem_depth_ptr],rax; add rax,rcx
     mov [rip+ff_field_written_fact_ptr],rax; add rax,rbx
-    mov [rip+ff_address_fact_gpr_ptr],rax
+    mov [rip+ff_address_fact_gpr_ptr],rax; add rax,rcx
+    mov [rip+ff_cache_stack_offset_ptr],rax
     xor eax,eax
     pop rbx
     ret
@@ -2275,7 +2298,6 @@ ff_emit_u32:
     mov [rax],edi; mov [rip+ff_emit_ptr],rcx; xor eax,eax; ret
 .fe32_bad: mov dword ptr [rip+ff_code_overflow],1; mov eax,1; ret
 ff_emit_bytes:
-    # rdi ptr, rsi len
     mov rax,[rip+ff_emit_ptr]; lea rcx,[rax+rsi]; cmp rcx,[rip+ff_emit_end]; ja .feb_bad
     mov r8,rdi; mov rdi,rax; mov rcx,rsi; mov rsi,r8; rep movsb
     mov [rip+ff_emit_ptr],rdi; xor eax,eax; ret
@@ -2287,7 +2309,7 @@ ff_emit_call:
     mov rbx,rax
     mov dil,0xE8; call ff_emit_u8; test eax,eax; jnz .fec_bad
     mov rax,[rip+ff_emit_ptr]; mov rcx,[rip+ff_code_ptr]; sub rax,rcx
-    add rax,FIELD_RUNTIME_GENERATED_VA
+    add rax,qword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_GENERATED_VA]
     add rax,4                         # after rel32 (opcode already emitted)
     sub rbx,rax
     mov edi,ebx; call ff_emit_u32
@@ -2313,7 +2335,7 @@ ff_emit_vmov:
 101: test r12d,8; jz 2f; xor eax,0x20
 2:  test r12d,16; jz 102f; xor eax,0x40
 102: mov edi,eax; call ff_emit_u8
-    mov dil,0x7C; call ff_emit_u8; mov dil,0x48; call ff_emit_u8; mov dil,0x28; call ff_emit_u8
+    mov edi,0x7C; call ff_emit_payload_prefix; mov dil,0x48; call ff_emit_u8; mov dil,0x28; call ff_emit_u8
     mov eax,ebx; and eax,7; shl eax,3
     mov edx,r12d; and edx,7; or eax,edx; or eax,0xC0; mov edi,eax; call ff_emit_u8
 .else
@@ -2324,7 +2346,7 @@ ff_emit_vmov:
     test ebx,8; jz 11f; xor eax,0x80
 11: test r12d,8; jz 12f; xor eax,0x20
 12: mov edi,eax; call ff_emit_u8
-    mov dil,0x7C; call ff_emit_u8
+    mov edi,0x7C; call ff_emit_payload_prefix
     mov dil,0x28; call ff_emit_u8
     mov eax,ebx; and eax,7; shl eax,3
     mov edx,r12d; and edx,7; or eax,edx; or eax,0xC0; mov edi,eax; call ff_emit_u8
@@ -2348,7 +2370,7 @@ ff_emit_vsqrt:
     mov r9d,r12d; shr r9d,3; and r9d,1; xor r9d,1; shl r9d,5; or eax,r9d
     mov r9d,ebx; shr r9d,4; and r9d,1; xor r9d,1; shl r9d,4; or eax,r9d
     or eax,1; mov edi,eax; call ff_emit_u8
-    mov dil,0x7C; call ff_emit_u8       # W0, reserved vvvv, pp=none
+    mov edi,0x7C; call ff_emit_payload_prefix       # W0, reserved vvvv, pp=none
     mov dil,0x48; call ff_emit_u8       # LL=512
     mov dil,0x51; call ff_emit_u8
     mov eax,ebx; and eax,7; shl eax,3
@@ -2361,7 +2383,7 @@ ff_emit_vsqrt:
     or eax,0x40
     mov ecx,r12d; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,5
     or eax,ecx; or eax,1; mov edi,eax; call ff_emit_u8
-    mov dil,0x7C; call ff_emit_u8       # W0, reserved vvvv, L256, pp=none
+    mov edi,0x7C; call ff_emit_payload_prefix       # W0, reserved vvvv, L256, pp=none
     mov dil,0x51; call ff_emit_u8
     mov eax,ebx; and eax,7; shl eax,3
     mov ecx,r12d; and ecx,7; or eax,ecx; or eax,0xC0; mov edi,eax; call ff_emit_u8
@@ -2385,9 +2407,9 @@ ff_emit_vtrunc:
     mov r9d,r12d; shr r9d,3; and r9d,1; xor r9d,1; shl r9d,5; or eax,r9d
     mov r9d,ebx; shr r9d,4; and r9d,1; xor r9d,1; shl r9d,4; or eax,r9d
     or eax,3; mov edi,eax; call ff_emit_u8
-    mov dil,0x7D; call ff_emit_u8
+    mov edi,0x7D; call ff_emit_payload_w_prefix
     mov dil,0x48; call ff_emit_u8
-    mov dil,0x08; call ff_emit_u8
+    mov edi,[rip+ff_trunc_opcode]; call ff_emit_u8
     mov eax,ebx; and eax,7; shl eax,3
     mov ecx,r12d; and ecx,7; or eax,ecx; or eax,0xC0; mov edi,eax; call ff_emit_u8
     mov dil,3; call ff_emit_u8
@@ -2399,8 +2421,8 @@ ff_emit_vtrunc:
     or eax,0x40
     mov ecx,r12d; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,5
     or eax,ecx; or eax,3; mov edi,eax; call ff_emit_u8
-    mov dil,0x7D; call ff_emit_u8
-    mov dil,0x08; call ff_emit_u8
+    mov edi,0x7D; call ff_emit_payload_w_prefix
+    mov edi,[rip+ff_trunc_opcode]; call ff_emit_u8
     mov eax,ebx; and eax,7; shl eax,3
     mov ecx,r12d; and ecx,7; or eax,ecx; or eax,0xC0; mov edi,eax; call ff_emit_u8
     mov dil,3; call ff_emit_u8
@@ -2410,58 +2432,106 @@ ff_emit_vtrunc:
 .fevt_done: pop r12; pop rbx; ret
 
 # vector binary: edi opcode (58 add,5c sub,59 mul,5e div), esi dst, edx=a, ecx=b
-ff_emit_vbin:
-    push rbx
-    push r12
-    push r13
-    push r14
-    mov ebx,edi
-    mov r12d,esi                    # dst
-    mov r13d,edx                    # src A / EVEX.vvvv
-    mov r14d,ecx                    # src B / rm
-.if FIELD_LANES == 16
-    cmp r12d,31; ja .fevb_bad
-    cmp r13d,31; ja .fevb_bad
-    cmp r14d,31; ja .fevb_bad
-    # EVEX.512 full ZMM0..31 register form. Policy never needs to know whether
-    # a resident ValueFact landed in the low or high architectural bank.
-    mov dil,0x62; call ff_emit_u8
-    mov eax,1                       # map 0F
-    mov ecx,r12d; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,7; or eax,ecx   # ~R
-    mov ecx,r14d; shr ecx,4; and ecx,1; xor ecx,1; shl ecx,6; or eax,ecx   # ~X (rm bit4)
-    mov ecx,r14d; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,5; or eax,ecx   # ~B (rm bit3)
-    mov ecx,r12d; shr ecx,4; and ecx,1; xor ecx,1; shl ecx,4; or eax,ecx   # ~R'
-    mov edi,eax; call ff_emit_u8
-    mov eax,r13d; and eax,15; xor eax,15; shl eax,3; or eax,4; mov edi,eax; call ff_emit_u8
-    mov eax,r13d; shr eax,4; and eax,1; xor eax,1; shl eax,3; or eax,0x40; mov edi,eax; call ff_emit_u8
-    mov edi,ebx; call ff_emit_u8
-    mov eax,r12d; and eax,7; shl eax,3
-    mov ecx,r14d; and ecx,7; or eax,ecx; or eax,0xC0; mov edi,eax; call ff_emit_u8
-.else
-    cmp r12d,15; ja .fevb_bad
-    cmp r13d,15; ja .fevb_bad
-    cmp r14d,15; ja .fevb_bad
-    # VEX3 is required by the native256 physical register file.
+# A scalar-only ISA primitive contracts each independent lane locally.
+# Every other live packet carrier survives; no helper or expression route exists.
+# edi=dst, esi=src, edx=canonical math identity.
+ff_emit_native_math_packet:
+    push rbx; push r12; push r13; push r14; push r15; sub rsp,16
+    mov r12d,edi; mov r13d,esi
+    mov ebx,edx
+    mov edi,edx; mov esi,[rip+ff_element_bits]; mov edx,[rip+ff_packet_lanes]
+    call physical_math_packet_fragment_by_id
+    test rax,rax; jz .fenmp_scalar_entity
+    mov r14,rax; mov r15d,ecx
+    # All declared scratch owners survive only when the common fragment says
+    # they are clobbered. Scalar lane consumption clobbers no SIMD owners.
+    mov [rsp],r8d
+    mov edx,r8d; xor eax,eax
+    test edx,edx; jz .fenmp_counted
+1:  lea ecx,[rdx-1]; and edx,ecx; inc eax; test edx,edx; jnz 1b
+.fenmp_counted:
+    inc eax; imul eax,FF_PACKET_BYTES; mov [rsp+4],eax
+    mov dil,0x48; call ff_emit_u8; mov dil,0x81; call ff_emit_u8
+    mov dil,0xec; call ff_emit_u8; mov edi,[rsp+4]; call ff_emit_u32
+    mov edi,r13d; mov esi,1; xor edx,edx; call ff_emit_math_stack_packet
+    mov r13d,[rsp]; mov ebx,FF_PACKET_BYTES
+.fenmp_save_carrier:
+    test r13d,r13d; jz .fenmp_execute
+    bsf edi,r13d; btr r13d,edi
+    mov esi,1; mov edx,ebx; call ff_emit_math_stack_packet
+    add ebx,FF_PACKET_BYTES; jmp .fenmp_save_carrier
+.fenmp_execute:
+    mov rdi,r14; mov esi,r15d; call ff_emit_bytes
+    mov r13d,[rsp]; mov ebx,FF_PACKET_BYTES
+.fenmp_restore_carrier:
+    test r13d,r13d; jz .fenmp_result
+    bsf edi,r13d; btr r13d,edi
+    xor esi,esi; mov edx,ebx; call ff_emit_math_stack_packet
+    add ebx,FF_PACKET_BYTES; jmp .fenmp_restore_carrier
+.fenmp_result:
+    mov edi,r12d; xor esi,esi; xor edx,edx; call ff_emit_math_stack_packet
+    mov dil,0x48; call ff_emit_u8; mov dil,0x81; call ff_emit_u8
+    mov dil,0xc4; call ff_emit_u8; mov edi,[rsp+4]; call ff_emit_u32
+    xor eax,eax; jmp .fenmp_done
+.fenmp_scalar_entity:
+    mov edi,ebx; mov esi,[rip+ff_element_bits]; call physical_math_fragment_by_id
+    test rax,rax; jz .fenmp_bad
+    mov r14,rax; mov r15d,ecx
+    mov dil,0x50; call ff_emit_u8
+    mov dil,0x48; call ff_emit_u8; mov dil,0x83; call ff_emit_u8
+    mov dil,0xEC; call ff_emit_u8
+    mov edi,FF_PACKET_BYTES+8; call ff_emit_u8
+    mov edi,r13d; mov esi,1; mov edx,8; call ff_emit_math_stack_packet
+    xor ebx,ebx
+.fenmp_lane:
+    call ff_emit_scalar_rex
+    mov dil,0x8B; call ff_emit_u8; mov dil,0x44; call ff_emit_u8
+    mov dil,0x24; call ff_emit_u8
+    mov edi,ebx; imul edi,[rip+ff_element_bytes]; add edi,8; call ff_emit_u8
+    call ff_emit_scalar_rex
+    mov dil,0x89; call ff_emit_u8; mov dil,0x04; call ff_emit_u8
+    mov dil,0x24; call ff_emit_u8
+    mov rdi,r14; mov esi,r15d; call ff_emit_bytes
+    call ff_emit_scalar_rex
+    mov dil,0x8B; call ff_emit_u8; mov dil,0x04; call ff_emit_u8
+    mov dil,0x24; call ff_emit_u8
+    call ff_emit_scalar_rex
+    mov dil,0x89; call ff_emit_u8; mov dil,0x44; call ff_emit_u8
+    mov dil,0x24; call ff_emit_u8
+    mov edi,ebx; imul edi,[rip+ff_element_bytes]; add edi,8; call ff_emit_u8
+    inc ebx; cmp ebx,[rip+ff_packet_lanes]; jb .fenmp_lane
+    mov edi,r12d; xor esi,esi; mov edx,8; call ff_emit_math_stack_packet
+    mov dil,0x48; call ff_emit_u8; mov dil,0x83; call ff_emit_u8
     mov dil,0xC4; call ff_emit_u8
-    mov eax,0xE1
-    test r12d,8; jz 31f; xor eax,0x80
-31: test r14d,8; jz 32f; xor eax,0x20
-32: mov edi,eax; call ff_emit_u8
-    mov eax,r13d; and eax,15; shl eax,3; mov edi,0x7C; sub edi,eax; call ff_emit_u8
-    mov edi,ebx; call ff_emit_u8
-    mov eax,r12d; and eax,7; shl eax,3
-    mov ecx,r14d; and ecx,7; or eax,ecx; or eax,0xC0; mov edi,eax; call ff_emit_u8
+    mov edi,FF_PACKET_BYTES+8; call ff_emit_u8
+    mov dil,0x58; call ff_emit_u8
+    xor eax,eax; jmp .fenmp_done
+.fenmp_bad: mov eax,1
+.fenmp_done: add rsp,16; pop r15; pop r14; pop r13; pop r12; pop rbx; ret
+
+# Native unaligned packet transport, [rsp+disp32]; reserved vvvv, no rounding.
+ff_emit_math_stack_packet:
+    sub rsp,16
+    mov ecx,esi; mov esi,FF_PACKET_BYTES
+    mov r8,rsp; call physical_encode_simd_rsp
+    test eax,eax; jz 1f
+    mov rdi,rsp; mov esi,eax; call ff_emit_bytes
+    add rsp,16; ret
+1:  mov eax,1; add rsp,16; ret
+
+ff_emit_vbin:
+.if FIELD_LANES == 16
+    or edi,0xc100
+.else
+    or edi,0x2100
 .endif
-    xor eax,eax
-    jmp .fevb_done
-.fevb_bad:
-    mov eax,1
-.fevb_done:
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    ret
+    or edi,[rip+ff_binary_descriptor]
+    call physical_encode_rrr
+    test edx,edx; jz 1f
+    sub rsp,8; mov [rsp],rax
+    mov rdi,rsp; mov esi,edx; call ff_emit_bytes
+    add rsp,8; ret
+1:  mov eax,1; ret
 
 # edi=physical SIMD register -> eax=exact f32 bits, edx=1 when that
 # carrier is an immutable ConstantFact, else edx=0.  This is compiler-only
@@ -2478,7 +2548,7 @@ ff_const_bits_for_phys_reg:
     cmp dword ptr [rax+rbx*4],r12d
     jne .fcbpr_next
     mov rax,[rip+ff_const_pool_bits_ptr]
-    mov eax,[rax+rbx*4]
+    mov rax,[rax+rbx*8]
     mov edx,1
     jmp .fcbpr_ret
 .fcbpr_next:
@@ -2512,11 +2582,11 @@ ff_emit_vfma_acc:
     test edx,edx
     jz .fevfa_try_a_const
     mov r14d,r12d
-    cmp eax,0x3f800000
+    cmp rax,[rip+ff_one_bits]
     je .fevfa_add
-    cmp eax,0xbf800000
+    cmp rax,[rip+ff_minus_one_bits]
     je .fevfa_sub
-    test eax,eax
+    test rax,rax
     je .fevfa_zero
 .fevfa_try_a_const:
     mov edi,r12d
@@ -2524,11 +2594,11 @@ ff_emit_vfma_acc:
     test edx,edx
     jz .fevfa_normal
     mov r14d,r13d
-    cmp eax,0x3f800000
+    cmp rax,[rip+ff_one_bits]
     je .fevfa_add
-    cmp eax,0xbf800000
+    cmp rax,[rip+ff_minus_one_bits]
     je .fevfa_sub
-    test eax,eax
+    test rax,rax
     je .fevfa_zero
     jmp .fevfa_normal
 .fevfa_add:
@@ -2567,7 +2637,7 @@ ff_emit_vfma_acc:
 202: mov ecx,r13d; shr ecx,3; and ecx,1; test ecx,ecx; jz 203f; xor eax,0x20
 203: mov ecx,ebx; shr ecx,4; and ecx,1; test ecx,ecx; jz 204f; xor eax,0x10
 204: mov edi,eax; call ff_emit_u8
-    mov eax,r12d; and eax,15; xor eax,15; shl eax,3; or eax,5; mov edi,eax; call ff_emit_u8
+    mov eax,r12d; and eax,15; xor eax,15; shl eax,3; or eax,5; mov edi,eax; call ff_emit_payload_w_prefix
     mov eax,r12d; shr eax,4; and eax,1; xor eax,1; shl eax,3; or eax,0x40; mov edi,eax; call ff_emit_u8
     mov dil,0xB8; call ff_emit_u8
     mov eax,ebx; and eax,7; shl eax,3
@@ -2586,7 +2656,7 @@ ff_emit_vfma_acc:
     test ebx,8; jz 21f; xor eax,0x80
 21: test r13d,8; jz 22f; xor eax,0x20
 22: mov edi,eax; call ff_emit_u8
-    mov eax,r12d; shl eax,3; mov edi,0x7D; sub edi,eax; call ff_emit_u8
+    mov eax,r12d; shl eax,3; mov edi,0x7D; sub edi,eax; call ff_emit_payload_w_prefix
     mov dil,0xB8; call ff_emit_u8
     mov eax,ebx; and eax,7; shl eax,3
     mov edx,r13d; and edx,7; or eax,edx; or eax,0xC0; mov edi,eax; call ff_emit_u8
@@ -2597,101 +2667,7 @@ ff_emit_vfma_acc:
     xor eax,eax
     ret
 
-# FMA with one canonical immutable value-cache vector directly from stack.
-# edi=dst, esi=a(register), edx=value-cache slot.
-ff_emit_vfma_acc_cacheslot:
-    push rbx
-    push r12
-    push r13
-    mov ebx,edi
-    mov r12d,esi
-    mov r13d,edx
-    cmp r13d,dword ptr [rip+ff_cache_count]
-    jae .fvfacs_bad
-.if FIELD_LANES == 16
-    cmp ebx,15; ja .fvfacs_bad
-    cmp r12d,15; ja .fvfacs_bad
-    # vfmadd231ps zmmDST,zmmA,[rsp+disp32]
-    mov dil,0x62; call ff_emit_u8
-    mov eax,0xF2
-    test ebx,8; jz 207f; xor eax,0x80
-207: mov edi,eax; call ff_emit_u8
-    mov eax,r12d; and eax,15; shl eax,3; mov edi,0x7D; sub edi,eax; call ff_emit_u8
-    mov dil,0x48; call ff_emit_u8
-    mov dil,0xB8; call ff_emit_u8
-    mov eax,ebx; and eax,7; shl eax,3; or eax,0x84; mov edi,eax; call ff_emit_u8
-    mov dil,0x24; call ff_emit_u8
-.else
-    mov dil,0xC4; call ff_emit_u8
-    mov eax,0xE2
-    test ebx,8; jz 24f; xor eax,0x80
-24: mov edi,eax; call ff_emit_u8
-    mov eax,r12d; shl eax,3; mov edi,0x7D; sub edi,eax; call ff_emit_u8
-    mov dil,0xB8; call ff_emit_u8
-    mov eax,ebx; and eax,7; shl eax,3; or eax,0x84; mov edi,eax; call ff_emit_u8
-    mov dil,0x24; call ff_emit_u8
-.endif
-    mov edi,r13d; imul edi,edi,FIELD_LANES*4
-    call ff_emit_u32
-    test eax,eax; jnz .fvfacs_bad
-    xor eax,eax
-    jmp .fvfacs_done
-.fvfacs_bad:
-    mov eax,1
-.fvfacs_done:
-    pop r13
-    pop r12
-    pop rbx
-    ret
 
-# FMA with an immutable vector constant directly from the persistent
-# generated-function stack pool. edi=dst, esi=a, edx=constant-pool slot.
-ff_emit_vfma_acc_constslot:
-    push rbx
-    push r12
-    push r13
-    mov ebx,edi
-    mov r12d,esi
-    mov r13d,edx
-    cmp r13d,dword ptr [rip+ff_const_pool_count]
-    jae .fvfac_bad
-.if FIELD_LANES == 16
-    cmp ebx,15; ja .fvfac_bad
-    cmp r12d,15; ja .fvfac_bad
-    # vfmadd231ps zmmDST,zmmA,[rsp+disp32]
-    mov dil,0x62; call ff_emit_u8
-    mov eax,0xF2
-    test ebx,8; jz 208f; xor eax,0x80
-208: mov edi,eax; call ff_emit_u8
-    mov eax,r12d; and eax,15; shl eax,3; mov edi,0x7D; sub edi,eax; call ff_emit_u8
-    mov dil,0x48; call ff_emit_u8
-    mov dil,0xB8; call ff_emit_u8
-    mov eax,ebx; and eax,7; shl eax,3; or eax,0x84; mov edi,eax; call ff_emit_u8
-    mov dil,0x24; call ff_emit_u8
-.else
-    mov dil,0xC4; call ff_emit_u8
-    mov eax,0xE2
-    test ebx,8; jz 31f; xor eax,0x80
-31: mov edi,eax; call ff_emit_u8
-    mov eax,r12d; shl eax,3; mov edi,0x7D; sub edi,eax; call ff_emit_u8
-    mov dil,0xB8; call ff_emit_u8
-    mov eax,ebx; and eax,7; shl eax,3; or eax,0x84; mov edi,eax; call ff_emit_u8
-    mov dil,0x24; call ff_emit_u8
-.endif
-    mov edi,dword ptr [rip+ff_cache_count]
-    add edi,r13d
-    imul edi,edi,FIELD_LANES*4
-    call ff_emit_u32
-    test eax,eax; jnz .fvfac_bad
-    xor eax,eax
-    jmp .fvfac_done
-.fvfac_bad:
-    mov eax,1
-.fvfac_done:
-    pop r13
-    pop r12
-    pop rbx
-    ret
 
 # constant f32 bits edi -> vector dst esi via stack broadcast.
 ff_build_access_cache:
@@ -2715,12 +2691,6 @@ ff_build_access_cache:
     jae .fbac_done
     mov rax,[rip+ff_access_field_ptr]
     movzx r12d,byte ptr [rax+rbx]
-    mov rax,[rip+ff_field_mode_ptr]
-    cmp byte ptr [rax+r12],MODE_INPUT
-    je .fbac_version_safe
-    # 1.3.6 Versioned LoadFact proof: a non-input field is cacheable only when
-    # the complete post-optimization graph contains no store to that field.
-    # One field's store never flushes another field's authority.
     mov rax,[rip+ff_field_written_fact_ptr]
     cmp byte ptr [rax+r12],0
     jne .fbac_next
@@ -2809,8 +2779,8 @@ ff_build_coord_cache:
     jae .fbcc_done
     mov rax,[rip+ff_access_field_ptr]
     movzx r12d,byte ptr [rax+rbx]
-    mov rax,[rip+ff_field_mode_ptr]
-    cmp byte ptr [rax+r12],MODE_INPUT
+    mov rax,[rip+ff_field_written_fact_ptr]
+    cmp byte ptr [rax+r12],0
     jne .fbcc_next
     xor r13d,r13d
 .fbcc_search:
@@ -2878,7 +2848,7 @@ ff_build_coord_cache:
 # arithmetic authority yet, so nonresident preload may borrow the profile's v0
 # carrier as transport. Native256 additionally derives a reserved-carrier mask
 # from actual persistent procedural-index facts; no workload name or width count
-# participates. Native512 keeps its mature carrier table unchanged.
+# participates. Both profiles prefer their helper-preserved capacity.
 ff_assign_resident_loads:
     mov rdi,[rip+ff_cache_resident_reg_ptr]
     mov eax,-1
@@ -2896,10 +2866,6 @@ ff_assign_resident_loads:
     mov eax,-1
     mov ecx,dword ptr [rip+ff_instance_capacity]
     rep stosd
-    mov rdi,[rip+ff_const_pool_last_use_pos_ptr]
-    mov eax,-1
-    mov ecx,dword ptr [rip+ff_graph_capacity]
-    rep stosd
     push rbx
     push r12
     push r13
@@ -2909,6 +2875,9 @@ ff_assign_resident_loads:
     # only the carriers that really exist in the proven DAG.
     mov dword ptr [rip+ff_resident_reserved_mask],0
 .if FIELD_LANES == 8
+    # Active-lane authority survives full Group episodes into the same Vector
+    # tail. Its physical register cannot be lent to an anonymous packet.
+    bts dword ptr [rip+ff_resident_reserved_mask],FF256_TAIL_MASK_REG
     # Native256 shares ordinary YMM carriers with procedural roles.
     lea rax,[rip+ff_physical_vdef]
     cmp dword ptr [rax+3*4],-1
@@ -2952,7 +2921,7 @@ ff_assign_resident_loads:
     je .farl_mark_clobber
     cmp eax,OP_IINDEX
     jb .farl_maybe_load
-    cmp eax,OP_ITOF32
+    cmp eax,OP_ITOF
     jbe .farl_mark_clobber
 .farl_maybe_load:
     cmp eax,OP_CONST
@@ -2986,27 +2955,17 @@ ff_assign_resident_loads:
     call ff_count_access_use
     jmp .farl_count_next
 .farl_count_const:
-    # ConstantFact demand participates in the same immutable-carrier economy as
-    # LoadFact demand.  Record its final emitted consumer position so helper
-    # reloads stop exactly when the fact has no future consumer.
+    # A folded memory operand still consumes a load/AGU in every packet.
+    # Persistent constants pay initialization once per invocation, not per loop.
     mov rax,r12
-    mov rdx,[rip+ff_ops_ptr]
-    sub rax,rdx
-    shr rax,5                           # OP_SIZE == 32
+    sub rax,[rip+ff_ops_ptr]
+    shr rax,5
     mov rdx,[rip+ff_op_const_slot_ptr]
     mov eax,[rdx+rax*4]
     cmp eax,-1
     je .farl_count_next
-    mov r13d,eax
-    mov rdx,[rip+ff_const_pool_last_use_pos_ptr]
-    mov [rdx+r13*4],ebx
-    mov edi,[r12+4]
-    mov esi,ebx
-    call ff_consumer_local_foldable
-    test eax,eax
-    jnz .farl_count_next
     mov rdx,[rip+ff_const_pool_transport_demand_ptr]
-    inc dword ptr [rdx+r13*4]
+    inc dword ptr [rdx+rax*4]
     jmp .farl_count_next
 .farl_mark_clobber:
     mov eax,dword ptr [rip+ff_first_resident_clobber_pos]
@@ -3017,76 +2976,116 @@ ff_assign_resident_loads:
     inc ebx
     jmp .farl_count
 .farl_choose:
-    # Unified sparse physical materialization: immutable LoadFacts and
-    # ConstantFacts compete for the real carrier bank under one avoided-transport
-    # score. ISA differences enter only through ff_resident_reg_table and the
-    # reserved-role mask derived above.
+    # LoadFacts and ConstantFacts share one measured carrier budget and search.
+    # Price repeated memory consumption, charging helper reloads for LoadFacts.
+    mov edi,[rip+ff_cache_count]
+    add edi,[rip+ff_const_pool_count]
+    sub rsp,16
+    mov [rsp+8],edi
+    test edi,edi; jz .farl_plan_done
+    call physical_plan_alloc
+    test rax,rax; jz .farl_plan_done
+    mov [rsp],rax
     xor r14d,r14d
-.farl_pick_unified:
-    cmp r14d,dword ptr [rip+ff_resident_limit]
-    jae .farl_done
-.farl_find_carrier_unified:
-    cmp r14d,dword ptr [rip+ff_resident_limit]
-    jae .farl_done
-    lea rax,[rip+ff_resident_reg_table]
-    movzx edx,byte ptr [rax+r14]
-    inc r14d
-    bt dword ptr [rip+ff_resident_reserved_mask],edx
-    jc .farl_find_carrier_unified
-
-    mov r12d,-1
-    xor r13d,r13d
-    xor r15d,r15d                    # 0=LoadFact, 1=ConstantFact
-    xor ebx,ebx
-.farl_scan_load_unified:
-    cmp ebx,dword ptr [rip+ff_cache_count]
-    jae .farl_scan_const_begin_unified
-    mov rax,[rip+ff_cache_resident_reg_ptr]
-    cmp dword ptr [rax+rbx*4],FF_CACHE_NONE
-    jne .farl_scan_load_next_unified
-    mov rax,[rip+ff_cache_use_count_ptr]
-    mov eax,[rax+rbx*4]
-    cmp eax,r13d
-    jbe .farl_scan_load_next_unified
-    mov r13d,eax
-    mov r12d,ebx
     xor r15d,r15d
-.farl_scan_load_next_unified:
-    inc ebx
-    jmp .farl_scan_load_unified
-.farl_scan_const_begin_unified:
     xor ebx,ebx
-.farl_scan_const_unified:
-    cmp ebx,dword ptr [rip+ff_const_pool_count]
-    jae .farl_have_best_unified
-    mov rax,[rip+ff_const_pool_resident_reg_ptr]
-    cmp dword ptr [rax+rbx*4],-1
-    jne .farl_scan_const_next_unified
-    mov rax,[rip+ff_const_pool_transport_demand_ptr]
-    mov eax,[rax+rbx*4]
-    cmp eax,r13d
-    jbe .farl_scan_const_next_unified
-    mov r13d,eax
-    mov r12d,ebx
+.farl_plan_fact:
+    test r15d,r15d; jnz .farl_plan_const
+    cmp ebx,[rip+ff_cache_count]; jb .farl_plan_load
     mov r15d,1
-.farl_scan_const_next_unified:
-    inc ebx
-    jmp .farl_scan_const_unified
-.farl_have_best_unified:
-    cmp r12d,-1
-    je .farl_done
-    test r13d,r13d
-    jz .farl_done
-    test r15d,r15d
-    jnz .farl_assign_const_unified
-    mov rax,[rip+ff_cache_resident_reg_ptr]
-    mov [rax+r12*4],edx
-    jmp .farl_pick_unified
-.farl_assign_const_unified:
+    xor ebx,ebx
+.farl_plan_const:
+    cmp ebx,[rip+ff_const_pool_count]; jae .farl_plan_search
+    mov rax,[rip+ff_const_pool_transport_demand_ptr]
+    mov r12d,[rax+rbx*4]
+    jmp .farl_plan_score
+.farl_plan_load:
+    mov rax,[rip+ff_cache_use_count_ptr]
+    mov r12d,[rax+rbx*4]
+    mov rax,[rip+ff_cache_last_load_pos_ptr]
+    mov edi,[rax+rbx*4]
+.farl_plan_price:
+    call ff_residency_reload_count
+    sub r12d,eax
+.farl_plan_score:
+    test r12d,r12d; jle .farl_plan_next
+    imul rax,r14,PPR_SIZE
+    add rax,[rsp]
+    imul rdx,r12,PRC_LOAD_AGU_TICKS
+    mov [rax],rdx
+    mov dword ptr [rax+8],1
+    mov [rax+24],ebx
+    mov [rax+28],r15d
+    inc r14d
+.farl_plan_next:
+    inc ebx; jmp .farl_plan_fact
+.farl_plan_search:
+    xor ebx,ebx
+    xor edx,edx
+.farl_plan_budget:
+    cmp ebx,[rip+ff_resident_limit]; jae .farl_plan_run
+    lea rax,[rip+ff_resident_reg_table]
+    movzx ecx,byte ptr [rax+rbx]
+    bt dword ptr [rip+ff_resident_reserved_mask],ecx
+    jc .farl_plan_budget_next
+    inc edx
+.farl_plan_budget_next:
+    inc ebx; jmp .farl_plan_budget
+.farl_plan_run:
+    mov rdi,[rsp]
+    mov esi,r14d
+    xor ecx,ecx
+    xor r8d,r8d
+    xor r9d,r9d
+    sub rsp,16
+    mov qword ptr [rsp],0
+    call physical_plan_resolve
+    add rsp,16
+    # Constants have invocation lifetime and require helper-preserved carriers.
+    # Realize those constrained facts first, then packet-lifetime LoadFacts.
+    mov dword ptr [rsp+12],1
+    xor r15d,r15d                    # occupied physical-carrier mask
+.farl_plan_pass:
+    xor ebx,ebx
+.farl_plan_realize:
+    cmp ebx,r14d; jae .farl_plan_pass_done
+    imul rax,rbx,PPR_SIZE
+    add rax,[rsp]
+    cmp dword ptr [rax+16],0; je .farl_plan_realize_next
+    mov r12d,[rax+24]
+    mov r13d,[rax+28]
+    cmp r13d,[rsp+12]; jne .farl_plan_realize_next
+    xor edx,edx
+.farl_plan_reg:
+    cmp edx,[rip+ff_resident_limit]; jae .farl_plan_realize_next
+    lea rax,[rip+ff_resident_reg_table]
+    movzx edi,byte ptr [rax+rdx]
+    inc edx
+    bt dword ptr [rip+ff_resident_reserved_mask],edi
+    jc .farl_plan_reg
+    bt r15d,edi
+    jc .farl_plan_reg
+    test r13d,r13d; jz .farl_plan_assign_load
+    call ff_resident_survives_preload_helpers
+    test eax,eax; jz .farl_plan_reg
     mov rax,[rip+ff_const_pool_resident_reg_ptr]
-    mov [rax+r12*4],edx
-    jmp .farl_pick_unified
-.farl_done:
+    jmp .farl_plan_assign
+.farl_plan_assign_load:
+    mov rax,[rip+ff_cache_resident_reg_ptr]
+.farl_plan_assign:
+    mov [rax+r12*4],edi
+    bts r15d,edi
+.farl_plan_realize_next:
+    inc ebx; jmp .farl_plan_realize
+.farl_plan_pass_done:
+    dec dword ptr [rsp+12]
+    jns .farl_plan_pass
+.farl_plan_free:
+    mov rdi,[rsp]
+    mov esi,[rsp+8]
+    call physical_plan_free
+.farl_plan_done:
+    add rsp,16
     xor eax,eax
     jmp .farl_ret
 .farl_fail:
@@ -3098,6 +3097,37 @@ ff_assign_resident_loads:
     pop r12
     pop rbx
     ret
+
+# Count potential helper reloads before this fact's last physical consumer.
+# Stores have a direct region as well as a helper region; use the conservative
+# helper cost. Reloads after the last consumer carry zero lifetime cost.
+ff_residency_reload_count:
+    push rbx; push r12; push r13
+    mov r12d,edi
+    xor ebx,ebx
+    xor r13d,r13d
+.frrc_loop:
+    cmp ebx,r12d; jge .frrc_done
+    mov rax,[rip+ff_physical_order_ptr]
+    mov eax,[rax+rbx*4]
+    shl rax,5
+    add rax,[rip+ff_ops_ptr]
+    mov edx,[rax]
+    cmp edx,OP_STORE; je .frrc_helper
+    cmp edx,OP_IINDEX; jb .frrc_load
+    cmp edx,OP_ITOF; jbe .frrc_helper
+.frrc_load:
+    cmp edx,OP_LOAD; jne .frrc_next
+    mov edi,[rax+16]
+    mov rax,[rip+ff_access_cache_slot_ptr]
+    cmp dword ptr [rax+rdi*4],FF_CACHE_NONE; jne .frrc_next
+.frrc_helper:
+    inc r13d
+.frrc_next:
+    inc ebx; jmp .frrc_loop
+.frrc_done:
+    mov eax,r13d
+    pop r13; pop r12; pop rbx; ret
 
 # 1.3.74 burn-level AddressFact -> MachineFact allocation.
 # The carrier bank is architectural capacity, never a workload threshold.  If
@@ -3173,14 +3203,7 @@ ff_emit_address_gpr_residents:
     mov dil,0x8B; call ff_emit_u8
     mov eax,r12d; and eax,7; shl eax,3; or eax,0x84; mov edi,eax; call ff_emit_u8
     mov dil,0x24; call ff_emit_u8
-    mov edi,dword ptr [rip+ff_cache_count]
-    # The canonical frame-coordinate namespace remains reserved because constant
-    # and transient helper stack offsets are one shared physical numbering domain.
-    # Native512 no longer emits coord stores/loads, so these bytes are address
-    # space only, not memory traffic; removing the namespace itself belongs to a
-    # later whole-frame renumbering, not a partial compatibility shim.
-    add edi,dword ptr [rip+ff_const_pool_count]
-    imul edi,edi,FIELD_LANES*4
+    mov edi,dword ptr [rip+ff_pool_stack_bytes]
     lea edi,[rdi+rbx*8]
     call ff_emit_u32
     test eax,eax
@@ -3324,6 +3347,7 @@ ff_reduce_square_foldable:
     cmp r14d,OP_MUL; je .frsf_read2
     cmp r14d,OP_DIV; je .frsf_read2
     cmp r14d,OP_FMA_ACC; je .frsf_readfma
+    cmp r14d,OP_NATIVE_MATH; je .frsf_read1
     cmp r14d,OP_SQRT; je .frsf_read1
     cmp r14d,OP_TRUNC; je .frsf_read1
     cmp r14d,OP_MOV; je .frsf_read1
@@ -3352,10 +3376,11 @@ ff_reduce_square_foldable:
     cmp r14d,OP_SUB; je .frsf_maybe_def
     cmp r14d,OP_MUL; je .frsf_maybe_def
     cmp r14d,OP_DIV; je .frsf_maybe_def
+    cmp r14d,OP_NATIVE_MATH; je .frsf_maybe_def
     cmp r14d,OP_SQRT; je .frsf_maybe_def
     cmp r14d,OP_TRUNC; je .frsf_maybe_def
     cmp r14d,OP_MOV; je .frsf_maybe_def
-    cmp r14d,OP_ITOF32; je .frsf_maybe_def
+    cmp r14d,OP_ITOF; je .frsf_maybe_def
     cmp r14d,OP_FMA_ACC; jne .frsf_next
 .frsf_maybe_def:
     cmp dword ptr [rdx+4],r13d
@@ -3388,34 +3413,6 @@ ff_count_access_use:
 .fcau_ret:
     ret
 
-# Materialize every selected resident from canonical stack authority. This is
-# used only after the fallback preload paths, where runtime helpers produced the
-# stack cache before any resident carrier existed.
-ff_emit_materialize_all_residents:
-    push rbx
-    xor ebx,ebx
-.fmatr_loop:
-    cmp ebx,dword ptr [rip+ff_cache_count]
-    jae .fmatr_done
-    mov rax,[rip+ff_cache_resident_reg_ptr]
-    mov edi,[rax+rbx*4]
-    cmp edi,FF_CACHE_NONE
-    je .fmatr_next
-    mov esi,ebx
-    call ff_emit_cache_load
-    test eax,eax
-    jnz .fmatr_fail
-.fmatr_next:
-    inc ebx
-    jmp .fmatr_loop
-.fmatr_done:
-    xor eax,eax
-    pop rbx
-    ret
-.fmatr_fail:
-    mov eax,1
-    pop rbx
-    ret
 
 # edi=physical SIMD register -> eax=1 when the runtime preload helpers preserve
 # that carrier across later helper calls in the same boundary episode. This is
@@ -3497,6 +3494,9 @@ ff_emit_reload_residents:
     mov edi,[rax+rbx*4]
     cmp edi,FF_CACHE_NONE
     je .ferr_next
+    call ff_resident_survives_preload_helpers
+    test eax,eax
+    jnz .ferr_next
     mov rax,[rip+ff_cache_last_load_pos_ptr]
     cmp dword ptr [rax+rbx*4],r12d
     jle .ferr_next
@@ -3508,25 +3508,6 @@ ff_emit_reload_residents:
     inc ebx
     jmp .ferr_loop
 .ferr_loads_done:
-    xor ebx,ebx
-.ferr_const_loop:
-    cmp ebx,dword ptr [rip+ff_const_pool_count]
-    jae .ferr_done
-    mov rax,[rip+ff_const_pool_resident_reg_ptr]
-    mov edi,[rax+rbx*4]
-    cmp edi,-1
-    je .ferr_const_next
-    mov rax,[rip+ff_const_pool_last_use_pos_ptr]
-    cmp dword ptr [rax+rbx*4],r12d
-    jle .ferr_const_next
-    mov esi,dword ptr [rip+ff_cache_count]
-    add esi,ebx
-    call ff_emit_cache_load
-    test eax,eax
-    jnz .ferr_fail
-.ferr_const_next:
-    inc ebx
-    jmp .ferr_const_loop
 .ferr_done:
     xor eax,eax
     pop r12
@@ -3538,38 +3519,6 @@ ff_emit_reload_residents:
     pop rbx
     ret
 
-# Load immutable access edi into physical SIMD register esi from the
-# compile-time episode cache, whether the cache slot is stack-backed or already
-# resident. Used by 1.3.3 algebraic physicalizations without reissuing memory.
-ff_emit_access_value:
-    push rbx
-    push r12
-    mov ebx,edi
-    mov r12d,esi
-    cmp ebx,dword ptr [rip+ff_access_count]
-    jae .feav_bad
-    mov rax,[rip+ff_access_cache_slot_ptr]
-    mov esi,[rax+rbx*4]
-    cmp esi,FF_CACHE_NONE
-    je .feav_bad
-    mov rax,[rip+ff_cache_resident_reg_ptr]
-    mov edx,[rax+rsi*4]
-    cmp edx,FF_CACHE_NONE
-    je .feav_stack
-    mov edi,r12d
-    mov esi,edx
-    call ff_emit_vmov
-    jmp .feav_done
-.feav_stack:
-    mov edi,r12d
-    call ff_emit_cache_load
-    jmp .feav_done
-.feav_bad:
-    mov eax,1
-.feav_done:
-    pop r12
-    pop rbx
-    ret
 
 # 1.3.48 consumer-local immutable ValueFact fold.
 #
@@ -3618,6 +3567,7 @@ ff_consumer_local_foldable:
     cmp eax,OP_SUB; je .fclf_read2
     cmp eax,OP_MUL; je .fclf_read2
     cmp eax,OP_DIV; je .fclf_read2
+    cmp eax,OP_NATIVE_MATH; je .fclf_read1_def
     cmp eax,OP_SQRT; je .fclf_read1_def
     cmp eax,OP_TRUNC; je .fclf_read1_def
     cmp eax,OP_MOV; je .fclf_read1_def
@@ -3626,7 +3576,7 @@ ff_consumer_local_foldable:
     cmp eax,OP_FMA_ACC; je .fclf_fma
     cmp eax,OP_LOAD; je .fclf_defonly
     cmp eax,OP_CONST; je .fclf_defonly
-    cmp eax,OP_ITOF32; je .fclf_defonly
+    cmp eax,OP_ITOF; je .fclf_defonly
     jmp .fclf_next
 .fclf_read2:
     cmp dword ptr [rdx+8],r12d; je .fclf_fail
@@ -3705,6 +3655,9 @@ ff_emit_vbin_stack:
     mov ebx,edi
     mov r12d,esi                    # dst
     mov r13d,edx                    # src A
+    mov rax,[rip+ff_cache_stack_offset_ptr]
+    mov ecx,[rax+rcx*4]
+    test ecx,ecx; js .fevbs_bad
 .if FIELD_LANES == 16
     cmp r12d,31; ja .fevbs_bad
     cmp r13d,31; ja .fevbs_bad
@@ -3715,12 +3668,12 @@ ff_emit_vbin_stack:
     mov edx,r12d; shr edx,3; and edx,1; xor edx,1; shl edx,7; or eax,edx
     mov edx,r12d; shr edx,4; and edx,1; xor edx,1; shl edx,4; or eax,edx
     mov edi,eax; call ff_emit_u8
-    mov eax,r13d; and eax,15; xor eax,15; shl eax,3; or eax,4; mov edi,eax; call ff_emit_u8
+    mov eax,r13d; and eax,15; xor eax,15; shl eax,3; or eax,4; mov edi,eax; call ff_emit_payload_prefix
     mov eax,r13d; shr eax,4; and eax,1; xor eax,1; shl eax,3; or eax,0x40; mov edi,eax; call ff_emit_u8
     mov edi,ebx; call ff_emit_u8
     mov eax,r12d; and eax,7; shl eax,3; or eax,0x84; mov edi,eax; call ff_emit_u8
     mov dil,0x24; call ff_emit_u8
-    mov edi,ecx; imul edi,edi,FIELD_LANES*4; call ff_emit_u32
+    mov edi,ecx; call ff_emit_u32
 .else
     cmp r12d,15; ja .fevbs_bad
     cmp r13d,15; ja .fevbs_bad
@@ -3728,11 +3681,11 @@ ff_emit_vbin_stack:
     mov eax,0xE1
     test r12d,8; jz 13481f; xor eax,0x80
 13481: mov edi,eax; call ff_emit_u8
-    mov eax,r13d; and eax,15; shl eax,3; mov edi,0x7C; sub edi,eax; call ff_emit_u8
+    mov eax,r13d; and eax,15; shl eax,3; mov edi,0x7C; sub edi,eax; call ff_emit_payload_prefix
     mov edi,ebx; call ff_emit_u8
     mov eax,r12d; and eax,7; shl eax,3; or eax,0x84; mov edi,eax; call ff_emit_u8
     mov dil,0x24; call ff_emit_u8
-    mov edi,ecx; imul edi,edi,FIELD_LANES*4; call ff_emit_u32
+    mov edi,ecx; call ff_emit_u32
 .endif
     xor eax,eax
     jmp .fevbs_ret
@@ -3769,8 +3722,10 @@ ff_emit_stack_add:
 ff_emit_cache_store_from:
     push rbx
     push r12
-    mov r12d,edi
+    mov rax,[rip+ff_cache_stack_offset_ptr]
+    mov r12d,[rax+rdi*4]
     mov ebx,esi
+    test r12d,r12d; js .fecs_done
 .if FIELD_LANES == 16
     cmp ebx,31; ja .fecs_bad
     mov dil,0x62; call ff_emit_u8
@@ -3778,7 +3733,7 @@ ff_emit_cache_store_from:
     test ebx,8; jz 301f; xor eax,0x80
 301: test ebx,16; jz 302f; xor eax,0x10
 302: mov edi,eax; call ff_emit_u8
-    mov dil,0x7C; call ff_emit_u8
+    mov edi,0x7C; call ff_emit_payload_prefix
     mov dil,0x48; call ff_emit_u8
     mov dil,0x11; call ff_emit_u8
     mov eax,ebx; and eax,7; shl eax,3; or eax,0x84; mov edi,eax; call ff_emit_u8
@@ -3789,14 +3744,14 @@ ff_emit_cache_store_from:
     mov eax,0xE1
     test ebx,8; jz 303f; xor eax,0x80
 303: mov edi,eax; call ff_emit_u8
-    mov dil,0x7C; call ff_emit_u8
+    mov edi,0x7C; call ff_emit_payload_prefix
     mov dil,0x11; call ff_emit_u8
     mov eax,ebx; and eax,7; shl eax,3; or eax,0x84; mov edi,eax; call ff_emit_u8
     mov dil,0x24; call ff_emit_u8
 .endif
     mov edi,r12d
-    imul edi,edi,FIELD_LANES*4
     call ff_emit_u32
+.fecs_done:
     xor eax,eax
     pop r12
     pop rbx
@@ -3867,6 +3822,9 @@ ff_emit_accept_helper_result:
 ff_emit_cache_load:
     push rbx
     mov ebx,edi
+    mov rax,[rip+ff_cache_stack_offset_ptr]
+    mov esi,[rax+rsi*4]
+    test esi,esi; js .fecl_bad
 .if FIELD_LANES == 16
     cmp ebx,31; ja .fecl_bad
     mov dil,0x62; call ff_emit_u8
@@ -3874,7 +3832,7 @@ ff_emit_cache_load:
     test ebx,8; jz 203f; xor eax,0x80
 203: test ebx,16; jz 205f; xor eax,0x10
 205: mov edi,eax; call ff_emit_u8
-    mov dil,0x7C; call ff_emit_u8; mov dil,0x48; call ff_emit_u8; mov dil,0x10; call ff_emit_u8
+    mov edi,0x7C; call ff_emit_payload_prefix; mov dil,0x48; call ff_emit_u8; mov dil,0x10; call ff_emit_u8
     mov eax,ebx; and eax,7; shl eax,3; or eax,0x84; mov edi,eax; call ff_emit_u8
     mov dil,0x24; call ff_emit_u8
 .else
@@ -3883,12 +3841,12 @@ ff_emit_cache_load:
     mov eax,0xE1
     test ebx,8; jz 13f; xor eax,0x80
 13: mov edi,eax; call ff_emit_u8
-    mov dil,0x7C; call ff_emit_u8
+    mov edi,0x7C; call ff_emit_payload_prefix
     mov dil,0x10; call ff_emit_u8
     mov eax,ebx; and eax,7; shl eax,3; or eax,0x84; mov edi,eax; call ff_emit_u8
     mov dil,0x24; call ff_emit_u8
 .endif
-    mov edi,esi; imul edi,edi,FIELD_LANES*4; call ff_emit_u32
+    mov edi,esi; call ff_emit_u32
     pop rbx
     ret
 .fecl_bad:
@@ -3926,10 +3884,10 @@ ff_emit_addr_pool_init:
     mov dil,0x4C; call ff_emit_u8
     mov dil,0x8B; call ff_emit_u8
     mov dil,0x1D; call ff_emit_u8
-    mov rdx,FIELD_RUNTIME_LINEAR_DELTA_PTR_VA
+    mov rdx,qword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_LINEAR_DELTA_PTR_VA]
     mov rax,[rip+ff_emit_ptr]
     mov rcx,[rip+ff_code_ptr]; sub rax,rcx
-    add rax,FIELD_RUNTIME_GENERATED_VA
+    add rax,qword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_GENERATED_VA]
     add rax,4
     sub rdx,rax
     mov edi,edx; call ff_emit_u32
@@ -3959,9 +3917,7 @@ ff_emit_addr_pool_init:
     mov dil,0x89; call ff_emit_u8
     mov dil,0x84; call ff_emit_u8
     mov dil,0x24; call ff_emit_u8
-    mov edi,dword ptr [rip+ff_cache_count]
-    add edi,dword ptr [rip+ff_const_pool_count]
-    imul edi,edi,FIELD_LANES*4
+    mov edi,dword ptr [rip+ff_pool_stack_bytes]
     lea edi,[rdi+rbx*8]
     call ff_emit_u32
     test eax,eax; jnz .feapi_bad
@@ -3980,26 +3936,85 @@ ff_emit_addr_pool_init:
     pop rbx
     ret
 
-# Materialize each unique immutable f32 vector constant exactly once per
-# generated function invocation. The stack frame persists across every vector
-# episode, so hot arithmetic never rebroadcasts compile-time constants.
+# One backing layout: only helper-clobbered/nonresident LoadFact packets, then
+# nonresident scalar constants. Preserved LoadFacts have no stack authority.
+# Resident constants have no stack copy. The address arena follows this exact
+# byte count; no reserved vector-constant namespace survives.
+ff_assign_pool_layout:
+    xor edx,edx
+    xor ecx,ecx
+    mov r8,[rip+ff_cache_stack_offset_ptr]
+    mov r9,[rip+ff_cache_resident_reg_ptr]
+.fapl_load_loop:
+    cmp ecx,[rip+ff_cache_count]; jae .fapl_constants
+    mov dword ptr [r8+rcx*4],-1
+    mov edi,[r9+rcx*4]
+    cmp edi,FF_CACHE_NONE; je .fapl_load_backing
+    call ff_resident_survives_preload_helpers
+    test eax,eax; jnz .fapl_load_next
+.fapl_load_backing:
+    mov [r8+rcx*4],edx
+    add edx,FF_PACKET_BYTES
+.fapl_load_next:
+    inc ecx; jmp .fapl_load_loop
+.fapl_constants:
+    mov r8,[rip+ff_const_pool_stack_offset_ptr]
+    mov r9,[rip+ff_const_pool_resident_reg_ptr]
+    xor ecx,ecx
+.fapl_loop:
+    cmp ecx,[rip+ff_const_pool_count]; jae .fapl_done
+    mov dword ptr [r8+rcx*4],-1
+    cmp dword ptr [r9+rcx*4],-1; jne .fapl_next
+    mov [r8+rcx*4],edx
+    add edx,[rip+ff_element_bytes]
+.fapl_next:
+    inc ecx; jmp .fapl_loop
+.fapl_done:
+    add edx,7
+    and edx,-8
+    mov [rip+ff_pool_stack_bytes],edx
+    xor eax,eax
+    ret
+
+# Initialize invocation-lifetime constants directly in their preserved carriers.
+# Nonresident facts retain only their exact scalar bits; packets broadcast on use.
 ff_emit_const_pool_init:
     push rbx
     xor ebx,ebx
 .fecpi_loop:
-    cmp ebx,dword ptr [rip+ff_const_pool_count]
-    jae .fecpi_done
+    cmp ebx,[rip+ff_const_pool_count]; jae .fecpi_done
+    mov rax,[rip+ff_const_pool_resident_reg_ptr]
+    mov esi,[rax+rbx*4]
+    cmp esi,-1; je .fecpi_scalar
     mov rax,[rip+ff_const_pool_bits_ptr]
-    mov edi,[rax+rbx*4]
-    xor esi,esi
+    mov rdi,[rax+rbx*8]
     call ff_emit_const_real
     test eax,eax; jnz .fecpi_bad
-    mov edi,dword ptr [rip+ff_cache_count]
-    add edi,ebx
-    call ff_emit_cache_store_simd0
-    test eax,eax; jnz .fecpi_bad
-    inc ebx
-    jmp .fecpi_loop
+    jmp .fecpi_next
+.fecpi_scalar:
+    # mov dword/qword ptr [rsp+offset],exact bits (RAX is emitter scratch).
+    cmp dword ptr [rip+ff_element_bytes],8; jne .fecpi_scalar32
+    mov dil,0x48; call ff_emit_u8
+    mov dil,0xB8; call ff_emit_u8
+    mov rax,[rip+ff_const_pool_bits_ptr]
+    mov edi,[rax+rbx*8]; call ff_emit_u32
+    mov rax,[rip+ff_const_pool_bits_ptr]
+    mov edi,[rax+rbx*8+4]; call ff_emit_u32
+    mov dil,0x48; call ff_emit_u8
+    mov dil,0x89; call ff_emit_u8
+    jmp .fecpi_scalar_addr
+.fecpi_scalar32:
+    mov dil,0xC7; call ff_emit_u8
+.fecpi_scalar_addr:
+    mov dil,0x84; call ff_emit_u8
+    mov dil,0x24; call ff_emit_u8
+    mov rax,[rip+ff_const_pool_stack_offset_ptr]
+    mov edi,[rax+rbx*4]; call ff_emit_u32
+    cmp dword ptr [rip+ff_element_bytes],8; je .fecpi_next
+    mov rax,[rip+ff_const_pool_bits_ptr]
+    mov edi,[rax+rbx*8]; call ff_emit_u32
+.fecpi_next:
+    inc ebx; jmp .fecpi_loop
 .fecpi_done:
     xor eax,eax
     pop rbx
@@ -4009,35 +4024,38 @@ ff_emit_const_pool_init:
     pop rbx
     ret
 
-# Reload immutable vector constants into the physical profile's resident bank.
-# Native256 carrier availability is derived from the Physical DAG: reduction,
-# v3, and procedural-index authorities reserve only the registers they actually
-# occupy. Boundary/general helpers may clobber reloadable residents, so generated
-# code restores them after helper edges instead of giving helpers permanent ownership.
-ff_emit_const_residents:
-    # 1.3.6 exact-bit constant authority is ISA-neutral; only encoding differs.
+# edi=physical destination, esi=ConstantFact slot. Broadcast exact scalar backing.
+ff_emit_const_load:
     push rbx
-    xor ebx,ebx
-.fecrl_loop:
-    cmp ebx,dword ptr [rip+ff_const_pool_count]
-    jae .fecrl_done
-    mov rax,[rip+ff_const_pool_resident_reg_ptr]
-    mov edi,[rax+rbx*4]
-    cmp edi,-1
-    je .fecrl_next
-    mov esi,dword ptr [rip+ff_cache_count]
-    add esi,ebx
-    call ff_emit_cache_load
-    test eax,eax; jnz .fecrl_bad
-.fecrl_next:
-    inc ebx
-    jmp .fecrl_loop
-.fecrl_done:
-    xor eax,eax
+    push r12
+    mov ebx,edi
+    mov rax,[rip+ff_const_pool_stack_offset_ptr]
+    mov r12d,[rax+rsi*4]
+    test r12d,r12d; js .feconstl_bad
+.if FIELD_LANES == 16
+    mov dil,0x62; call ff_emit_u8
+    mov eax,0xF2
+    test ebx,8; jz 1f; xor eax,0x80
+1:  test ebx,16; jz 2f; xor eax,0x10
+2:  mov edi,eax; call ff_emit_u8
+    mov edi,0x7D; call ff_emit_payload_w_prefix
+    mov dil,0x48; call ff_emit_u8
+.else
+    mov dil,0xC4; call ff_emit_u8
+    mov eax,0xE2; test ebx,8; jz 1f; xor eax,0x80
+1:  mov edi,eax; call ff_emit_u8
+    mov dil,0x7D; call ff_emit_u8
+.endif
+    mov edi,[rip+ff_broadcast_opcode]; call ff_emit_u8
+    mov edi,ebx; and edi,7; shl edi,3; or edi,0x84; call ff_emit_u8
+    mov dil,0x24; call ff_emit_u8
+    mov edi,r12d; call ff_emit_u32
+    pop r12
     pop rbx
     ret
-.fecrl_bad:
+.feconstl_bad:
     mov eax,1
+    pop r12
     pop rbx
     ret
 
@@ -4053,7 +4071,7 @@ ff_emit_movzx_eax_runtime_byte_ptr_array:
     mov dil,0x05; call ff_emit_u8
     mov rax,[rip+ff_emit_ptr]
     mov rcx,[rip+ff_code_ptr]; sub rax,rcx
-    add rax,FIELD_RUNTIME_GENERATED_VA
+    add rax,qword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_GENERATED_VA]
     add rax,4
     sub rbx,rax
     mov edi,ebx; call ff_emit_u32
@@ -4082,10 +4100,10 @@ ff_emit_field_base_rax:
     mov dil,0x48; call ff_emit_u8
     mov dil,0x8B; call ff_emit_u8
     mov dil,0x05; call ff_emit_u8
-    mov rdx,FIELD_RUNTIME_FIELD_DATA_PTR_VA
+    mov rdx,qword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_FIELD_DATA_PTR_VA]
     mov rax,[rip+ff_emit_ptr]
     mov rcx,[rip+ff_code_ptr]; sub rax,rcx
-    add rax,FIELD_RUNTIME_GENERATED_VA
+    add rax,qword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_GENERATED_VA]
     add rax,4
     sub rdx,rax
     mov edi,edx; call ff_emit_u32
@@ -4140,9 +4158,7 @@ ff_emit_addr_fact_load:
     mov dil,0x8B; call ff_emit_u8
     mov dil,0x84; call ff_emit_u8
     mov dil,0x24; call ff_emit_u8
-    mov edi,dword ptr [rip+ff_cache_count]
-    add edi,dword ptr [rip+ff_const_pool_count]
-    imul edi,edi,FIELD_LANES*4
+    mov edi,dword ptr [rip+ff_pool_stack_bytes]
     lea edi,[rdi+rbx*8]
     call ff_emit_u32
     pop rbx
@@ -4192,11 +4208,11 @@ ff_emit_direct_regular_load_to:
 206: xor eax,0x40                       # X=0 -> R12 is the SIB index
     test r14d,8; jz 207f; xor eax,0x20
 207: mov edi,eax; call ff_emit_u8
-    mov dil,0x7C; call ff_emit_u8
+    mov edi,0x7C; call ff_emit_payload_prefix
     mov dil,0x48; call ff_emit_u8
     mov dil,0x10; call ff_emit_u8
     mov eax,r13d; and eax,7; shl eax,3; or eax,0x04; mov edi,eax; call ff_emit_u8
-    mov eax,r14d; and eax,7; or eax,0xA0; mov edi,eax; call ff_emit_u8
+    mov eax,r14d; and eax,7; or eax,[rip+ff_q_sib_scale]; mov edi,eax; call ff_emit_u8
     xor eax,eax
     jmp .fedrlt_done
 .else
@@ -4208,10 +4224,10 @@ ff_emit_direct_regular_load_to:
 41: xor eax,0x40
     test r14d,8; jz 42f; xor eax,0x20
 42: mov edi,eax; call ff_emit_u8
-    mov dil,0x7C; call ff_emit_u8
+    mov edi,0x7C; call ff_emit_payload_prefix
     mov dil,0x10; call ff_emit_u8
     mov eax,r13d; and eax,7; shl eax,3; or eax,0x04; mov edi,eax; call ff_emit_u8
-    mov eax,r14d; and eax,7; or eax,0xA0; mov edi,eax; call ff_emit_u8
+    mov eax,r14d; and eax,7; or eax,[rip+ff_q_sib_scale]; mov edi,eax; call ff_emit_u8
     xor eax,eax
     jmp .fedrlt_done
 .endif
@@ -4245,11 +4261,11 @@ ff_emit_direct_regular_store_from:
     mov ecx,ebx; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,7; or eax,ecx
     mov ecx,ebx; shr ecx,4; and ecx,1; xor ecx,1; shl ecx,4; or eax,ecx
     mov edi,eax; call ff_emit_u8
-    mov dil,0x7C; call ff_emit_u8
+    mov edi,0x7C; call ff_emit_payload_prefix
     mov dil,0x49; call ff_emit_u8
     mov dil,0x11; call ff_emit_u8
     mov eax,ebx; and eax,7; shl eax,3; or eax,0x04; mov edi,eax; call ff_emit_u8
-    mov dil,0x90; call ff_emit_u8
+    mov edi,[rip+ff_q_sib_scale_low]; call ff_emit_u8
 .else
     # vmaskmovps [rax+rdx*4],ymm4,ymmSRC
     mov dil,0xC4; call ff_emit_u8
@@ -4257,9 +4273,9 @@ ff_emit_direct_regular_store_from:
     test ebx,8; jz 73f; xor eax,0x80
 73: mov edi,eax; call ff_emit_u8
     mov dil,0x5D; call ff_emit_u8
-    mov dil,0x2E; call ff_emit_u8
+    mov edi,[rip+ff_mask_store_opcode]; call ff_emit_u8
     mov eax,ebx; and eax,7; shl eax,3; or eax,0x04; mov edi,eax; call ff_emit_u8
-    mov dil,0x90; call ff_emit_u8
+    mov edi,[rip+ff_q_sib_scale_low]; call ff_emit_u8
 .endif
     xor eax,eax
     pop rbx
@@ -4276,9 +4292,9 @@ ff_emit_direct_gather:
     call ff_emit_field_base_rax
     pop rdi
 .if FIELD_LANES == 16
-    lea rdi,[rip+cg_direct_gather512]; mov esi,cg_direct_gather512_end-cg_direct_gather512; call ff_emit_bytes
+    mov rdi,[rip+ff_codegen_fragments+0]; mov rsi,[rip+ff_codegen_fragments+8]; call ff_emit_bytes
 .else
-    lea rdi,[rip+cg_direct_gather256]; mov esi,cg_direct_gather256_end-cg_direct_gather256; call ff_emit_bytes
+    mov rdi,[rip+ff_codegen_fragments+0]; mov rsi,[rip+ff_codegen_fragments+8]; call ff_emit_bytes
 .endif
     ret
 
@@ -4290,10 +4306,14 @@ ff_emit_direct_gather:
 ff_derive_field_groupfact:
     push rbx
     push r12
+    mov eax,dword ptr [rip+ff_common_rank]
+    mov dword ptr [rip+group_logical_rank],eax
     mov dword ptr [rip+ff_machine_group_safe],1
+    mov dword ptr [rip+ff_group_logical_mask],0
     mov dword ptr [rip+group_body_factor],1
     mov dword ptr [rip+group_carrier_factor],1
-    mov dword ptr [rip+group_lane_factor],FIELD_LANES
+    mov eax,[rip+ff_packet_lanes]
+    mov dword ptr [rip+group_lane_factor],eax
     mov dword ptr [rip+group_relation_mask],GF_REL_INDEPENDENT|GF_REL_OPERATOR
     xor ebx,ebx
 .fdfg_scan:
@@ -4304,6 +4324,9 @@ ff_derive_field_groupfact:
     imul rax,OP_SIZE
     mov r12,[rip+ff_ops_ptr]
     add r12,rax
+    mov eax,[r12]
+    cmp eax,OP_NOP; je .fdfg_next
+    call ff_group_note_logical_carriers
     mov eax,[r12]
     cmp eax,OP_NOP; je .fdfg_next
     cmp eax,OP_CONST; je .fdfg_next
@@ -4321,8 +4344,8 @@ ff_derive_field_groupfact:
     cmp eax,dword ptr [rip+ff_access_count]; jae .fdfg_unsafe
     mov rdx,[rip+ff_access_field_ptr]
     movzx eax,byte ptr [rdx+rax]
-    mov rdx,[rip+ff_field_mode_ptr]
-    cmp byte ptr [rdx+rax],MODE_INPUT
+    mov rdx,[rip+ff_field_written_fact_ptr]
+    cmp byte ptr [rdx+rax],0
     jne .fdfg_unsafe
     jmp .fdfg_next
 .fdfg_reduce:
@@ -4332,6 +4355,7 @@ ff_derive_field_groupfact:
     jmp .fdfg_scan
 .fdfg_unsafe:
     mov dword ptr [rip+ff_machine_group_safe],0
+    call synthesize_group_fact
     xor eax,eax
     pop r12
     pop rbx
@@ -4356,10 +4380,14 @@ ff_derive_field_groupfact:
     mov dword ptr [rip+ff_group_used_simd_mask],0
 .if FIELD_LANES == 16
     # Mature logical v0..v3 and hidden reduction carrier.
-    bts dword ptr [rip+ff_group_used_simd_mask],1
-    bts dword ptr [rip+ff_group_used_simd_mask],2
-    bts dword ptr [rip+ff_group_used_simd_mask],3
-    bts dword ptr [rip+ff_group_used_simd_mask],4
+    xor ecx,ecx
+.fdfg_mature_live:
+    cmp ecx,FF_VREG_COUNT; jae .fdfg_mature_done
+    bt dword ptr [rip+ff_group_logical_mask],ecx; jnc .fdfg_mature_next
+    lea edx,[rcx+FF_VREG_BASE]
+    bts dword ptr [rip+ff_group_used_simd_mask],edx
+.fdfg_mature_next: inc ecx; jmp .fdfg_mature_live
+.fdfg_mature_done:
     cmp dword ptr [rip+ff_physical_reduce_depth],-1
     je 301f
     bts dword ptr [rip+ff_group_used_simd_mask],5
@@ -4373,10 +4401,11 @@ ff_derive_field_groupfact:
 302:
     cmp ecx,FF_VREG_COUNT
     jae 303f
+    bt dword ptr [rip+ff_group_logical_mask],ecx; jnc 3021f
     lea rax,[rip+ff_vreg_phys_table]
     movzx edx,byte ptr [rax+rcx]
     bts dword ptr [rip+ff_group_used_simd_mask],edx
-    inc ecx
+3021: inc ecx
     jmp 302b
 303:
 .endif
@@ -4433,7 +4462,14 @@ ff_derive_field_groupfact:
     jmp 308b
 309:
     mov dword ptr [rip+ff_group_free_count],r8d
-    mov eax,FF_VREG_COUNT
+    xor eax,eax; xor ecx,ecx
+    lea rdx,[rip+ff_group_logical_slots]
+.fdfg_pack_slots:
+    mov dword ptr [rdx+rcx*4],-1
+    bt dword ptr [rip+ff_group_logical_mask],ecx; jnc .fdfg_pack_next
+    mov [rdx+rcx*4],eax; inc eax
+.fdfg_pack_next:
+    inc ecx; cmp ecx,FF_VREG_COUNT; jb .fdfg_pack_slots
     mov dword ptr [rip+ff_group_bundle_regs],eax
     test eax,eax
     jz .fdfg_no_group
@@ -4464,6 +4500,7 @@ ff_derive_field_groupfact:
     mov dword ptr [rip+group_body_factor],1
     mov dword ptr [rip+group_carrier_factor],1
 .fdfg_store_done:
+    call synthesize_group_fact
     xor eax,eax
     pop r12
     pop rbx
@@ -4488,7 +4525,7 @@ ff_group_packet0_cache_reg:
 
 # edi=packet index, esi=logical vreg -> eax=physical SIMD register / -1.
 # Packet zero retains the mature Vector mapping.  Every later packet consumes
-# exactly one disjoint four-vreg bundle from the real free carrier bank.
+# exactly the graph-referenced logical carrier bundle from the real free carrier bank.
 ff_group_vreg_reg:
     cmp esi,FF_VREG_COUNT
     jae .fgvr_bad
@@ -4503,7 +4540,9 @@ ff_group_vreg_reg:
     ret
 .fgvr_later:
     dec edi
-    imul edi,FF_VREG_COUNT
+    imul edi,dword ptr [rip+ff_group_bundle_regs]
+    lea rax,[rip+ff_group_logical_slots]
+    mov esi,[rax+rsi*4]; cmp esi,-1; je .fgvr_bad
     add edi,esi
     cmp edi,dword ptr [rip+ff_group_free_count]
     jae .fgvr_bad
@@ -4615,7 +4654,7 @@ ff_group_source_reg:
     mov edi,r12d
     mov esi,ebx
     mov edx,r13d
-    imul edx,FIELD_LANES*4
+    imul edx,FF_PACKET_BYTES
     call ff_emit_group_direct_load
     test eax,eax; jnz .fgsr_bad
     # Publish materialized carrier into this packet-local alias cell.
@@ -4663,11 +4702,11 @@ ff_emit_group_direct_load:
 322: xor eax,0x40
     test r14d,8; jz 323f; xor eax,0x20
 323: mov edi,eax; call ff_emit_u8
-    mov dil,0x7C; call ff_emit_u8
+    mov edi,0x7C; call ff_emit_payload_prefix
     mov dil,0x48; call ff_emit_u8
     mov dil,0x10; call ff_emit_u8
     mov eax,r13d; and eax,7; shl eax,3; or eax,0x84; mov edi,eax; call ff_emit_u8
-    mov eax,r14d; and eax,7; or eax,0xA0; mov edi,eax; call ff_emit_u8
+    mov eax,r14d; and eax,7; or eax,[rip+ff_q_sib_scale]; mov edi,eax; call ff_emit_u8
 .else
     cmp r13d,15; ja .fegdl_bad
     mov dil,0xC4; call ff_emit_u8
@@ -4676,10 +4715,10 @@ ff_emit_group_direct_load:
 324: xor eax,0x40
     test r14d,8; jz 325f; xor eax,0x20
 325: mov edi,eax; call ff_emit_u8
-    mov dil,0x7C; call ff_emit_u8
+    mov edi,0x7C; call ff_emit_payload_prefix
     mov dil,0x10; call ff_emit_u8
     mov eax,r13d; and eax,7; shl eax,3; or eax,0x84; mov edi,eax; call ff_emit_u8
-    mov eax,r14d; and eax,7; or eax,0xA0; mov edi,eax; call ff_emit_u8
+    mov eax,r14d; and eax,7; or eax,[rip+ff_q_sib_scale]; mov edi,eax; call ff_emit_u8
 .endif
     mov edi,r15d
     call ff_emit_u32
@@ -4721,9 +4760,9 @@ ff_emit_group_fma_direct_mem:
     call ff_const_bits_for_phys_reg
     test edx,edx
     jz .fegfdm_fma
-    cmp eax,0x3f800000; je .fegfdm_add
-    cmp eax,0xbf800000; je .fegfdm_sub
-    test eax,eax; je .fegfdm_zero
+    cmp rax,[rip+ff_one_bits]; je .fegfdm_add
+    cmp rax,[rip+ff_minus_one_bits]; je .fegfdm_sub
+    test rax,rax; je .fegfdm_zero
 .fegfdm_fma:
 .if FIELD_LANES == 16
     cmp ebx,31; ja .fegfdm_bad
@@ -4735,11 +4774,11 @@ ff_emit_group_fma_direct_mem:
     test r15d,8; jz 352f; xor eax,0x20
 352: test ebx,16; jz 353f; xor eax,0x10
 353: mov edi,eax; call ff_emit_u8
-    mov eax,r12d; and eax,15; xor eax,15; shl eax,3; or eax,5; mov edi,eax; call ff_emit_u8
+    mov eax,r12d; and eax,15; xor eax,15; shl eax,3; or eax,5; mov edi,eax; call ff_emit_payload_w_prefix
     mov eax,r12d; shr eax,4; and eax,1; xor eax,1; shl eax,3; or eax,0x40; mov edi,eax; call ff_emit_u8
     mov dil,0xB8; call ff_emit_u8
     mov eax,ebx; and eax,7; shl eax,3; or eax,0x84; mov edi,eax; call ff_emit_u8
-    mov eax,r15d; and eax,7; or eax,0xA0; mov edi,eax; call ff_emit_u8
+    mov eax,r15d; and eax,7; or eax,[rip+ff_q_sib_scale]; mov edi,eax; call ff_emit_u8
 .else
     cmp ebx,15; ja .fegfdm_bad
     cmp r12d,15; ja .fegfdm_bad
@@ -4749,10 +4788,10 @@ ff_emit_group_fma_direct_mem:
 354: xor eax,0x40
     test r15d,8; jz 355f; xor eax,0x20
 355: mov edi,eax; call ff_emit_u8
-    mov eax,r12d; and eax,15; shl eax,3; mov edi,0x7D; sub edi,eax; call ff_emit_u8
+    mov eax,r12d; and eax,15; shl eax,3; mov edi,0x7D; sub edi,eax; call ff_emit_payload_w_prefix
     mov dil,0xB8; call ff_emit_u8
     mov eax,ebx; and eax,7; shl eax,3; or eax,0x84; mov edi,eax; call ff_emit_u8
-    mov eax,r15d; and eax,7; or eax,0xA0; mov edi,eax; call ff_emit_u8
+    mov eax,r15d; and eax,7; or eax,[rip+ff_q_sib_scale]; mov edi,eax; call ff_emit_u8
 .endif
     jmp .fegfdm_disp
 .fegfdm_add:
@@ -4774,11 +4813,11 @@ ff_emit_group_fma_direct_mem:
     mov edx,r15d; shr edx,3; and edx,1; xor edx,1; shl edx,5; or eax,edx
     mov edx,ebx; shr edx,4; and edx,1; xor edx,1; shl edx,4; or eax,edx
     mov edi,eax; call ff_emit_u8
-    mov eax,ebx; and eax,15; xor eax,15; shl eax,3; or eax,4; mov edi,eax; call ff_emit_u8
+    mov eax,ebx; and eax,15; xor eax,15; shl eax,3; or eax,4; mov edi,eax; call ff_emit_payload_prefix
     mov eax,ebx; shr eax,4; and eax,1; xor eax,1; shl eax,3; or eax,0x40; mov edi,eax; call ff_emit_u8
     mov edi,r13d; call ff_emit_u8
     mov eax,ebx; and eax,7; shl eax,3; or eax,0x84; mov edi,eax; call ff_emit_u8
-    mov eax,r15d; and eax,7; or eax,0xA0; mov edi,eax; call ff_emit_u8
+    mov eax,r15d; and eax,7; or eax,[rip+ff_q_sib_scale]; mov edi,eax; call ff_emit_u8
 .else
     cmp ebx,15; ja .fegfdm_bad
     mov dil,0xC4; call ff_emit_u8
@@ -4787,14 +4826,14 @@ ff_emit_group_fma_direct_mem:
 357: xor eax,0x40
     test r15d,8; jz 358f; xor eax,0x20
 358: mov edi,eax; call ff_emit_u8
-    mov eax,ebx; and eax,15; shl eax,3; mov edi,0x7C; sub edi,eax; call ff_emit_u8
+    mov eax,ebx; and eax,15; shl eax,3; mov edi,0x7C; sub edi,eax; call ff_emit_payload_prefix
     mov edi,r13d; call ff_emit_u8
     mov eax,ebx; and eax,7; shl eax,3; or eax,0x84; mov edi,eax; call ff_emit_u8
-    mov eax,r15d; and eax,7; or eax,0xA0; mov edi,eax; call ff_emit_u8
+    mov eax,r15d; and eax,7; or eax,[rip+ff_q_sib_scale]; mov edi,eax; call ff_emit_u8
 .endif
 .fegfdm_disp:
     mov eax,r14d
-    imul eax,FIELD_LANES*4
+    imul eax,FF_PACKET_BYTES
     mov edi,eax; call ff_emit_u32
     test eax,eax; jnz .fegfdm_bad
 .fegfdm_zero:
@@ -4894,8 +4933,8 @@ ff_emit_group_packet_op:
     mov edi,[r15+8]
     call ff_group_source_reg
     test eax,eax; js .fegpb_bad
-    mov edi,eax
-    call ff_emit_reduce_square_fma
+    mov esi,eax; mov edx,eax; mov edi,5
+    call ff_emit_vfma_acc
     test eax,eax; jnz .fegpb_bad
     mov edi,[r15+4]; call ff_group_alias_kill
     lea edx,[rbx+1]
@@ -5062,16 +5101,11 @@ ff_emit_group_packet_op:
 332:
     mov edi,[r15+8]; call ff_group_source_reg
     test eax,eax; js .fegpb_bad
-.if FIELD_LANES == 16
-    # Direct Group packets are full-lane by construction, so the masked generic
-    # reduce degenerates exactly to an ordinary vector add into hidden carrier 5.
+    # Every Group packet is proved full-lane in either geometry. Consume its
+    # carrier directly; the masked-tail helper would clobber anonymous YMM0.
     mov ecx,eax
     mov edi,0x58; mov esi,5; mov edx,5
     call ff_emit_vbin
-.else
-    mov edi,eax
-    call ff_emit_reduce
-.endif
     test eax,eax; jnz .fegpb_bad
     jmp .fegpb_next
 .fegpb_next:
@@ -5173,6 +5207,8 @@ ff_codegen:
     test eax,eax; jnz .fcg_bad
     call ff_assign_address_gprs
     test eax,eax; jnz .fcg_bad
+    call ff_assign_pool_layout
+    test eax,eax; jnz .fcg_bad
     # 1.3.76 causal-depth burn.  Field consumes the same canonical GroupFact
     # body authority as Tensor.  The factor is derived only from the already-
     # proved Physical-DAG depth and the target architectural SIMD carrier bank.
@@ -5188,9 +5224,7 @@ ff_codegen:
     # paths consume it; irregular fallback remains independent and truthful.
     mov eax,dword ptr [rip+ff_address_fact_count]
     mov [rip+ff_addr_pool_count],eax
-    mov edi,dword ptr [rip+ff_cache_count]
-    add edi,dword ptr [rip+ff_const_pool_count]
-    imul edi,edi,FIELD_LANES*4
+    mov edi,dword ptr [rip+ff_pool_stack_bytes]
     mov eax,dword ptr [rip+ff_addr_pool_count]
     lea edi,[rdi+rax*8]
     mov [rip+ff_region_delta_stack_off],edi
@@ -5198,25 +5232,15 @@ ff_codegen:
     lea edi,[rdi+rax*8]                  # execution-local piecewise-affine deltas
     mov [rip+ff_region_class_stack_off],edi
     add edi,8                            # exact local class authority + padding
-.if FIELD_LANES == 8
-    # Native256 has no spare Rank-N SIMD bank.  Give the one canonical packet
-    # CoordinateFact a compact execution-local stack carrier instead of
-    # rediscovering q->axis coordinates independently for every AddressFact.
-    add edi,31; jc .fcg_bad
-    and edi,-32
+    # Both ISAs use the same invocation-local dynamic-rank CoordinateFact.
+    add edi,FF_PACKET_BYTES-1; jc .fcg_bad
+    and edi,-(FF_PACKET_BYTES)
     mov [rip+ff_packet_coord_stack_off],edi
     mov rax,[rip+ff_common_rank]
-    shl rax,5                            # one YMM (8 x u32) per logical axis
-    jc .fcg_bad
-    add rax,8                            # cached packet-q authority
-    jc .fcg_bad
-    cmp rax,0x7fffffff
-    ja .fcg_bad
-    add edi,eax
-    jc .fcg_bad
-.else
-    mov dword ptr [rip+ff_packet_coord_stack_off],-1
-.endif
+    imul rax,FF_PACKET_BYTES; jo .fcg_bad
+    add rax,8; jc .fcg_bad
+    cmp rax,0x7fffffff; ja .fcg_bad
+    add edi,eax; jc .fcg_bad
     add edi,31; jc .fcg_bad
     and edi,-32                           # preserve vector/ABI-friendly alignment
     mov [rip+ff_cache_bytes],edi
@@ -5228,7 +5252,6 @@ ff_codegen:
     mov dil,0x24; call ff_emit_u8
     mov edi,dword ptr [rip+ff_region_class_stack_off]; call ff_emit_u32
     mov edi,-1; call ff_emit_u32
-.if FIELD_LANES == 8
     # mov qword ptr [rsp+packet_coord_off],-1 : no packet CoordinateFact yet.
     mov dil,0x48; call ff_emit_u8
     mov dil,0xC7; call ff_emit_u8
@@ -5236,7 +5259,6 @@ ff_codegen:
     mov dil,0x24; call ff_emit_u8
     mov edi,dword ptr [rip+ff_packet_coord_stack_off]; call ff_emit_u32
     mov edi,-1; call ff_emit_u32
-.endif
 .fcg_no_cache_frame:
     # AddressFacts are RegionFacts in 1.3.81.  Their physical deltas may change
     # when a periodic piecewise-affine region changes wrap class, so the address
@@ -5273,7 +5295,7 @@ ff_codegen:
     mov dil,0x24; call ff_emit_u8
     mov edi,dword ptr [rip+ff_region_delta_stack_off]; call ff_emit_u32
     test eax,eax; jnz .fcg_bad
-    mov rax,FIELD_RUNTIME_REGULAR_RUN_END_VA
+    mov rax,qword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_REGULAR_RUN_END_VA]
     call ff_emit_call; test eax,eax; jnz .fcg_bad
     lea rdi,[rip+cg_mov_r14_rax]; mov esi,cg_mov_r14_rax_end-cg_mov_r14_rax; call ff_emit_bytes
     lea rdi,[rip+cg_test_rax]; mov esi,cg_test_rax_end-cg_test_rax; call ff_emit_bytes
@@ -5322,7 +5344,6 @@ ff_codegen:
     # become GPR lifetimes; ConstantFacts become SIMD lifetimes. The packet loop
     # starts only after both carrier families are live.
     call ff_emit_address_gpr_residents; test eax,eax; jnz .fcg_bad
-    call ff_emit_const_residents; test eax,eax; jnz .fcg_bad
 .if FIELD_LANES == 16
     lea rdi,[rip+cg_fullmask512]; mov esi,cg_fullmask512_end-cg_fullmask512; call ff_emit_bytes
 .else
@@ -5397,22 +5418,10 @@ ff_codegen:
     mov rdx,[rip+ff_regular_episode_fallback_disp_ptr]
     lea rcx,[rdx+4]; sub rax,rcx; mov [rdx],eax
 
-    # Boundary/irregular episodes rematerialize lane validity once. Native512
-    # also materializes the packet's canonical Rank-N CoordinateFact once into
-    # ZMM24..31. Every neighborhood access below consumes that parent fact rather
-    # than rediscovering q+[lane] and decomposing all axes independently.
+    # Boundary/irregular episodes establish lane validity once. Every access
+    # consumes the invocation-local Rank-N CoordinateFact for the same q.
     lea rdi,[rip+cg_qend]; mov esi,cg_qend_end-cg_qend; call ff_emit_bytes
-.if FIELD_LANES == 16
-    xor edi,edi                         # common WHFLD logical rank from field 0
-    call ff_runtime_prepare_coords_va_for_field
-    test rax,rax; jz .fcg_bad
-    call ff_emit_call; test eax,eax; jnz .fcg_bad
-.else
-    mov rax,FIELD_RUNTIME_MASK_VA; call ff_emit_call; test eax,eax; jnz .fcg_bad
-.endif
-    # A launch-generic execution initializes CoordinateFact once above, then
-    # returns here after exact Rank-N induction on each packet backedge. A
-    # direct-layout boundary re-enters the full generic head and rebuilds from q.
+    mov rax,qword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_MASK_VA]; call ff_emit_call; test eax,eax; jnz .fcg_bad
     mov rax,[rip+ff_emit_ptr]; mov [rip+ff_generic_ready_ptr],rax
 
     # Runtime layout proof chooses between coordinate-CSE and the fully general
@@ -5436,12 +5445,10 @@ ff_codegen:
     movzx edi,byte ptr [rdx+r13]
     call ff_emit_mov_edi_imm
     mov edi,r13d; call ff_emit_mov_esi_imm
-.if FIELD_LANES == 8
     lea rdi,[rip+cg_qend]; mov esi,cg_qend_end-cg_qend; call ff_emit_bytes
     call ff_emit_packet_coord_arena_r8; test eax,eax; jnz .fcg_bad
-.endif
     mov edi,r13d
-    call ff_runtime_offsets_from_coords_va_for_access
+    call ff_runtime_offsets_va_for_access
     test rax,rax; jz .fcg_bad
     call ff_emit_call; test eax,eax; jnz .fcg_bad
     xor r12d,r12d                       # canonical cache slot
@@ -5465,7 +5472,6 @@ ff_codegen:
     jmp .fcg_coord_prefetch
 .fcg_fast_done:
     call ff_emit_materialize_helper_clobbered_residents; test eax,eax; jnz .fcg_bad
-    call ff_emit_const_residents; test eax,eax; jnz .fcg_bad
     mov dil,0xE9; call ff_emit_u8
     mov rax,[rip+ff_emit_ptr]; mov [rip+ff_uniform_done_disp_ptr],rax
     xor edi,edi; call ff_emit_u32
@@ -5491,12 +5497,10 @@ ff_codegen:
     movzx edi,byte ptr [rdx+r13]
     call ff_emit_mov_edi_imm
     mov edi,r13d; call ff_emit_mov_esi_imm
-.if FIELD_LANES == 8
     lea rdi,[rip+cg_qend]; mov esi,cg_qend_end-cg_qend; call ff_emit_bytes
     call ff_emit_packet_coord_arena_r8; test eax,eax; jnz .fcg_bad
-.endif
     mov edi,r13d
-    call ff_runtime_offsets_from_coords_va_for_access
+    call ff_runtime_offsets_va_for_access
     test rax,rax; jz .fcg_bad
     call ff_emit_call; test eax,eax; jnz .fcg_bad
     mov rdx,[rip+ff_access_field_ptr]
@@ -5508,7 +5512,6 @@ ff_codegen:
     jmp .fcg_prefetch
 .fcg_prefetch_done:
     call ff_emit_materialize_helper_clobbered_residents; test eax,eax; jnz .fcg_bad
-    call ff_emit_const_residents; test eax,eax; jnz .fcg_bad
     # Patch fast-path jump over the fallback.
     mov rax,[rip+ff_emit_ptr]
     mov rdx,[rip+ff_uniform_done_disp_ptr]
@@ -5541,6 +5544,7 @@ ff_codegen:
     cmp eax,OP_SUB; je .fcg_sub
     cmp eax,OP_MUL; je .fcg_mul
     cmp eax,OP_DIV; je .fcg_div
+    cmp eax,OP_NATIVE_MATH; je .fcg_native_math
     cmp eax,OP_SQRT; je .fcg_sqrt
     cmp eax,OP_TRUNC; je .fcg_trunc
     cmp eax,OP_STORE; je .fcg_store
@@ -5552,7 +5556,7 @@ ff_codegen:
     cmp eax,OP_IMUL_CONST; je .fcg_imul
     cmp eax,OP_IDIV_CONST; je .fcg_idiv
     cmp eax,OP_IMOD_CONST; je .fcg_imod
-    cmp eax,OP_ITOF32; je .fcg_itof
+    cmp eax,OP_ITOF; je .fcg_itof
     cmp eax,OP_FMA_ACC; je .fcg_fma_acc
     jmp .fcg_bad
 .fcg_load:
@@ -5600,9 +5604,7 @@ ff_codegen:
     call ff_emit_mov_edi_imm
     mov edi,r13d; call ff_emit_mov_esi_imm
     lea rdi,[rip+cg_qend]; mov esi,cg_qend_end-cg_qend; call ff_emit_bytes
-.if FIELD_LANES == 8
     call ff_emit_packet_coord_arena_r8; test eax,eax; jnz .fcg_bad
-.endif
     mov edi,r13d
     call ff_runtime_offsets_va_for_access
     test rax,rax; jz .fcg_bad
@@ -5614,9 +5616,7 @@ ff_codegen:
     mov edi,ebx; call ff_emit_reload_residents; test eax,eax; jnz .fcg_bad
     jmp .fcg_next
 .fcg_const:
-    # 1.3.6 ConstantFact: consume the invocation-persistent exact-bit pool when
-    # this op has a canonical slot. Pool overflow is not a semantic failure;
-    # such constants retain the historical local reconstruction path.
+    # Each canonical ConstantFact consumes its single physical placement.
     mov rax,r15
     mov rdx,[rip+ff_ops_ptr]
     sub rax,rdx
@@ -5624,7 +5624,7 @@ ff_codegen:
     mov rdx,[rip+ff_op_const_slot_ptr]
     mov esi,[rdx+rax*4]
     cmp esi,-1
-    je .fcg_const_local
+    je .fcg_bad
     mov rdx,[rip+ff_const_pool_resident_reg_ptr]
     mov edx,[rdx+rsi*4]
     cmp edx,-1
@@ -5635,27 +5635,9 @@ ff_codegen:
     call ff_codegen_alias_set
     jmp .fcg_next
 .fcg_const_stack:
-    add esi,dword ptr [rip+ff_cache_count]
-    push rsi
-    mov edx,esi
-    mov edi,[r15+4]
-    mov esi,2
-    mov ecx,ebx
-    call ff_try_consumer_local_fold
-    mov ecx,eax
-    pop rsi
-    test ecx,ecx
-    jz 181f
-    mov edi,[r15+4]; call ff_codegen_alias_kill
-    jmp .fcg_next
-181:
     mov edi,[r15+4]; call ff_codegen_alias_kill
     mov edi,[r15+4]; FF_MAP_VREG edi,rdi
-    call ff_emit_cache_load; test eax,eax; jnz .fcg_bad
-    jmp .fcg_next
-.fcg_const_local:
-    mov edi,[r15+4]; call ff_codegen_alias_kill
-    mov edi,[r15+20]; mov esi,[r15+4]; FF_MAP_VREG esi,rsi; call ff_emit_const_real; test eax,eax; jnz .fcg_bad
+    call ff_emit_const_load; test eax,eax; jnz .fcg_bad
     jmp .fcg_next
 .fcg_add: mov edi,0x58; jmp .fcg_bin
 .fcg_sub: mov edi,0x5C; jmp .fcg_bin
@@ -5719,6 +5701,15 @@ ff_codegen:
     mov ecx,r13d
     call ff_emit_vbin; test eax,eax; jnz .fcg_bad
     jmp .fcg_next
+.fcg_native_math:
+    mov edi,[r15+8]; call ff_codegen_source_reg
+    test eax,eax; js .fcg_bad
+    mov r12d,eax
+    mov edi,[r15+4]; call ff_codegen_alias_kill
+    mov edi,[r15+4]; FF_MAP_VREG edi,rdi
+    mov esi,r12d; mov edx,[r15+16]
+    call ff_emit_native_math_packet; test eax,eax; jnz .fcg_bad
+    jmp .fcg_next
 .fcg_sqrt:
     mov edi,[r15+8]; call ff_codegen_source_reg
     test eax,eax; js .fcg_bad
@@ -5767,7 +5758,7 @@ ff_codegen:
     # Direct Region stores are unmasked because complete-packet validity was
     # already proved before this body was entered.
     mov edi,[r15+16]
-    mov rax,FIELD_RUNTIME_FIELD_CONTIG_PTR_VA
+    mov rax,qword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_FIELD_CONTIG_PTR_VA]
     call ff_emit_movzx_eax_runtime_byte_ptr_array; test eax,eax; jnz .fcg_bad
     lea rdi,[rip+cg_test_eax]; mov esi,cg_test_eax_end-cg_test_eax; call ff_emit_bytes
     mov dil,0x0F; call ff_emit_u8; mov dil,0x84; call ff_emit_u8
@@ -5822,18 +5813,18 @@ ff_codegen:
 .fcg_iindex:
     lea rdi,[rip+cg_qend]; mov esi,cg_qend_end-cg_qend; call ff_emit_bytes
     cmp dword ptr [r15+4],0; jne 1f
-    mov rax,FIELD_RUNTIME_IINDEX0_VA; jmp 2f
-1:  mov rax,FIELD_RUNTIME_IINDEX1_VA
+    mov rax,qword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_IINDEX0_VA]; jmp 2f
+1:  mov rax,qword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_IINDEX1_VA]
 2:  call ff_emit_call; test eax,eax; jnz .fcg_bad
     mov edi,ebx; call ff_emit_reload_residents; test eax,eax; jnz .fcg_bad
     jmp .fcg_next
-.fcg_iadd: mov r12d,FIELD_RUNTIME_IADD0_VA; mov r13d,FIELD_RUNTIME_IADD1_VA; jmp .fcg_iconst
-.fcg_isub: mov r12d,FIELD_RUNTIME_ISUB0_VA; mov r13d,FIELD_RUNTIME_ISUB1_VA; jmp .fcg_iconst
-.fcg_imul: mov r12d,FIELD_RUNTIME_IMUL0_VA; mov r13d,FIELD_RUNTIME_IMUL1_VA; jmp .fcg_iconst
-.fcg_idiv: mov r12d,FIELD_RUNTIME_IDIV0_VA; mov r13d,FIELD_RUNTIME_IDIV1_VA; jmp .fcg_iconst
-.fcg_imod: mov r12d,FIELD_RUNTIME_IMOD0_VA; mov r13d,FIELD_RUNTIME_IMOD1_VA
+.fcg_iadd: mov r12d,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_IADD0_VA]; mov r13d,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_IADD1_VA]; jmp .fcg_iconst
+.fcg_isub: mov r12d,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_ISUB0_VA]; mov r13d,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_ISUB1_VA]; jmp .fcg_iconst
+.fcg_imul: mov r12d,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_IMUL0_VA]; mov r13d,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_IMUL1_VA]; jmp .fcg_iconst
+.fcg_idiv: mov r12d,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_IDIV0_VA]; mov r13d,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_IDIV1_VA]; jmp .fcg_iconst
+.fcg_imod: mov r12d,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_IMOD0_VA]; mov r13d,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_IMOD1_VA]
 .fcg_iconst:
-    mov edi,[r15+20]; call ff_emit_mov_edi_imm
+    mov rdi,[r15+20]; call ff_emit_mov_edi_imm
     cmp dword ptr [r15+4],0; jne 3f
     mov eax,r12d; jmp 4f
 3:  mov eax,r13d
@@ -5842,8 +5833,8 @@ ff_codegen:
     jmp .fcg_next
 .fcg_itof:
     cmp dword ptr [r15+8],0; jne 5f
-    mov rax,FIELD_RUNTIME_ITOF0_VA; jmp 6f
-5:  mov rax,FIELD_RUNTIME_ITOF1_VA
+    mov rax,qword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_ITOF0_VA]; jmp 6f
+5:  mov rax,qword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_ITOF1_VA]
 6:  call ff_emit_call; test eax,eax; jnz .fcg_bad
     mov edi,[r15+4]; call ff_codegen_alias_kill
     mov edi,[r15+4]; FF_MAP_VREG edi,rdi; xor esi,esi; call ff_emit_vmov
@@ -5857,11 +5848,8 @@ ff_codegen:
     # q += lanes. A direct Region loops straight back to its direct kernel head;
     # when the Region expires, only then does the immutable launch mode select
     # the next transition loop.
-.if FIELD_LANES == 16
-    lea rdi,[rip+cg_add16]; mov esi,cg_add16_end-cg_add16; call ff_emit_bytes
-.else
-    lea rdi,[rip+cg_add8]; mov esi,cg_add8_end-cg_add8; call ff_emit_bytes
-.endif
+    mov dil,0x49; call ff_emit_u8; mov dil,0x83; call ff_emit_u8; mov dil,0xC4; call ff_emit_u8
+    mov edi,[rip+ff_packet_lanes]; call ff_emit_u8
     lea rdi,[rip+cg_cmp_q_regular_end]; mov esi,cg_cmp_q_regular_end_end-cg_cmp_q_regular_end; call ff_emit_bytes
     mov dil,0x0F; call ff_emit_u8; mov dil,0x82; call ff_emit_u8
     mov rax,[rip+ff_emit_ptr]; mov [rip+ff_direct_backedge_disp_ptr],rax
@@ -5871,18 +5859,15 @@ ff_codegen:
     mov rax,[rip+ff_emit_ptr]; mov [rip+ff_regular_backedge_disp_ptr],rax
     xor edi,edi; call ff_emit_u32
 .if FIELD_LANES == 16
-    # Launch-generic: q advanced by one packet, so advance the already-live
-    # canonical CoordinateFact instead of rediscovering Rank-N coordinates.
-    # First guard the invocation end because the induction helper is pure
-    # physical continuation and must never materialize a nonexistent packet.
+    # Launch-generic: q advanced by one packet. Establish its active-lane
+    # mask after guarding the end; the shared offset relation decodes this q
+    # on first demand and retains its coordinates for subsequent consumers.
     lea rdi,[rip+cg_cmp]; mov esi,cg_cmp_end-cg_cmp; call ff_emit_bytes
     mov dil,0x0F; call ff_emit_u8; mov dil,0x83; call ff_emit_u8
     mov rax,[rip+ff_emit_ptr]; mov [rip+ff_generic_induction_done_disp_ptr],rax
     xor edi,edi; call ff_emit_u32
     lea rdi,[rip+cg_qend]; mov esi,cg_qend_end-cg_qend; call ff_emit_bytes
-    xor edi,edi
-    call ff_runtime_advance_coords_va_for_field
-    test rax,rax; jz .fcg_bad
+    mov rax,qword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_MASK_VA]
     call ff_emit_call; test eax,eax; jnz .fcg_bad
     mov dil,0xE9; call ff_emit_u8
     mov rax,[rip+ff_emit_ptr]; lea rcx,[rax+4]; mov rdx,[rip+ff_generic_ready_ptr]; sub rdx,rcx; mov edi,edx; call ff_emit_u32
@@ -5914,7 +5899,7 @@ ff_codegen:
     mov dil,0x48; call ff_emit_u8
     mov dil,0x05; call ff_emit_u8
     mov eax,dword ptr [rip+group_body_factor]
-    imul eax,eax,FIELD_LANES
+    imul eax,dword ptr [rip+ff_packet_lanes]
     mov edi,eax; call ff_emit_u32
     lea rdi,[rip+cg_cmp_rax_r14]; mov esi,cg_cmp_rax_r14_end-cg_cmp_rax_r14; call ff_emit_bytes
     mov dil,0x0F; call ff_emit_u8; mov dil,0x87; call ff_emit_u8
@@ -5930,7 +5915,7 @@ ff_codegen:
     # Advance q once for the complete Group episode.
     lea rdi,[rip+cg_add_r12_imm32]; mov esi,cg_add_r12_imm32_end-cg_add_r12_imm32; call ff_emit_bytes
     mov eax,dword ptr [rip+group_body_factor]
-    imul eax,eax,FIELD_LANES
+    imul eax,dword ptr [rip+ff_packet_lanes]
     mov edi,eax; call ff_emit_u32
     lea rdi,[rip+cg_cmp_q_regular_end]; mov esi,cg_cmp_q_regular_end_end-cg_cmp_q_regular_end; call ff_emit_bytes
     mov dil,0x0F; call ff_emit_u8; mov dil,0x82; call ff_emit_u8
@@ -5968,9 +5953,9 @@ ff_codegen:
     call ff_emit_stack_add; test eax,eax; jnz .fcg_bad
 .fcg_no_cache_release:
 .if FIELD_LANES == 16
-    lea rdi,[rip+cg_epilogue512]; mov esi,cg_epilogue512_end-cg_epilogue512; call ff_emit_bytes
+    mov rdi,[rip+ff_codegen_fragments+16]; mov rsi,[rip+ff_codegen_fragments+24]; call ff_emit_bytes
 .else
-    lea rdi,[rip+cg_epilogue256]; mov esi,cg_epilogue256_end-cg_epilogue256; call ff_emit_bytes
+    mov rdi,[rip+ff_codegen_fragments+16]; mov rsi,[rip+ff_codegen_fragments+24]; call ff_emit_bytes
 .endif
     xor eax,eax; ret
 .fcg_bad: mov eax,1; ret
@@ -5980,53 +5965,38 @@ ff_emit_mov_edi_imm:
 ff_emit_mov_esi_imm:
     push rdi; mov dil,0xBE; call ff_emit_u8; pop rdi; call ff_emit_u32; ret
 
-# Zero one physical SIMD register. Cross-output AVX2 accumulators and the
-# coefficient carrier are deliberately low-register values; no helper ABI state
-# is touched and no memory materialization is introduced.
-ff_emit_vzero_reg:
-    push rbx
-    mov ebx,edi
-.if FIELD_LANES == 16
-    # EVEX vxorps zmmDST,zmmDST,zmmDST, low architectural bank used here.
-    mov dil,0x62; call ff_emit_u8; mov dil,0xF1; call ff_emit_u8
-    mov eax,ebx; shl eax,3; mov edi,0x7C; sub edi,eax; call ff_emit_u8
-    mov dil,0x48; call ff_emit_u8; mov dil,0x57; call ff_emit_u8
-    mov eax,ebx; shl eax,3; or eax,ebx; or eax,0xC0; mov edi,eax; call ff_emit_u8
-.else
-    cmp ebx,7; ja .fvzr_bad
-    mov dil,0xC5; call ff_emit_u8
-    mov eax,ebx; shl eax,3; mov edi,0xFC; sub edi,eax; call ff_emit_u8
-    mov dil,0x57; call ff_emit_u8
-    mov eax,ebx; shl eax,3; or eax,ebx; or eax,0xC0; mov edi,eax; call ff_emit_u8
-.endif
-    xor eax,eax
-    pop rbx
-    ret
-.fvzr_bad:
-    mov eax,1
-    pop rbx
-    ret
 
 # edi=f32 bits, esi=dst
 ff_emit_const_real:
-    push rbx
-    mov ebx,esi
-    push rdi
-    mov dil,0x68; call ff_emit_u8
-    pop rdi; call ff_emit_u32
+    push rbx; push r12
+    mov ebx,esi; mov r12,rdi
+    cmp dword ptr [rip+ff_element_bytes],8; jne 3f
+    mov dil,0x48; call ff_emit_u8
+3:  mov dil,0xB8; call ff_emit_u8
+    mov edi,r12d; call ff_emit_u32
+    cmp dword ptr [rip+ff_element_bytes],8; jne 4f
+    shr r12,32; mov edi,r12d; call ff_emit_u32
+4:
+    mov dil,0x50; call ff_emit_u8
 .if FIELD_LANES == 16
-    mov dil,0x62; call ff_emit_u8; mov dil,0xF2; call ff_emit_u8; mov dil,0x7D; call ff_emit_u8; mov dil,0x48; call ff_emit_u8; mov dil,0x18; call ff_emit_u8
-    mov eax,ebx; shl eax,3; or eax,0x04; mov edi,eax; call ff_emit_u8; mov dil,0x24; call ff_emit_u8
+    mov dil,0x62; call ff_emit_u8
+    mov eax,0xF2
+    test ebx,8; jz 1f; xor eax,0x80
+1:  test ebx,16; jz 2f; xor eax,0x10
+2:  mov edi,eax; call ff_emit_u8
+    mov edi,0x7D; call ff_emit_payload_w_prefix
+    mov dil,0x48; call ff_emit_u8
 .else
     mov dil,0xC4; call ff_emit_u8
-    mov eax,0xE2
-    test ebx,8; jz 23f; xor eax,0x80
-23: mov edi,eax; call ff_emit_u8
-    mov dil,0x7D; call ff_emit_u8; mov dil,0x18; call ff_emit_u8
-    mov eax,ebx; and eax,7; shl eax,3; or eax,0x04; mov edi,eax; call ff_emit_u8; mov dil,0x24; call ff_emit_u8
+    mov eax,0xE2; test ebx,8; jz 1f; xor eax,0x80
+1:  mov edi,eax; call ff_emit_u8
+    mov dil,0x7D; call ff_emit_u8
 .endif
+    mov edi,[rip+ff_broadcast_opcode]; call ff_emit_u8
+    mov eax,ebx; and eax,7; shl eax,3; or eax,0x04; mov edi,eax; call ff_emit_u8
+    mov dil,0x24; call ff_emit_u8
     lea rdi,[rip+cg_pop_const]; mov esi,cg_pop_const_end-cg_pop_const; call ff_emit_bytes
-    pop rbx; ret
+    pop r12; pop rbx; ret
 
 # edi=physical source. Tolerant square-reduction fusion keeps the same active-
 # lane authority while deleting the synthetic square temporary.
@@ -6041,7 +6011,7 @@ ff_emit_reduce_square_fma:
     mov ecx,ebx; shr ecx,4; and ecx,1; xor ecx,1; shl ecx,6; or eax,ecx
     mov ecx,ebx; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,5; or eax,ecx
     mov edi,eax; call ff_emit_u8
-    mov eax,ebx; and eax,15; xor eax,15; shl eax,3; or eax,5; mov edi,eax; call ff_emit_u8
+    mov eax,ebx; and eax,15; xor eax,15; shl eax,3; or eax,5; mov edi,eax; call ff_emit_payload_w_prefix
     mov eax,ebx; shr eax,4; and eax,1; xor eax,1; shl eax,3; or eax,0x41; mov edi,eax; call ff_emit_u8
     mov dil,0xB8; call ff_emit_u8
     mov eax,5; shl eax,3
@@ -6057,7 +6027,7 @@ ff_emit_reduce_square_fma:
     # Mask the active lanes into helper scratch YMM0, then fuse square+sum.
     push rdi
     mov dil,0xC5; call ff_emit_u8
-    pop rdi; mov eax,edi; shl eax,3; mov edi,0xFC; sub edi,eax; call ff_emit_u8
+    pop rdi; mov eax,edi; shl eax,3; mov edi,0xFC; sub edi,eax; or edi,[rip+ff_payload_pp]; call ff_emit_u8
     mov dil,0x54; call ff_emit_u8; mov dil,0xC4; call ff_emit_u8
     mov edi,5; xor esi,esi; xor edx,edx
     call ff_emit_vfma_acc
@@ -6066,76 +6036,38 @@ ff_emit_reduce_square_fma:
 
 # edi=source register -> hidden vector5 accumulator, active lanes only.
 ff_emit_reduce:
+    push rbx
+    mov ebx,edi
 .if FIELD_LANES == 16
-    # Native512 contract is unchanged.
-    push rdi
-    mov dil,0x62; call ff_emit_u8; mov dil,0xF1; call ff_emit_u8; mov dil,0x54; call ff_emit_u8; mov dil,0x49; call ff_emit_u8; mov dil,0x58; call ff_emit_u8
-    pop rdi; mov eax,5; shl eax,3; or eax,edi; or eax,0xC0; mov edi,eax; call ff_emit_u8
+    mov edi,0x58; mov esi,5; mov edx,5; mov ecx,ebx
+    call ff_emit_vbin
+    mov rax,[rip+ff_emit_ptr]; or byte ptr [rax-3],1
 .else
-    # YMM0 is the native256 helper/reduction scratch and is deliberately absent
-    # from the logical ValueFact table. Mask the active lanes, then accumulate
-    # into the hidden YMM5 recurrence without clobbering any logical carrier.
-    # vandps ymm0, ymmSRC, ymm4
-    push rdi
+    # Tail mask is qword/dword geometry from the selected runtime fact.
     mov dil,0xC5; call ff_emit_u8
-    pop rdi; mov eax,edi; shl eax,3; mov edi,0xFC; sub edi,eax; call ff_emit_u8
+    mov eax,ebx; shl eax,3; mov edi,0xFC; sub edi,eax
+    or edi,[rip+ff_payload_pp]; call ff_emit_u8
     mov dil,0x54; call ff_emit_u8; mov dil,0xC4; call ff_emit_u8
-    # vaddps ymm5,ymm5,ymm0
-    mov dil,0xC5; call ff_emit_u8; mov dil,0xD4; call ff_emit_u8; mov dil,0x58; call ff_emit_u8; mov dil,0xE8; call ff_emit_u8
+    mov edi,0x58; mov esi,5; mov edx,5; xor ecx,ecx
+    call ff_emit_vbin
 .endif
-    ret
+    xor eax,eax; pop rbx; ret
 
 # Rank is one canonical invocation fact.  Every admitted rank consumes the same
 # native Rank-N address authority; the compiler never selects r1..r8 entry points.
 ff_runtime_offsets_va_for_access:
     cmp edi,dword ptr [rip+ff_access_count]
     jae .ffrvo_bad
-    mov rax,FIELD_RUNTIME_OFFSETS_VA
-    ret
-ff_runtime_offsets_va_for_field:
-    cmp edi,dword ptr [rip+ff_field_count]
-    jae .ffrvo_bad
-    mov rax,FIELD_RUNTIME_OFFSETS_VA
+    mov rax,qword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_OFFSETS_VA]
     ret
 .ffrvo_bad:
     xor eax,eax
     ret
 
-# CoordinateFact preparation is now only packet-mask materialization.  Axis
-# coordinates are local facts inside the one Rank-N offset relation rather than
-# persistent ZMM24..31 semantic state.
-ff_runtime_prepare_coords_va_for_field:
-    cmp edi,dword ptr [rip+ff_field_count]
-    jae .ffrpc_bad
-    mov rax,FIELD_RUNTIME_MASK_VA
-    ret
-.ffrpc_bad:
-    xor eax,eax
-    ret
-
-ff_runtime_offsets_from_coords_va_for_access:
-    cmp edi,dword ptr [rip+ff_access_count]
-    jae .ffrofc_bad
-    mov rax,FIELD_RUNTIME_OFFSETS_VA
-    ret
-.ffrofc_bad:
-    xor eax,eax
-    ret
-
-ff_runtime_advance_coords_va_for_field:
-    cmp edi,dword ptr [rip+ff_field_count]
-    jae .ffrac_bad
-    mov rax,FIELD_RUNTIME_MASK_VA
-    ret
-.ffrac_bad:
-    xor eax,eax
-    ret
-
-
 ff_runtime_store_va_for_field:
     cmp edi,dword ptr [rip+ff_field_count]
     jae .ffrvs_bad
-    mov rax,FIELD_RUNTIME_STORE_VA
+    mov rax,qword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_STORE_VA]
     ret
 .ffrvs_bad:
     xor eax,eax
@@ -6321,9 +6253,10 @@ ff_derive_chunk_work_ticks:
     cmp eax,OP_REDUCE; je .ffdw_add
     cmp eax,OP_MUL; je .ffdw_mul
     cmp eax,OP_DIV; je .ffdw_div
+    cmp eax,OP_NATIVE_MATH; je .ffdw_div
     cmp eax,OP_SQRT; je .ffdw_div
     cmp eax,OP_TRUNC; je .ffdw_conv       # conservative long-latency FP resource slot
-    cmp eax,OP_ITOF32; je .ffdw_conv
+    cmp eax,OP_ITOF; je .ffdw_conv
     cmp eax,OP_IINDEX; je .ffdw_ialu
     cmp eax,OP_IADD_CONST; je .ffdw_ialu
     cmp eax,OP_ISUB_CONST; je .ffdw_ialu
@@ -6398,9 +6331,9 @@ ff_derive_chunk_work_ticks:
     # elements. Launch-time Physical Reality chooses the balanced leaf geometry
     # from runtime N, target parallel width, and outward lifecycle price.
     mov r12d,r15d                  # ticks / vector episode
-    mov eax,FF_TRAFFIC_QUANTUM_ELEMENTS # one Physical Reality traffic quantum
+    mov eax,[rip+ff_traffic_elements] # one Physical Reality traffic quantum
     xor edx,edx
-    mov ecx,FIELD_LANES
+    mov ecx,[rip+ff_packet_lanes]
     div ecx                        # vector episodes / ownership quantum: 1 or 2
     test edx,edx
     jnz .ffdw_sat
@@ -6420,11 +6353,13 @@ ff_derive_chunk_work_ticks:
     mov rcx,qword ptr [rip+ff_actual_traffic_ticks]
     cmp rax,rcx
     cmovb rax,rcx
-    mov qword ptr [rip+ff_chunk_elements],FF_TRAFFIC_QUANTUM_ELEMENTS
+    mov eax,[rip+ff_traffic_elements]
+    mov qword ptr [rip+ff_chunk_elements],rax
     mov qword ptr [rip+ff_chunk_work_ticks],rax
     jmp .ffdw_done
 .ffdw_sat:
-    mov qword ptr [rip+ff_chunk_elements],FF_TRAFFIC_QUANTUM_ELEMENTS
+    mov eax,[rip+ff_traffic_elements]
+    mov qword ptr [rip+ff_chunk_elements],rax
     mov rax,0x7fffffffffffffff
     mov qword ptr [rip+ff_chunk_work_ticks],rax
 
@@ -6447,41 +6382,41 @@ ff_emit_image:
     mov eax,SYS_openat; mov edi,AT_FDCWD; mov rsi,[rip+ff_output_path]; mov edx,OUT_FLAGS; mov r10d,0755; syscall
     test rax,rax; js .fei_fail
     mov rbx,rax
-    mov eax,SYS_write; mov rdi,rbx; lea rsi,[rip+field_runtime_template_blob]; mov edx,FIELD_RUNTIME_TEMPLATE_SIZE; syscall
-    cmp rax,FIELD_RUNTIME_TEMPLATE_SIZE; jne .fei_close_fail
+    mov eax,SYS_write; mov rdi,rbx; mov rsi,[rip+ff_runtime_blob]; mov edx,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_TEMPLATE_SIZE]; syscall
+    cmp rax,qword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_TEMPLATE_SIZE]; jne .fei_close_fail
     # erase section table
     mov qword ptr [rip+ff_zero],0
-    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_zero]; mov edx,8; mov r10d,FIELD_RUNTIME_ELF_SHOFF_OFF; syscall; cmp rax,8; jne .fei_close_fail
-    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_zero]; mov edx,6; mov r10d,FIELD_RUNTIME_ELF_SHENTSIZE_OFF; syscall; cmp rax,6; jne .fei_close_fail
+    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_zero]; mov edx,8; mov r10d,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_ELF_SHOFF_OFF]; syscall; cmp rax,8; jne .fei_close_fail
+    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_zero]; mov edx,6; mov r10d,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_ELF_SHENTSIZE_OFF]; syscall; cmp rax,6; jne .fei_close_fail
     # patch executor/counts/modes/ranks/deltas
-    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+execution_admission_capacity]; mov edx,4; mov r10d,FIELD_RUNTIME_EXECUTION_ADMISSION_OFF; syscall; cmp rax,4; jne .fei_close_fail
-    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+sd_static_placement_required]; mov edx,4; mov r10d,FIELD_RUNTIME_STATIC_PLACEMENT_REQUIRED_OFF; syscall; cmp rax,4; jne .fei_close_fail
-    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+sd_preferred_l3_mask_bytes]; mov edx,4; mov r10d,FIELD_RUNTIME_STATIC_PLACEMENT_MASK_BYTES_OFF; syscall; cmp rax,4; jne .fei_close_fail
-    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+sd_preferred_l3_mask]; mov edx,128; mov r10d,FIELD_RUNTIME_STATIC_PLACEMENT_MASK_OFF; syscall; cmp rax,128; jne .fei_close_fail
-    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+outward_materialization_ticks]; mov edx,8; mov r10d,FIELD_RUNTIME_OUTWARD_MATERIALIZATION_TICKS_OFF; syscall; cmp rax,8; jne .fei_close_fail
-    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_chunk_work_ticks]; mov edx,8; mov r10d,FIELD_RUNTIME_CHUNK_WORK_TICKS_OFF; syscall; cmp rax,8; jne .fei_close_fail
-    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_chunk_elements]; mov edx,8; mov r10d,FIELD_RUNTIME_CHUNK_ELEMENTS_OFF; syscall; cmp rax,8; jne .fei_close_fail
-    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_field_count]; mov edx,4; mov r10d,FIELD_RUNTIME_FIELD_COUNT_OFF; syscall; cmp rax,4; jne .fei_close_fail
-    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_access_count]; mov edx,4; mov r10d,FIELD_RUNTIME_ACCESS_COUNT_OFF; syscall; cmp rax,4; jne .fei_close_fail
+    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+execution_admission_capacity]; mov edx,4; mov r10d,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_EXECUTION_ADMISSION_OFF]; syscall; cmp rax,4; jne .fei_close_fail
+    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+sd_static_placement_required]; mov edx,4; mov r10d,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_STATIC_PLACEMENT_REQUIRED_OFF]; syscall; cmp rax,4; jne .fei_close_fail
+    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+sd_preferred_l3_mask_bytes]; mov edx,4; mov r10d,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_STATIC_PLACEMENT_MASK_BYTES_OFF]; syscall; cmp rax,4; jne .fei_close_fail
+    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+sd_preferred_l3_mask]; mov edx,128; mov r10d,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_STATIC_PLACEMENT_MASK_OFF]; syscall; cmp rax,128; jne .fei_close_fail
+    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+outward_materialization_ticks]; mov edx,8; mov r10d,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_OUTWARD_MATERIALIZATION_TICKS_OFF]; syscall; cmp rax,8; jne .fei_close_fail
+    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_chunk_work_ticks]; mov edx,8; mov r10d,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_CHUNK_WORK_TICKS_OFF]; syscall; cmp rax,8; jne .fei_close_fail
+    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_chunk_elements]; mov edx,8; mov r10d,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_CHUNK_ELEMENTS_OFF]; syscall; cmp rax,8; jne .fei_close_fail
+    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_field_count]; mov edx,4; mov r10d,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_FIELD_COUNT_OFF]; syscall; cmp rax,4; jne .fei_close_fail
+    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_access_count]; mov edx,4; mov r10d,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_ACCESS_COUNT_OFF]; syscall; cmp rax,4; jne .fei_close_fail
 
     # Instance metadata is appended immediately after generated code.  The runtime
     # receives one pointer; field/access cardinality determines the record extent.
-    mov rax,FIELD_RUNTIME_GENERATED_VA
+    mov rax,qword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_GENERATED_VA]
     add rax,r12
     mov [rip+ff_metadata_va],rax
-    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_metadata_va]; mov edx,8; mov r10d,FIELD_RUNTIME_METADATA_VA_OFF; syscall; cmp rax,8; jne .fei_close_fail
+    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_metadata_va]; mov edx,8; mov r10d,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_METADATA_VA_OFF]; syscall; cmp rax,8; jne .fei_close_fail
     # Fabric descriptor admission facts. A normal x86 release has zero bytes.
     mov dword ptr [rip+ff_fabric_activation_abi_version],1
-    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_fabric_datapath_bytes]; mov edx,8; mov r10d,FIELD_RUNTIME_FABRIC_DATAPATH_BYTES_OFF; syscall; cmp rax,8; jne .fei_close_fail
-    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_fabric_activation_bridge_present]; mov edx,4; mov r10d,FIELD_RUNTIME_FABRIC_BRIDGE_PRESENT_OFF; syscall; cmp rax,4; jne .fei_close_fail
-    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_fabric_activation_abi_version]; mov edx,4; mov r10d,FIELD_RUNTIME_FABRIC_ACTIVATION_ABI_OFF; syscall; cmp rax,4; jne .fei_close_fail
-    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_fabric_activation_entry]; mov edx,8; mov r10d,FIELD_RUNTIME_FABRIC_ACTIVATION_ENTRY_OFF; syscall; cmp rax,8; jne .fei_close_fail
+    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_fabric_datapath_bytes]; mov edx,8; mov r10d,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_FABRIC_DATAPATH_BYTES_OFF]; syscall; cmp rax,8; jne .fei_close_fail
+    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_fabric_activation_bridge_present]; mov edx,4; mov r10d,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_FABRIC_BRIDGE_PRESENT_OFF]; syscall; cmp rax,4; jne .fei_close_fail
+    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_fabric_activation_abi_version]; mov edx,4; mov r10d,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_FABRIC_ACTIVATION_ABI_OFF]; syscall; cmp rax,4; jne .fei_close_fail
+    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_fabric_activation_entry]; mov edx,8; mov r10d,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_FABRIC_ACTIVATION_ENTRY_OFF]; syscall; cmp rax,8; jne .fei_close_fail
 
     # generated direct machine code
-    mov eax,SYS_pwrite64; mov rdi,rbx; mov rsi,[rip+ff_code_ptr]; mov rdx,r12; mov r10d,FIELD_RUNTIME_GENERATED_FILE_OFF; syscall; cmp rax,r12; jne .fei_close_fail
+    mov eax,SYS_pwrite64; mov rdi,rbx; mov rsi,[rip+ff_code_ptr]; mov rdx,r12; mov r10d,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_GENERATED_FILE_OFF]; syscall; cmp rax,r12; jne .fei_close_fail
 
     mov r13d,dword ptr [rip+ff_field_count]
-    mov r10,FIELD_RUNTIME_GENERATED_FILE_OFF
+    mov r10,qword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_GENERATED_FILE_OFF]
     add r10,r12
     mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_common_rank]; mov edx,8; syscall; cmp rax,8; jne .fei_close_fail
     add r10,8
@@ -6507,14 +6442,14 @@ ff_emit_image:
     # semantic metadata extent. The bridge pointer is patched only when bytes>0.
     cmp qword ptr [rip+ff_fabric_datapath_bytes],0
     je .fei_no_fabric_descriptor
-    mov rcx,FIELD_RUNTIME_GENERATED_VA
+    mov rcx,qword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_GENERATED_VA]
     add rcx,rax
     mov [rip+ff_fabric_datapath_va],rcx
-    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_fabric_datapath_va]; mov edx,8; mov r10d,FIELD_RUNTIME_FABRIC_DATAPATH_VA_OFF; syscall; cmp rax,8; jne .fei_close_fail
+    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_fabric_datapath_va]; mov edx,8; mov r10d,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_FABRIC_DATAPATH_VA_OFF]; syscall; cmp rax,8; jne .fei_close_fail
     # Header prices are finalized after chunk/traffic derivation.
     mov rax,[rip+ff_actual_traffic_ticks]; mov [rip+ff_fabric_datapath_header+40],rax
     mov rax,[rip+ff_chunk_work_ticks]; mov [rip+ff_fabric_datapath_header+48],rax
-    mov r10,FIELD_RUNTIME_GENERATED_FILE_OFF
+    mov r10,qword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_GENERATED_FILE_OFF]
     add r10,[rip+ff_generated_len]
     mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_fabric_datapath_header]; mov edx,64; syscall; cmp rax,64; jne .fei_close_fail
     add r10,64
@@ -6533,13 +6468,13 @@ ff_emit_image:
     add rax,[rip+ff_fabric_datapath_bytes]
     mov [rip+ff_generated_len],rax
 .fei_no_fabric_descriptor:
-    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_generated_len]; mov edx,8; mov r10d,FIELD_RUNTIME_GENERATED_FILESZ_PHDR_OFF; syscall; cmp rax,8; jne .fei_close_fail
-    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_generated_len]; mov edx,8; mov r10d,FIELD_RUNTIME_GENERATED_MEMSZ_PHDR_OFF; syscall; cmp rax,8; jne .fei_close_fail
+    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_generated_len]; mov edx,8; mov r10d,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_GENERATED_FILESZ_PHDR_OFF]; syscall; cmp rax,8; jne .fei_close_fail
+    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_generated_len]; mov edx,8; mov r10d,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_GENERATED_MEMSZ_PHDR_OFF]; syscall; cmp rax,8; jne .fei_close_fail
     # runtime eval jump -> generated base
-    mov rax,FIELD_RUNTIME_GENERATED_VA
-    sub rax,FIELD_RUNTIME_EVAL_END_VA
+    mov rax,qword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_GENERATED_VA]
+    sub rax,qword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_EVAL_END_VA]
     mov [rip+ff_disp],eax
-    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_disp]; mov edx,4; mov r10d,FIELD_RUNTIME_EVAL_DISP_OFF; syscall; cmp rax,4; jne .fei_close_fail
+    mov eax,SYS_pwrite64; mov rdi,rbx; lea rsi,[rip+ff_disp]; mov edx,4; mov r10d,dword ptr [rip+ff_runtime_facts+FF_FACT_FIELD_RUNTIME_EVAL_DISP_OFF]; syscall; cmp rax,4; jne .fei_close_fail
     mov eax,SYS_fchmod; mov rdi,rbx; mov esi,0755; syscall
     mov eax,SYS_close; mov rdi,rbx; syscall
     xor eax,eax; pop r13; pop r12; pop rbx; ret
@@ -6562,13 +6497,13 @@ ff_address_gpr_table: .byte 3,1,7,6,8,9,10,11
 ff_address_gpr_table_end:
 
 .if FIELD_LANES == 16
-ff_resident_reg_table: .byte 0,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
+ff_resident_reg_table: .byte 6,7,8,9,10,11,12,13,14,15,0,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
 .else
 # Native256 candidate bank. YMM0/YMM5 are reclaimed when no reduction authority
 # exists; Physical-DAG ownership removes YMM12 only when v3 exists and YMM13/14
 # only when the corresponding procedural index exists. Helper aliases are
 # phase-separated and restored by existing reload edges.
-ff_resident_reg_table: .byte 0,FF256_REDUCE_REG,6,7,8,9,10,11,FF256_V3_REG,FF256_I0_REG,FF256_I1_REG,FF256_PHASE_SCRATCH_REG
+ff_resident_reg_table: .byte FF256_V3_REG,FF256_REDUCE_REG,6,7,8,9,10,11,0,FF256_I0_REG,FF256_I1_REG,FF256_PHASE_SCRATCH_REG
 .endif
 ff_resident_reg_table_end:
 # Burn-level generated-function ownership. RBX/RBP are preserved once so the
@@ -6626,14 +6561,6 @@ cg_cache_store512: .byte 0x62,0xf1,0x7c,0x48,0x11,0x84,0x24
 cg_cache_store512_end:
 cg_cache_store256: .byte 0xc5,0xfc,0x11,0x84,0x24
 cg_cache_store256_end:
-cg_coord_store512: .byte 0x62,0xe1,0x7c,0x48,0x11,0x8c,0x24
-cg_coord_store512_end:
-cg_coord_load512: .byte 0x62,0xe1,0x7c,0x48,0x10,0x8c,0x24
-cg_coord_load512_end:
-cg_coord_store256: .byte 0xc5,0xfc,0x11,0xbc,0x24
-cg_coord_store256_end:
-cg_coord_load256: .byte 0xc5,0xfc,0x10,0xbc,0x24
-cg_coord_load256_end:
 cg_direct_gather512:
 .byte 0xc5,0xf8,0x90,0xd1
 .byte 0x62,0xf1,0x7c,0x48,0x57,0xc0
@@ -6646,13 +6573,9 @@ cg_direct_gather256:
 cg_direct_gather256_end:
 cg_test_eax: .byte 0x85,0xc0
 cg_test_eax_end:
-cg_add16: .byte 0x49,0x83,0xc4,0x10
-cg_add16_end:
 # add r12,imm32; GroupFact appends the exact episode advance.
 cg_add_r12_imm32: .byte 0x49,0x81,0xc4
 cg_add_r12_imm32_end:
-cg_add8: .byte 0x49,0x83,0xc4,0x08
-cg_add8_end:
 cg_pop_const: .byte 0x48,0x83,0xc4,0x08
 cg_pop_const_end:
 cg_epilogue512:
@@ -6673,7 +6596,6 @@ v_strict:.ascii "strict"; v_strict_end:
 v_tolerant:.ascii "tolerant"; v_tolerant_end:
 k_fields:.ascii "fields"; k_fields_end:
 k_type:.ascii "type"; k_type_end:
-v_f32:.ascii "f32"; v_f32_end:
 k_mode:.ascii "mode"; k_mode_end:
 v_input:.ascii "input"; v_input_end:
 v_output:.ascii "output"; v_output_end:
@@ -6708,7 +6630,7 @@ v_isub_const:.ascii "isub_const"; v_isub_const_end:
 v_imul_const:.ascii "imul_const"; v_imul_const_end:
 v_idiv_const:.ascii "idiv_const"; v_idiv_const_end:
 v_imod_const:.ascii "imod_const"; v_imod_const_end:
-v_itof32:.ascii "itof32"; v_itof32_end:
+v_itof:.ascii "itof"; v_itof_end:
 
 .p2align 3
 
@@ -6731,7 +6653,7 @@ ff_region_delta_stack_off:.skip 4
 ff_region_class_stack_off:.skip 4
 ff_packet_coord_stack_off:.skip 4
 ff_resident_reserved_mask:.skip 4
-ff_const_pool_last_use_pos_ptr:.skip 8
+ff_const_pool_stack_offset_ptr:.skip 8
 # Compile-time avoided-transport demand after consumer-local folding.  This is
 # not a second cache policy; it is the physical cost seen by the shared resident
 # allocator after zero-cost rm consumption has already erased standalone loads.
@@ -6768,6 +6690,7 @@ ff_cache_owner_ptr:.skip 8
 ff_access_coord_slot_ptr:.skip 8
 ff_coord_owner_ptr:.skip 8
 ff_cache_use_count_ptr:.skip 8
+ff_cache_stack_offset_ptr:.skip 8
 ff_cache_resident_reg_ptr:.skip 8
 ff_cache_last_load_pos_ptr:.skip 8
 ff_access_address_fact_ptr:.skip 8
@@ -6832,8 +6755,8 @@ ff_cf_term_count:.skip 4
 # only; no runtime scheduler, dispatcher, or benchmark identity is emitted.
 .p2align 4
 ff_const_pool_count:.skip 4
+ff_pool_stack_bytes:.skip 4
 ff_const_pool_bits_ptr:.skip 8
-ff_const_pool_use_count_ptr:.skip 8
 ff_const_pool_resident_reg_ptr:.skip 8
 ff_op_const_slot_ptr:.skip 8
 # 1.3.5 physical-fact identity / profitable sovereignty.
@@ -6909,3 +6832,156 @@ ff_code_capacity:.skip 8
 ff_code_capacity_prev:.skip 8
 ff_code_growth_factor:.skip 8
 ff_code_overflow:.skip 4
+
+.text
+.include "compiler/float_type_fact.inc"
+FLOAT_TYPE_PRECISION ff_parse_float_precision_span
+ff_accept_float_type:
+    call ff_parse_float_precision_span
+    cmp rax,32; je 1f
+    cmp rax,64; jne 9f
+1:  cmp dword ptr [rip+ff_element_bits],0; je 2f
+    cmp eax,dword ptr [rip+ff_element_bits]; jne 9f
+    mov eax,1; ret
+2:  mov [rip+ff_element_bits],eax
+    mov ecx,eax; shr ecx,3; mov [rip+ff_element_bytes],ecx
+    mov eax,FF_PACKET_BYTES; xor edx,edx; div ecx
+    mov [rip+ff_packet_lanes],eax
+    mov eax,PRC_TRAFFIC_LINE_BYTES; xor edx,edx; div ecx
+    mov [rip+ff_traffic_elements],eax
+    mov dword ptr [rip+ff_payload_pp],0
+    mov dword ptr [rip+ff_payload_w],0
+    mov dword ptr [rip+ff_binary_descriptor],0
+    mov dword ptr [rip+ff_q_sib_scale],0xA0
+    mov dword ptr [rip+ff_q_sib_scale_low],0x90
+    mov dword ptr [rip+ff_mask_store_opcode],0x2E
+    mov dword ptr [rip+ff_broadcast_opcode],0x18
+    mov dword ptr [rip+ff_trunc_opcode],0x08
+    mov eax,0x3f800000; mov [rip+ff_one_bits],rax
+    mov eax,0xbf800000; mov [rip+ff_minus_one_bits],rax
+    lea rsi,[rip+ff_runtime_f32_facts]
+    lea rdx,[rip+ff_codegen_f32_fragments]
+    lea rax,[rip+field_runtime_template_blob]
+    cmp dword ptr [rip+ff_element_bits],64; jne 3f
+    mov dword ptr [rip+ff_payload_pp],1
+.if FIELD_LANES == 16
+    mov dword ptr [rip+ff_payload_w],0x80
+    mov dword ptr [rip+ff_binary_descriptor],0x1400
+.else
+    mov dword ptr [rip+ff_binary_descriptor],0x400
+.endif
+    mov dword ptr [rip+ff_q_sib_scale],0xE0
+    mov dword ptr [rip+ff_q_sib_scale_low],0xD0
+    mov dword ptr [rip+ff_mask_store_opcode],0x2F
+    mov dword ptr [rip+ff_broadcast_opcode],0x19
+    mov dword ptr [rip+ff_trunc_opcode],0x09
+    mov rax,0x3ff0000000000000; mov [rip+ff_one_bits],rax
+    mov rax,0xbff0000000000000; mov [rip+ff_minus_one_bits],rax
+    lea rsi,[rip+ff_runtime_f64_facts]
+    lea rdx,[rip+ff_codegen_f64_fragments]
+    lea rax,[rip+field_runtime_f64_template_blob]
+3:  mov [rip+ff_runtime_blob],rax
+    push rsi
+    mov rsi,rdx
+    lea rdi,[rip+ff_codegen_fragments]
+    mov ecx,8; rep movsq
+    pop rsi
+    lea rdi,[rip+ff_runtime_facts]
+    mov ecx,(ff_runtime_f32_facts_end-ff_runtime_f32_facts)/8; rep movsq
+    mov eax,1; ret
+9:  xor eax,eax; ret
+ff_parse_float_bits:
+    cmp dword ptr [rip+ff_element_bits],64; je node_parse_f64_bits
+    call node_parse_f32_bits
+    mov eax,eax; ret
+ff_emit_payload_prefix:
+    or edi,[rip+ff_payload_pp]
+    or edi,[rip+ff_payload_w]
+    jmp ff_emit_u8
+ff_emit_payload_w_prefix:
+    cmp dword ptr [rip+ff_element_bits],64; jne 1f
+    or edi,0x80
+1:  jmp ff_emit_u8
+ff_emit_scalar_rex:
+    cmp dword ptr [rip+ff_element_bits],64; jne 1f
+    mov dil,0x48; jmp ff_emit_u8
+1:  xor eax,eax; ret
+.section .rodata
+cg_regular_qaddr_f64: lea rax,[rax+rdx*8]
+cg_regular_load_f64_256: vmaskmovpd ymm0,ymm4,ymmword ptr [rax]
+cg_regular_load_f64_256_end:
+cg_regular_load_f64_512: vmovupd zmm0{k1}{z},zmmword ptr [rax]
+cg_regular_load_f64_512_end:
+cg_direct_gather_f64_256:
+    vmovapd ymm15,ymm4
+    vxorpd ymm0,ymm0,ymm0
+    vgatherdpd ymm0,qword ptr [rax+xmm7],ymm15
+cg_direct_gather_f64_256_end:
+cg_direct_gather_f64_512:
+    kmovw k2,k1
+    vxorpd zmm0,zmm0,zmm0
+    vgatherdpd zmm0{k2},qword ptr [rax+ymm17]
+cg_direct_gather_f64_512_end:
+cg_epilogue_f64_512:
+    vextractf64x4 ymm0,zmm5,1
+    vaddpd ymm5,ymm5,ymm0
+    vextractf128 xmm0,ymm5,1
+    vaddpd xmm5,xmm5,xmm0
+    vhaddpd xmm5,xmm5,xmm5
+    vmovapd xmm0,xmm5
+    pop r15; pop r14; pop r13; pop r12; pop rbp; pop rbx; ret
+cg_epilogue_f64_512_end:
+cg_epilogue_f64_256:
+    vextractf128 xmm0,ymm5,1
+    vaddpd xmm5,xmm5,xmm0
+    vhaddpd xmm5,xmm5,xmm5
+    vmovapd xmm0,xmm5
+    pop r15; pop r14; pop r13; pop r12; pop rbp; pop rbx; ret
+cg_epilogue_f64_256_end:
+.bss
+.p2align 3
+ff_runtime_facts: .skip ff_runtime_f32_facts_end-ff_runtime_f32_facts
+ff_runtime_blob: .skip 8
+ff_codegen_fragments: .skip 64
+ff_element_bits: .skip 4
+ff_element_bytes: .skip 4
+ff_packet_lanes: .skip 4
+ff_traffic_elements: .skip 4
+ff_payload_pp: .skip 4
+ff_payload_w: .skip 4
+ff_binary_descriptor: .skip 4
+ff_q_sib_scale: .skip 4
+ff_q_sib_scale_low: .skip 4
+ff_mask_store_opcode: .skip 4
+ff_broadcast_opcode: .skip 4
+ff_trunc_opcode: .skip 4
+ff_one_bits: .skip 8
+ff_minus_one_bits: .skip 8
+
+# The operation's logical reads/definitions own its carrier names. Unreferenced
+# namespace entries are not physical work and cannot reserve Group width.
+.text
+ff_group_note_logical_carriers:
+    cmp eax,OP_REDUCE; je .fgnlc_source
+    cmp eax,OP_STORE; je .fgnlc_source
+    mov edx,[r12+4]; cmp edx,FF_VREG_MAX; ja .fgnlc_done
+    bts dword ptr [rip+ff_group_logical_mask],edx
+    cmp eax,OP_LOAD; je .fgnlc_done
+    cmp eax,OP_CONST; je .fgnlc_done
+.fgnlc_source:
+    mov edx,[r12+8]; cmp edx,FF_VREG_MAX; ja .fgnlc_done
+    bts dword ptr [rip+ff_group_logical_mask],edx
+    cmp eax,OP_ADD; je .fgnlc_binary
+    cmp eax,OP_SUB; je .fgnlc_binary
+    cmp eax,OP_MUL; je .fgnlc_binary
+    cmp eax,OP_DIV; je .fgnlc_binary
+    cmp eax,OP_FMA_ACC; jne .fgnlc_done
+.fgnlc_binary:
+    mov edx,[r12+12]; cmp edx,FF_VREG_MAX; ja .fgnlc_done
+    bts dword ptr [rip+ff_group_logical_mask],edx
+.fgnlc_done: ret
+.bss
+.p2align 2
+ff_group_logical_mask: .skip 4
+ff_group_logical_slots: .skip FF_VREG_COUNT*4
+.text

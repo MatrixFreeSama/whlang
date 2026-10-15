@@ -1,4 +1,6 @@
 .intel_syntax noprefix
+.equ FIELD_PACKET_BYTES,64
+.include "runtime/field_precision_fact.inc"
 .include "runtime/execution_admission_refresh_x86_64.inc"
 .include "runtime/field_runtime_common_blocks.inc"
 # Wheelchair 1.2.16 native materialized-field runtime, AVX-512 physicalization.
@@ -35,7 +37,6 @@
 .equ FIELD_HEADER_SIZE,64
 .equ FIELD_MAGIC,0x373132444c464857  # "WHFLD217" little endian
 .equ FIELD_VERSION,2
-.equ FIELD_TYPE_F32,1
 .equ FIELD_MODE_INPUT,0
 .equ FIELD_MODE_OUTPUT,1
 .equ FIELD_MODE_INOUT,2
@@ -137,7 +138,7 @@ _start:
     mov rdx,[rip+g_chunks]
     mov edi,1
     call run_region_frontier
-    vmovd r12d,xmm0
+    vmovq r12,xmm0
 
     mov rdi,[rip+g_region_arena]
     test rdi,rdi
@@ -146,9 +147,9 @@ _start:
     mov rsi,[rip+g_region_arena_size]
     syscall
 .no_region_arena_unmap:
-    movd xmm0,r12d
-    movd eax,xmm0
-    call print_checksum_f32
+    movq xmm0,r12
+    movq rax,xmm0
+    call print_checksum
 
     # Unmap field mappings exactly once after all ownership executions are reaped.
     xor ebx,ebx
@@ -318,7 +319,7 @@ field_regular_run_end:
     mov r13,rcx                         # end
     mov rax,r13
     sub rax,r12
-    cmp rax,16
+    cmp rax,FIELD_PACKET_LANES
     jb .fre81_fail                      # partial tail keeps truthful mask
     mov ebx,dword ptr [rip+g_rank]
     test ebx,ebx
@@ -347,7 +348,7 @@ field_regular_run_end:
     mov r15,rdx                         # c_inner
     mov r10,rax                         # quotient shared by all outer axes
 .fre81_row_ready:
-    lea rax,[r15+15]
+    lea rax,[r15+FIELD_PACKET_LANES-1]
     cmp rax,r9
     jae .fre81_fail
 
@@ -357,9 +358,9 @@ field_regular_run_end:
     mov r14,r12
     sub r14,r15                         # row base
     add r14,r9                          # row end
-    sub r14,15                   # first unsafe q after final full packet
+    sub r14,FIELD_PACKET_LANES-1                   # first unsafe q after final full packet
     mov rax,r13
-    sub rax,15
+    sub rax,FIELD_PACKET_LANES-1
     cmp r14,rax
     cmova r14,rax
 
@@ -391,7 +392,7 @@ field_regular_run_end:
     mov edi,eax
     cmp ebx,r11d
     jne .fre81_fast_pow2_ready
-    add edi,15
+    add edi,FIELD_PACKET_LANES-1
 .fre81_fast_pow2_ready:
     mov ecx,ebx
     jmp .fre81_fast_have_coord
@@ -399,7 +400,7 @@ field_regular_run_end:
     cmp ecx,r11d
     jne .fre81_fast_outer_coord
     mov esi,r15d                         # c0
-    lea edi,[r15+15]                     # c1 for vector lanes
+    lea edi,[r15+FIELD_PACKET_LANES-1]                     # c1 for vector lanes
     jmp .fre81_fast_have_coord
 .fre81_fast_outer_coord:
     mov rax,r10
@@ -448,7 +449,7 @@ field_regular_run_end:
     mov r9d,[rdx+rcx*4]
     add r8,r9                            # innermost extent
     sub r8,rax
-    sub r8,15
+    sub r8,FIELD_PACKET_LANES-1
     cmp r14,r8
     cmova r14,r8
     xor edx,edx                         # canonical interior class
@@ -490,7 +491,7 @@ field_regular_run_end:
     dec eax
     cmp r10d,eax
     jne .fre81_coord_ready
-    add edi,15
+    add edi,FIELD_PACKET_LANES-1
 .fre81_coord_ready:
 
     # Recover the canonical shortest signed periodic delta from the already-old
@@ -528,7 +529,7 @@ field_regular_run_end:
     jne .fre81_accumulate
     mov ecx,r9d
     sub ecx,edx
-    sub ecx,15                   # first unsafe inner coordinate
+    sub ecx,FIELD_PACKET_LANES-1                   # first unsafe inner coordinate
     mov r8,r12
     sub r8,r15                          # row base
     movsxd rcx,ecx
@@ -549,7 +550,7 @@ field_regular_run_end:
     # First q whose final lane reaches coordinate zero after adding d.
     mov ecx,edx
     neg ecx
-    sub ecx,15
+    sub ecx,FIELD_PACKET_LANES-1
     mov r8,r12
     sub r8,r15
     movsxd rcx,ecx
@@ -580,7 +581,7 @@ field_regular_run_end:
 
 .fre81_store_delta:
     mov rax,r11
-    shl rax,2                           # f32 byte displacement
+    shl rax,FIELD_ELEMENT_SHIFT                           # f32 byte displacement
     jo .fre81_fail
     mov [rbp+rbx*8],rax                # private to this execution/frame
     inc ebx
@@ -615,223 +616,8 @@ field_regular_run_end:
 # regression without runtime autotuning or recipient-aware scheduling.
 field_init_memory_profitability:
 FRC_field_init_memory_profitability
-run_region_frontier:
-    push rbx
-    push r12
-    push r13
-    push r14
-    push r15
-    sub rsp,64
-    mov r13,rsi
-    mov r14,rdx
-    mov r12d,edi
+FRC_run_region_frontier_and_reduce
 
-.frf_descend:
-    mov rax,r14
-    sub rax,r13
-    cmp rax,1
-    jbe .frf_leaf
-
-    # Profitability was already collapsed into field_chunk_elements_patch.
-    # Expose actual cardinality directly: no inherited binary reduction geometry.
-    mov r8,rax
-    inc r8
-    shr r8,1
-    lea rbx,[r13+r8]              # right ownership region begins here
-
-    # The right-subtree start is unique and becomes the permanent result/stack
-    # slot identity for the outward execution that owns its leftmost leaf.
-    mov rax,rbx
-    dec rax
-    shl rax,14
-    mov r15,qword ptr [rip+g_region_arena]
-    test r15,r15
-    jz .bad_args
-    add r15,rax
-    mov dword ptr [r15],0
-
-    lea rsi,[r15+REGION_STACK_SIZE-16]
-    mov eax,SYS_clone
-    mov edi,CLONE_VM_FILES_FS_SIGCHLD
-    test r12d,r12d
-    jnz .frf_clone_flags_ready
-    or edi,CLONE_PARENT
-.frf_clone_flags_ready:
-    xor edx,edx
-    xor r10d,r10d
-    xor r8d,r8d
-    syscall
-    test rax,rax
-    js .frf_refused_right
-    jz .frf_child
-
-    # Current execution owns only the left side after exposing the right side.
-    # No parent/child reduction relation is retained.
-    mov r14,rbx
-    jmp .frf_descend
-
-.frf_child:
-    # A non-root outward execution follows the left spine of its own disjoint
-    # ownership range.  Any descendants it exposes use CLONE_PARENT and are
-    # direct children of the invocation root rather than a runtime join tree.
-    xor r12d,r12d
-    mov r13,rbx
-    jmp .frf_descend
-
-.frf_refused_right:
-    # Linux refusal does not create a compatibility backend.  The current
-    # execution evaluates the refused ownership range with the same worker_range
-    # primitive and publishes each canonical leaf result into its normal slot.
-    mov r15,rbx
-.frf_refused_loop:
-    cmp r15,r14
-    jae .frf_refused_done
-    mov rsi,r15
-    lea rdx,[r15+1]
-    call worker_range
-    mov rax,r15
-    dec rax
-    shl rax,14
-    add rax,qword ptr [rip+g_region_arena]
-    movss dword ptr [rax],xmm0
-    inc r15
-    jmp .frf_refused_loop
-.frf_refused_done:
-    mov r14,rbx
-    jmp .frf_descend
-
-.frf_leaf:
-    mov rsi,r13
-    mov rdx,r14
-    call worker_range
-    test r12d,r12d
-    jnz .frf_root_leaf
-
-    # Leaf execution publishes only its own local reduction and immediately
-    # returns its silicon context to the OS.  It knows no sibling or join tree.
-    mov rax,r13
-    dec rax
-    shl rax,14
-    add rax,qword ptr [rip+g_region_arena]
-    movss dword ptr [rax],xmm0
-    xor edi,edi
-    mov eax,SYS_exit
-    syscall
-    ud2
-
-.frf_root_leaf:
-    movss dword ptr [rsp],xmm0
-
-    # All non-root outward executions are direct children of the invocation root.
-    # wait4(-1) is the OS lifecycle truth; no Wheelchair completion counter,
-    # scheduler state or join tree survives.
-.frf_reap:
-    mov dword ptr [rsp+8],0
-    mov eax,SYS_wait4
-    mov rdi,-1
-    lea rsi,[rsp+8]
-    xor edx,edx
-    xor r10d,r10d
-    syscall
-    cmp rax,-10                    # -ECHILD
-    je .frf_reduce
-    cmp rax,-4                     # -EINTR
-    je .frf_reap
-    test rax,rax
-    js .bad_args
-    cmp dword ptr [rsp+8],0
-    jne .bad_args
-    jmp .frf_reap
-
-.frf_reduce:
-    movss xmm0,dword ptr [rsp]
-    call reduce_region_results
-
-    add rsp,64
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    ret
-
-# reduce_region_results(xmm0=root-region result) -> xmm0 f32
-# Results are consumed in chunk order with the same left-to-right binary carry
-# frontier used by worker_range.  Parallel ownership topology is absent here.
-reduce_region_results:
-    push rbx
-    push r12
-    push r13
-    push r14
-    push r15
-    sub rsp,REDUCE_LEVELS*4+16
-    movss dword ptr [rsp+REDUCE_LEVELS*4],xmm0
-    xor r15d,r15d                  # occupied reduction levels
-    xor r13d,r13d                  # region index
-
-.rrr_next:
-    cmp r13,qword ptr [rip+g_chunks]
-    jae .rrr_finish
-    test r13,r13
-    jnz .rrr_load_slot
-    movss xmm0,dword ptr [rsp+REDUCE_LEVELS*4]
-    jmp .rrr_carry_start
-.rrr_load_slot:
-    mov rax,r13
-    dec rax
-    shl rax,14
-    add rax,qword ptr [rip+g_region_arena]
-    movss xmm0,dword ptr [rax]
-.rrr_carry_start:
-    xor ecx,ecx
-.rrr_carry:
-    bt r15,rcx
-    jnc .rrr_store
-    movss xmm1,dword ptr [rsp+rcx*4]
-    addss xmm1,xmm0
-    vmovaps xmm0,xmm1
-    btr r15,rcx
-    inc ecx
-    cmp ecx,REDUCE_LEVELS
-    jb .rrr_carry
-    jmp .bad_args
-.rrr_store:
-    movss dword ptr [rsp+rcx*4],xmm0
-    bts r15,rcx
-    inc r13
-    jmp .rrr_next
-
-.rrr_finish:
-    xor ecx,ecx
-    xor edx,edx
-    vxorps xmm0,xmm0,xmm0
-.rrr_finish_loop:
-    cmp ecx,REDUCE_LEVELS
-    jae .rrr_done
-    bt r15,rcx
-    jnc .rrr_finish_next
-    test edx,edx
-    jnz .rrr_merge
-    movss xmm0,dword ptr [rsp+rcx*4]
-    mov edx,1
-    jmp .rrr_finish_next
-.rrr_merge:
-    movss xmm1,dword ptr [rsp+rcx*4]
-    addss xmm1,xmm0
-    vmovaps xmm0,xmm1
-.rrr_finish_next:
-    inc ecx
-    jmp .rrr_finish_loop
-.rrr_done:
-    add rsp,REDUCE_LEVELS*4+16
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    ret
-
-# worker_range(rsi=begin_chunk,rdx=end_chunk) -> xmm0 f32
 worker_range:
 FRC_worker_range
 eval_chunk:
@@ -846,14 +632,14 @@ field_eval_vec_end:
 # -----------------------------------------------------------------------------
 
 # Build k1 active-lane mask for q in rdx, end in rcx; zmm16=q+[0..15].
-.global field_prepare_mask_f32
-field_prepare_mask_f32:
+.global field_prepare_mask
+field_prepare_mask:
 field_prepare_q16:
     mov r8,rcx
     sub r8,rdx
-    cmp r8,16
+    cmp r8,FIELD_PACKET_LANES
     jbe .fpq_rem_ok
-    mov r8d,16
+    mov r8d,FIELD_PACKET_LANES
 .fpq_rem_ok:
     lea r9,[rip+mask16_table]
     movzx r10d,word ptr [r9+r8*2]
@@ -899,7 +685,7 @@ vec_divmod_u31:
     ret
 
 # -----------------------------------------------------------------------------
-# Rank-N coordinates are local facts inside field_compute_offsets_f32.  No
+# Rank-N coordinates are local facts inside field_compute_offsets.  No
 # persistent register bank owns a semantic axis count.
 # -----------------------------------------------------------------------------
 .global field_iindex_0
@@ -978,104 +764,34 @@ field_imod_const_1:
     call vec_divmod_u31
     vmovdqa32 zmm14,zmm19
     ret
-.global field_itof32_0
-field_itof32_0:
+.global field_itof_0
+field_itof_0:
+ .if FIELD_ELEMENT_BITS == 64
+    vcvtdq2pd zmm0,ymm13
+.else
     vcvtdq2ps zmm0,zmm13
+.endif
     ret
-.global field_itof32_1
-field_itof32_1:
+.global field_itof_1
+field_itof_1:
+ .if FIELD_ELEMENT_BITS == 64
+    vcvtdq2pd zmm0,ymm14
+.else
     vcvtdq2ps zmm0,zmm14
+.endif
     ret
 
 # -----------------------------------------------------------------------------
 # One runtime-rank address relation. RankFact controls loop geometry; no r1..r8
 # family, persistent-axis register contract, or rank selector survives.
 # -----------------------------------------------------------------------------
-.global field_compute_offsets_f32
-field_compute_offsets_f32:
-    push rbx
-    push r12
-    push r13
-    push r14
-    push r15
-    mov r12d,edi                         # field
-    mov r13d,esi                         # access
-    mov r14,rdx                          # q
-    call field_prepare_q16
-    vpxord zmm17,zmm17,zmm17
-    xor r15d,r15d
-    cmp byte ptr [rip+g_shape_pow2],1
-    je .Lfco16_dynamic_pow
-.Lfco16_dynamic_gen:
-    cmp r15d,dword ptr [rip+g_rank]
-    jae .Lfco16_dynamic_done
-    # Restore q+[lane] for this axis.
-    mov eax,r14d
-    vpbroadcastd zmm16,eax
-    vpaddd zmm16,zmm16,zmmword ptr [rip+lane16_dword]
-    mov r8,[rip+g_logical_strides_ptr]
-    mov eax,[r8+r15*4]
-    call vec_divmod_u31
-    vmovdqa32 zmm16,zmm18
-    mov r8,[rip+g_field_extents_ptr]
-    mov eax,[r8+r15*4]
-    call vec_divmod_u31
-    vmovdqa32 zmm22,zmm19
-    jmp .Lfco16_dynamic_realize
-.Lfco16_dynamic_pow:
-    cmp r15d,dword ptr [rip+g_rank]
-    jae .Lfco16_dynamic_done
-    mov eax,r14d
-    vpbroadcastd zmm16,eax
-    vpaddd zmm16,zmm16,zmmword ptr [rip+lane16_dword]
-    mov r8,[rip+g_stride_shifts_ptr]
-    mov eax,[r8+r15*4]
-    vpbroadcastd zmm23,eax
-    vpsrlvd zmm22,zmm16,zmm23
-    mov r8,[rip+g_extent_masks_ptr]
-    mov eax,[r8+r15*4]
-    vpbroadcastd zmm23,eax
-    vpandd zmm22,zmm22,zmm23
-.Lfco16_dynamic_realize:
-    mov r8,[rip+g_spec_delta_norm_ptr]
-    mov r9,r13
-    imul r9,qword ptr [rip+g_access_delta_stride]
-    lea r9,[r9+r15*4]
-    mov eax,[r8+r9]
-    test eax,eax
-    jz .Lfco16_dynamic_stride
-    vpbroadcastd zmm23,eax
-    vpaddd zmm22,zmm22,zmm23
-    mov r8,[rip+g_field_extents_ptr]
-    mov eax,[r8+r15*4]
-    vpbroadcastd zmm23,eax
-    vpcmpd k2,zmm22,zmm23,5
-    vpsubd zmm22{k2},zmm22,zmm23
-.Lfco16_dynamic_stride:
-    mov r8,[rip+g_field_strides_ptr]
-    mov r9,r12
-    imul r9,qword ptr [rip+g_axis_bytes]
-    lea r9,[r9+r15*4]
-    mov eax,[r8+r9]
-    vpbroadcastd zmm23,eax
-    vpmulld zmm22,zmm22,zmm23
-    vpaddd zmm17,zmm17,zmm22
-    inc r15d
-    cmp byte ptr [rip+g_shape_pow2],1
-    je .Lfco16_dynamic_pow
-    jmp .Lfco16_dynamic_gen
-.Lfco16_dynamic_done:
-    mov rdx,r14
-    call field_prepare_q16                 # restore k1 and canonical q vector
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    ret
+.include "runtime/field_coordinate_relation.inc"
+.global field_compute_offsets
+field_compute_offsets:
+    FIELD_COORD_OFFSETS 16,zmm,6,zmm16,zmm17,zmm18,zmm19,zmm22,zmm23
 
-.global field_store_f32
-field_store_f32:
+.global field_store
+field_store:
     push r12
     mov r12d,edi
     mov rax,[rip+g_field_contig_ptr]
@@ -1084,57 +800,46 @@ field_store_f32:
     call field_prepare_q16
     mov rax,[rip+g_field_data_ptr]
     mov rax,[rax+r12*8]
-    lea rax,[rax+rdx*4]
+    lea rax,[rax+rdx*FIELD_ELEMENT_BYTES]
     mov r11,[rip+field_mode_ptr]
     cmp byte ptr [r11+r12],FIELD_MODE_OUTPUT
     jne 1f
     cmp byte ptr [rip+g_nt_active],1
     jne 1f
-    cmp r8,16
+    cmp r8,FIELD_PACKET_LANES
     jne 1f
-    vmovntps zmmword ptr [rax],zmm0
+    FRC_STORE_NT
     pop r12
     ret
 1:
-    vmovups zmmword ptr [rax]{k1},zmm0
+    FRC_STORE_MASK
     pop r12
     ret
 .Lfs16_dynamic_scatter:
+    # A scatter owns a short-lived CoordinateFact frame; it uses the same
+    # relation as shared immutable neighbors rather than another decoder.
+    push rbp; push rbx
+    mov ebx,dword ptr [rip+g_rank]; shl rbx,6; add rbx,8
+    sub rsp,rbx
+    mov rbp,rsp
+    mov qword ptr [rbp],-1
+    mov r8,rbp
     xor esi,esi
-    call field_compute_offsets_f32
+    call field_compute_offsets
+    add rsp,rbx
+    pop rbx; pop rbp
     mov rax,[rip+g_field_data_ptr]
     mov rax,[rax+r12*8]
+     .if FIELD_ELEMENT_BITS == 64
+    vscatterdpd qword ptr [rax+ymm17]{k1},zmm0
+.else
     vscatterdps dword ptr [rax+zmm17]{k1},zmm0
+.endif
     call field_prepare_q16
     pop r12
     ret
 
-print_checksum_f32:
-    # eax=f32 bits
-    lea rdi,[rip+checksum_line+20]
-    mov ecx,8
-.pcf_hex:
-    mov edx,eax
-    shr edx,28
-    and edx,15
-    cmp edx,9
-    jbe .pcf_digit
-    add edx,'a'-10
-    jmp .pcf_store
-.pcf_digit:
-    add edx,'0'
-.pcf_store:
-    mov byte ptr [rdi],dl
-    inc rdi
-    shl eax,4
-    dec ecx
-    jnz .pcf_hex
-    mov eax,SYS_write
-    mov edi,1
-    lea rsi,[rip+checksum_line]
-    mov edx,29
-    syscall
-    ret
+FRC_print_checksum
 
 .section .rodata
 .p2align 6
@@ -1143,7 +848,12 @@ lane16_dword:
 mask16_table:
     .word 0x0000,0x0001,0x0003,0x0007,0x000f,0x001f,0x003f,0x007f
     .word 0x00ff,0x01ff,0x03ff,0x07ff,0x0fff,0x1fff,0x3fff,0x7fff,0xffff
-checksum_line: .ascii "checksum_f32_bits=0x00000000\n"
+checksum_line:
+.if FIELD_ELEMENT_BITS == 64
+.ascii "checksum_f64_bits=0x0000000000000000\n"
+.else
+.ascii "checksum_f32_bits=0x00000000\n"
+.endif
 
 .section .data
 .p2align 6

@@ -1,4 +1,5 @@
 .intel_syntax noprefix
+.include "compiler/reduction_frontier.inc"
 .include "runtime/execution_admission_refresh_x86_64.inc"
 
 # 1.3.14 one tensor runtime source, profile-selected entirely at assembly time.
@@ -41,13 +42,8 @@ _start:
     CONSTRAIN_STATIC_PLACEMENT_WITHIN_INVOCATION static_placement_required_patch, static_placement_mask_bytes_patch, static_placement_mask_patch
     REFRESH_EXECUTION_ADMISSION execution_admission_patch
     mov r15, rsp
-    mov rax, [r15]
-    cmp rax, 2
-    jne .bad_args
-    mov rdi, [r15+16]
-    call parse_u64
-    test edx, edx
-    jnz .bad_args
+    call parse_input_facts
+    test edx,edx; jnz .bad_args
     cmp rax, qword ptr [rip+shape_extent_min_patch]
     jb .bad_args
     cmp rax, qword ptr [rip+shape_extent_max_patch]
@@ -62,6 +58,7 @@ _start:
     test rdx,rdx
     jnz .bad_args
     mov [rip+g_domain_size], rax
+    test rax,rax; jz .source_order_empty
     call derive_launch_leaf_geometry
     test eax,eax
     jnz .bad_args
@@ -85,6 +82,8 @@ _start:
     syscall
     hlt
 .support_nonempty:
+    cmp dword ptr [rip+reduction_ordered_patch],0
+    jne .source_order_execution
 
     # 1.3.17 external-silicon execution: Wheelchair owns work, never silicon.
     # expansion never queries or accounts free CPU capacity.
@@ -157,6 +156,58 @@ _start:
     mov eax,SYS_exit_group
     syscall
     hlt
+
+.source_order_execution:
+    # One mathematical dependency carrier forbids outward reduction splitting.
+    # The same AOT vector map evaluates the complete domain; only ReductionFact
+    # order controls transport. No scheduler or scalar map evaluator is added.
+    mov r12,[rip+g_domain_size]
+    test r12,r12; jz .source_order_empty
+    call eval_vec_init
+    mov rax,0x3ff0000000000000
+    vmovq xmm15,rax
+    vxorpd xmm14,xmm14,xmm14
+    vcvtsi2sd xmm14,xmm14,r12
+    vdivsd xmm15,xmm15,xmm14
+.ifdef TENSOR_RUNTIME_NATIVE256
+    vbroadcastsd ymm14,xmm14
+    vbroadcastsd ymm15,xmm15
+.else
+    vbroadcastsd zmm14,xmm14
+    vbroadcastsd zmm15,xmm15
+.endif
+    # Keep the complete source order between the outermost surviving quanta.
+    # Removing exterior +0 additions preserves the +0-started RN accumulator.
+    # Disjoint Regions never become separately reduced sums.
+    xor esi,esi; mov rdx,r12
+    cmp dword ptr [rip+support_mode_patch],0
+    je .source_order_envelope_ready
+    mov rbx,[rip+g_support_regions]
+    mov rax,[rbx]
+    mul qword ptr [rip+chunk_elements_patch]
+    mov rsi,rax
+    mov rcx,[rip+g_support_region_count]
+    dec rcx; shl rcx,4
+    mov rax,[rbx+rcx+8]
+    mul qword ptr [rip+chunk_elements_patch]
+    test rdx,rdx; jnz .source_order_envelope_clipped
+    cmp rax,r12; cmova rax,r12
+    mov rdx,rax; jmp .source_order_envelope_ready
+.source_order_envelope_clipped:
+    mov rdx,r12
+.source_order_envelope_ready:
+    mov rdi,r12
+    call eval_vec4
+    jmp .source_order_print
+.source_order_empty:
+    pxor xmm0,xmm0
+.source_order_print:
+    movq rax,xmm0
+    call print_checksum
+    xor edi,edi; mov eax,SYS_exit_group; syscall; hlt
+
+.include "runtime/tensor_input_facts.inc"
+.include "runtime/decimal_input_parser.inc"
 
 # Cold launch-time Physical Reality leaf derivation.
 # AOT patches describe one indivisible structural quantum: elements + work ticks.
@@ -320,6 +371,15 @@ discover_support_term:
     mov r15,qword ptr [rip+g_domain_size]
     test r15,r15
     jz .dst_fail
+    # Nonfinite endpoints cannot certify a finite basin under IEEE arithmetic.
+    # Infinity and NaN are propagated by the original vector body; no interval
+    # is erased on the basis of real-number curvature alone.
+    xor r8d,r8d; mov r9,r15; mov r10d,r14d; call eval_slot
+    movq rax,xmm0; shr rax,52; and eax,0x7ff
+    cmp eax,0x7ff; je .dst_full
+    lea r8,[r15-1]; mov r9,r15; mov r10d,r14d; call eval_slot
+    movq rax,xmm0; shr rax,52; and eax,0x7ff
+    cmp eax,0x7ff; je .dst_full
     xor r12d,r12d                         # lo=0
     mov r13,r15
     dec r13                               # hi=n-1
@@ -342,7 +402,8 @@ discover_support_term:
     movsd xmm1,qword ptr [rsp]
     ucomisd xmm1,xmm0
     jp .dst_full
-    jbe .dst_min_left
+    je .dst_full                         # equality supplies no direction proof
+    jb .dst_min_left
     lea r12,[rbx+1]
     jmp .dst_min_loop
 .dst_min_left:
@@ -476,9 +537,35 @@ discover_support:
     test r12d,r12d
     jz .ds_regions_fail
 
-    # One 16-byte [lo,hi) descriptor per proven leaf. The allocation size is a
-    # source fact; there is no fixed RegionSet capacity.
+    # CoordinateFact -> RegionFact dilation. Convert the largest source-derived
+    # periodic displacement from elements to canonical chunks once.  This is a
+    # conservative physical halo, not a stencil class or extent threshold.
+    xor r15d,r15d
+    mov rax,qword ptr [rip+support_halo_elems_patch]
+    test rax,rax
+    jz .ds_halo_ready
+    mov rcx,qword ptr [rip+chunk_elements_patch]
+    test rcx,rcx
+    jz .ds_regions_fail
+    xor edx,edx
+    div rcx
+    mov r15,rax
+    test rdx,rdx
+    jz .ds_halo_ready
+    inc r15
+    jz .ds_regions_fail
+.ds_halo_ready:
+    mov qword ptr [rsp+8],r15
+
+    # A translated interval can wrap once around the canonical ring, so each
+    # unique primitive Region needs at most two source-derived descriptors when
+    # a halo is present. No fixed RegionSet capacity is introduced.
     mov rsi,r12
+    test r15,r15
+    jz .ds_alloc_count_ready
+    shl rsi,1
+    jc .ds_regions_fail
+.ds_alloc_count_ready:
     shl rsi,4
     jc .ds_regions_fail
     mov qword ptr [rsp],rsi
@@ -506,6 +593,81 @@ discover_support:
     je .ds_regions_fail
     cmp rax,rdx
     jae .ds_regions_term_next
+    mov r10,qword ptr [rsp+8]              # halo chunks
+    test r10,r10
+    jz .ds_store_base_interval
+    mov r11,qword ptr [rip+g_canonical_chunks]
+    test r11,r11
+    jz .ds_regions_fail
+    cmp r10,r11
+    jae .ds_store_full_interval
+
+    # If len + 2*halo covers the ring, canonical support is full immediately.
+    mov r8,rdx
+    sub r8,rax                              # len
+    mov rcx,r10
+    add rcx,r10
+    jc .ds_store_full_interval
+    add rcx,r8
+    jc .ds_store_full_interval
+    cmp rcx,r11
+    jae .ds_store_full_interval
+
+    cmp rax,r10
+    jb .ds_store_left_wrap
+    mov r8,rax
+    sub r8,r10                              # expanded lo
+    mov r9,rdx
+    add r9,r10                              # expanded hi
+    jc .ds_store_full_interval
+    cmp r9,r11
+    ja .ds_store_right_wrap
+    mov rax,r8
+    mov rdx,r9
+    jmp .ds_store_base_interval
+
+.ds_store_left_wrap:
+    # [lo,hi) dilated across zero -> [0,hi+h) U [C-(h-lo),C).
+    mov r8,r10
+    sub r8,rax                              # wrapped chunk count
+    mov r9,rdx
+    add r9,r10
+    jc .ds_store_full_interval
+    cmp r9,r11
+    ja .ds_store_full_interval
+    mov rcx,r14
+    shl rcx,4
+    mov qword ptr [r13+rcx],0
+    mov qword ptr [r13+rcx+8],r9
+    inc r14d
+    mov rax,r11
+    sub rax,r8
+    mov rcx,r14
+    shl rcx,4
+    mov qword ptr [r13+rcx],rax
+    mov qword ptr [r13+rcx+8],r11
+    inc r14d
+    jmp .ds_regions_term_next
+
+.ds_store_right_wrap:
+    # [lo,hi) dilated across C -> [lo-h,C) U [0,hi+h-C).
+    mov rcx,r14
+    shl rcx,4
+    mov qword ptr [r13+rcx],r8
+    mov qword ptr [r13+rcx+8],r11
+    inc r14d
+    sub r9,r11
+    mov rcx,r14
+    shl rcx,4
+    mov qword ptr [r13+rcx],0
+    mov qword ptr [r13+rcx+8],r9
+    inc r14d
+    jmp .ds_regions_term_next
+
+.ds_store_full_interval:
+    xor eax,eax
+    mov rdx,qword ptr [rip+g_canonical_chunks]
+.ds_store_base_interval:
     mov rcx,r14
     shl rcx,4
     mov qword ptr [r13+rcx],rax
@@ -681,6 +843,9 @@ reprice_support_ownership:
     test r10,r10
     jz .rso_regions_ok
     mov r8,qword ptr [rip+g_chunks]
+    cmp r8,r10
+    cmova r8,r10
+    mov [rip+g_chunks],r8
     cmp r8,1
     jbe .rso_regions_ok
     mov r9,qword ptr [rip+chunk_work_ticks_patch]
@@ -699,8 +864,10 @@ reprice_support_ownership:
 .rso_regions_bound:
     dec r10
     dec rax
+    mov rcx,rax                    # price denominator: minimum work minus one
+    mov rax,r10                    # surviving work minus one is the numerator
     xor edx,edx
-    div rax
+    div rcx
     test rax,rax
     jnz .rso_regions_clip
     mov rax,1
@@ -715,76 +882,65 @@ reprice_support_ownership:
     mov eax,1
     ret
 
-# strict_split_k(rdi=canonical subtree leaves, esi=ownership regions)
-# -> rax=canonical left leaves, edx=left ownership regions.
-# The split is mathematics: q=1 pairwise reduction splits a power-of-two tree in
-# half and every other tree at its greatest lower power of two.  K is distributed
-# proportionally but can only cut at true subtree boundaries.
+# Count intersections of canonical RegionSet support with [rdi,rsi).
+# rax=active quanta. The same source-sized set owns all execution consumers.
+support_range_weight:
+    mov rax,rsi; sub rax,rdi
+    cmp dword ptr [rip+support_mode_patch],0; je .srw_done
+    xor eax,eax; xor ecx,ecx
+    mov r8,[rip+g_support_regions]
+.srw_loop:
+    cmp rcx,[rip+g_support_region_count]; jae .srw_done
+    mov rdx,rcx; shl rdx,4
+    mov r9,[r8+rdx]; mov r10,[r8+rdx+8]
+    cmp r9,rsi; jae .srw_done
+    cmp r10,rdi; jbe .srw_next
+    cmp r9,rdi; cmovb r9,rdi
+    cmp r10,rsi; cmova r10,rsi
+    sub r10,r9; add rax,r10
+.srw_next:
+    inc rcx; jmp .srw_loop
+.srw_done: ret
+
+# rdi=canonical leaves, esi=K, rdx=chunk lo -> rax=left leaves, edx=left K.
+# Zero subtrees own zero executions. Canonical addition geometry stays fixed.
 strict_split_k:
-    push rbx
-    push r12
-    mov r12,rdi
-    mov ebx,esi
-    cmp r12,2
-    jb .ssk_fail
-    cmp ebx,2
-    jb .ssk_fail
-    mov rax,r12
-    bsr rcx,rax
-    mov r8,1
-    shl r8,cl
-    cmp r8,r12
-    jne .ssk_have_left
-    shr r8,1
-.ssk_have_left:
-    test r8,r8
-    jz .ssk_fail
-    mov r9,r12
-    sub r9,r8                       # right leaves
-
-    # rounded proportional ownership share: round(K * left / N)
-    mov rax,rbx
-    mul r8
-    mov rcx,r12
-    shr rcx,1
-    add rax,rcx
-    adc rdx,0
-    div r12
-    mov rcx,rax                     # proposed k_left
-
-    # lower bound max(1, K-right_leaves)
-    mov r10,1
-    mov rax,rbx
-    cmp rax,r9
+    push rbx; push r12; push r13; push r14; push r15
+    mov r12,rdi; mov ebx,esi; mov r13,rdx
+    cmp r12,2; jb .ssk_fail
+    cmp ebx,2; jb .ssk_fail
+    mov rax,r12; bsr rcx,rax
+    mov r14,1; shl r14,cl
+    cmp r14,r12; jne .ssk_left_ready
+    shr r14,1
+.ssk_left_ready:
+    mov rdi,r13; lea rsi,[r13+r14]; call support_range_weight
+    mov r15,rax
+    lea rdi,[r13+r14]; lea rsi,[r13+r12]; call support_range_weight
+    mov r9,rax                     # right active leaves
+    mov rcx,r15; add rcx,r9
+    test rcx,rcx; jz .ssk_fail
+    mov rax,rbx; mul r15
+    mov r10,rcx; shr r10,1
+    add rax,r10; adc rdx,0; div rcx
+    mov rcx,rax                    # rounded active-weighted K share
+    xor r10d,r10d
+    test r15,r15; setnz r10b
+    mov rax,rbx; sub rax,r9
     jbe .ssk_lower_ready
-    sub rax,r9
-    cmp rax,r10
-    cmova r10,rax
+    cmp r10,rax; cmovb r10,rax
 .ssk_lower_ready:
-    # upper bound min(K-1, left_leaves)
     mov r11,rbx
+    test r9,r9; jz .ssk_upper_ready
     dec r11
-    cmp r11,r8
-    cmova r11,r8
-    cmp rcx,r10
-    cmovb rcx,r10
-    cmp rcx,r11
-    cmova rcx,r11
-    test rcx,rcx
-    jz .ssk_fail
-    cmp rcx,rbx
-    jae .ssk_fail
-    mov rax,r8
-    mov rdx,rcx
-    pop r12
-    pop rbx
-    ret
-.ssk_fail:
-    xor eax,eax
-    xor edx,edx
-    pop r12
-    pop rbx
-    ret
+.ssk_upper_ready:
+    cmp r11,r15; cmova r11,r15
+    cmp rcx,r10; cmovb rcx,r10
+    cmp rcx,r11; cmova rcx,r11
+    mov rax,r14; mov rdx,rcx; jmp .ssk_done
+.ssk_fail: xor eax,eax; xor edx,edx
+.ssk_done:
+    pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
 # build_strict_descriptors(rsi=chunk_lo, rdx=leaf_count, ecx=K, r8=region_base)
 # Each ownership leaf is one true node of the canonical q=1 reduction tree.
@@ -799,6 +955,7 @@ build_strict_descriptors:
     mov r13,rdx                     # len
     mov r14d,ecx                    # K
     mov r15,r8                      # base region
+    test r14d,r14d; jz .bsd_zero
     cmp r14d,1
     jne .bsd_split
     mov rax,r15
@@ -812,10 +969,9 @@ build_strict_descriptors:
 .bsd_split:
     mov rdi,r13
     mov esi,r14d
+    mov rdx,r12
     call strict_split_k
     test rax,rax
-    jz .bsd_fail
-    test edx,edx
     jz .bsd_fail
     mov qword ptr [rsp],rax          # left len
     mov dword ptr [rsp+8],edx        # left K
@@ -839,6 +995,8 @@ build_strict_descriptors:
     add r8,rax
     call build_strict_descriptors
     jmp .bsd_done
+.bsd_zero:
+    xor eax,eax; jmp .bsd_done
 .bsd_fail:
     mov eax,1
 .bsd_done:
@@ -1043,10 +1201,13 @@ reduce_strict_region_tree:
     push r12
     push r13
     push r14
+    push r15
     sub rsp,16
     mov r12,rdx
     mov r13d,ecx
     mov r14,r8
+    mov r15,rsi                    # canonical chunk origin
+    test r13d,r13d; jz .rsrt_zero
     cmp r13d,1
     jne .rsrt_split
     mov rax,r14
@@ -1057,10 +1218,9 @@ reduce_strict_region_tree:
 .rsrt_split:
     mov rdi,r12
     mov esi,r13d
+    mov rdx,r15
     call strict_split_k
     test rax,rax
-    jz .bad_args
-    test edx,edx
     jz .bad_args
     mov qword ptr [rsp],rax
     mov dword ptr [rsp+8],edx
@@ -1068,6 +1228,7 @@ reduce_strict_region_tree:
     mov rdx,rax
     mov ecx,dword ptr [rsp+8]
     mov r8,r14
+    mov rsi,r15
     call reduce_strict_region_tree
     movsd qword ptr [rsp],xmm0       # left exact subtree scalar
 
@@ -1075,6 +1236,7 @@ reduce_strict_region_tree:
     # second metadata tree. Region base advances by k_left, never by leaf count.
     mov rdi,r12
     mov esi,r13d
+    mov rdx,r15
     call strict_split_k
     mov rbx,rax
     mov r9,rdx                       # k_left
@@ -1084,12 +1246,17 @@ reduce_strict_region_tree:
     sub ecx,r9d
     mov r8,r14
     add r8,r9
+    lea rsi,[r15+rbx]
     call reduce_strict_region_tree
     movsd xmm1,qword ptr [rsp]
     addsd xmm1,xmm0
     movapd xmm0,xmm1
+    jmp .rsrt_done
+.rsrt_zero:
+    pxor xmm0,xmm0
 .rsrt_done:
     add rsp,16
+    pop r15
     pop r14
     pop r13
     pop r12
@@ -1105,6 +1272,7 @@ reduce_region_results:
     mov rdx,qword ptr [rip+g_canonical_chunks]
     mov ecx,dword ptr [rip+g_chunks]
     xor r8d,r8d
+    xor esi,esi
     call reduce_strict_region_tree
     ret
 
@@ -1247,11 +1415,49 @@ worker_range_dense:
     # happened to survive while execution-derived ranges never reached level 12.
     # 1.3.102 decouples execution cardinality from canonical subtree size, so the
     # physical frame must follow the mathematical frontier authority itself.
-    sub rsp,REDUCE_LEVELS*8+16
     mov r13,rsi
     mov r14,rdx
     mov r12,qword ptr [rip+g_domain_size]
 
+    cmp dword ptr [rip+reduction_tolerant_patch],0
+    jne .w_tolerant_leaves
+    # The generated episode owns the exact same canonical leaf frontier.
+    # Translate subtree endpoints once, initialize invariants once, execute once.
+    mov rax,r13
+    mul qword ptr [rip+chunk_elements_patch]
+    test rdx,rdx; jnz .bad_args
+    mov r13,rax
+    mov rax,r14
+    mul qword ptr [rip+chunk_elements_patch]
+    test rdx,rdx; jnz .bad_args
+    cmp rax,r12
+    cmova rax,r12
+    mov r14,rax
+    call eval_vec_init
+    sub rsp,16
+    vxorpd xmm14,xmm14,xmm14
+    vcvtsi2sd xmm14,xmm14,r12
+    movsd qword ptr [rsp],xmm14
+    mov rax,0x3ff0000000000000
+    vmovq xmm15,rax
+    vdivsd xmm15,xmm15,xmm14
+    movsd qword ptr [rsp+8],xmm15
+.ifdef TENSOR_RUNTIME_NATIVE256
+    vbroadcastsd ymm14,qword ptr [rsp]
+    vbroadcastsd ymm15,qword ptr [rsp+8]
+.else
+    vbroadcastsd zmm14,qword ptr [rsp]
+    vbroadcastsd zmm15,qword ptr [rsp+8]
+.endif
+    add rsp,16
+    mov rdi,r12
+    mov rsi,r13
+    mov rdx,r14
+    call eval_vec4
+    vzeroupper
+    jmp .w_range_restore
+.w_tolerant_leaves:
+    sub rsp,REDUCE_LEVELS*8+16
     # Invocation-domain exact-mod constants are worker invariants, not leaf
     # work.  The old eval_chunk wrapper rebuilt u64->f64(N) and 1/N for every
     # canonical leaf. Strict cardinality-invariant trees make those leaves
@@ -1298,21 +1504,7 @@ worker_range_dense:
     mov rdi,r12
     call eval_vec4                  # xmm0 = exact canonical rightmost leaf
 
-    xor ecx,ecx
-.w_carry:
-    bt r15,rcx
-    jnc .w_carry_store
-    movsd xmm1,qword ptr [rsp+rcx*8]
-    addsd xmm1,xmm0                 # older left block + newer right block
-    movapd xmm0,xmm1
-    btr r15,rcx
-    inc ecx
-    cmp ecx,REDUCE_LEVELS
-    jb .w_carry
-    jmp .bad_args
-.w_carry_store:
-    movsd qword ptr [rsp+rcx*8],xmm0
-    bts r15,rcx
+    REDUCTION_FRONTIER_INSERT r15,xmm1
     inc r13
     jmp .w_chunk_loop
 
@@ -1320,26 +1512,7 @@ worker_range_dense:
     # Remaining frontier blocks are ordered from latest/smallest at low levels
     # to earliest/largest at high levels.  Fold low->high as left+right, exactly
     # reproducing the left-to-right pairwise reduction tree for any leaf count.
-    xor ecx,ecx
-    xor edx,edx                     # have accumulator
-    pxor xmm0,xmm0
-.w_finish_levels:
-    cmp ecx,REDUCE_LEVELS
-    jae .w_finish_done
-    bt r15,rcx
-    jnc .w_finish_next
-    test edx,edx
-    jnz .w_finish_merge
-    movsd xmm0,qword ptr [rsp+rcx*8]
-    mov edx,1
-    jmp .w_finish_next
-.w_finish_merge:
-    movsd xmm1,qword ptr [rsp+rcx*8]
-    addsd xmm1,xmm0
-    movapd xmm0,xmm1
-.w_finish_next:
-    inc ecx
-    jmp .w_finish_levels
+    REDUCTION_FRONTIER_FINISH r15,xmm1
 
 .w_finish_done:
     cmp dword ptr [rip+vector_width_patch],TENSOR_RUNTIME_VECTOR_WIDTH
@@ -1347,6 +1520,7 @@ worker_range_dense:
     vzeroupper
 .w_no_vec_exit:
     add rsp,REDUCE_LEVELS*8+16
+.w_range_restore:
     pop r15
     pop r14
     pop r13
@@ -1450,6 +1624,9 @@ reduction_tolerant_patch: .long 0
 support_mode_patch: .long 0
 .global support_term_count_patch
 support_term_count_patch: .long 0
+.p2align 3
+.global support_halo_elems_patch
+support_halo_elems_patch: .quad 0
 .global static_placement_required_patch
 static_placement_required_patch: .long 0
 .global static_placement_mask_bytes_patch
@@ -1492,3 +1669,13 @@ g_support_active_chunks: .skip 8
 .p2align 3
 g_region_arena: .skip 8
 g_region_arena_size: .skip 8
+
+.section .data
+.align 8
+.global input_count_patch,input_table_patch,extent_input_patch,reduction_ordered_patch,input_values
+input_count_patch:.quad 1
+input_table_patch:.quad 0
+extent_input_patch:.quad 0
+reduction_ordered_patch:.long 0
+.align 8
+input_values:.quad 0

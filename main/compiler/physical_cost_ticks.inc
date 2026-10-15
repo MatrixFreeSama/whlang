@@ -23,12 +23,21 @@
 .equ PRC_TRAFFIC_LINE_BYTES,64
 
 # Front-end transport price for already-emitted straight-line native code.  This
-# is consumed only as a lower-bound physical work price when deciding whether a
-# causally-ready region can repay an outward Linux execution lifecycle.  It is
-# not a source-size threshold: dynamic/iterative regions remain unbounded and
-# therefore cannot be admitted by this price alone.  3 ticks/byte corresponds
+# bounds both outward region work and the actual encoded scalar window. It is
+# a resource estimate, not a source-size threshold or a cycle-accurate schedule.
+# Dynamic/iterative regions remain unbounded for outward admission unless their
+# execution count is proved by the existing work relation. 3 ticks/byte corresponds
 # to the mature four-byte/cycle decode floor in the shared 1/12-cycle domain.
 .equ PRC_FRONTEND_BYTE_TICKS,3
 .equ PRC_CACHE_LINE_BYTES,64
 .equ PRC_LOAD_AGU_TICKS,PRC_LOAD_TICKS+PRC_AGU_TICKS
 .equ PRC_INT_MUL_LOAD_AGU_TICKS,PRC_INT_MUL_TICKS+PRC_LOAD_TICKS+PRC_AGU_TICKS
+
+# Fourier work uses the same primitive/transport prices as every other DAG.
+# Per-coefficient estimates sum the native forward/inverse butterfly work;
+# radix is a stage factor, never a different multiplication algorithm.
+.equ PRC_COMPLEX_MUL_TICKS,4*PRC_FP_MUL_TICKS+2*PRC_FP_ADD_TICKS
+.equ PRC_FOURIER_RADIX2_TICKS,(2*PRC_COMPLEX_MUL_TICKS+8*PRC_FP_ADD_TICKS+12*PRC_LOAD_AGU_TICKS)/2
+.equ PRC_FOURIER_RADIX3_TICKS,(8*PRC_COMPLEX_MUL_TICKS+16*PRC_FP_ADD_TICKS+18*PRC_LOAD_AGU_TICKS)/3
+.equ PRC_FOURIER_RADIX5_TICKS,(16*PRC_COMPLEX_MUL_TICKS+32*PRC_FP_ADD_TICKS+30*PRC_LOAD_AGU_TICKS)/5
+.equ PRC_FOURIER_COEFFICIENT_TICKS,2*PRC_FP_CONV_TICKS+4*PRC_INT_ALU_TICKS+4*PRC_LOAD_AGU_TICKS

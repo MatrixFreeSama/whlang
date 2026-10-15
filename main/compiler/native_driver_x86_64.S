@@ -171,38 +171,19 @@ _start:
     jmp .nd_skip_ws
 
 .nd_have_canonical:
-    # Canonical materialized-field semantics select the sovereign 1.2.17 field
-    # AOT compiler structurally. This is format dispatch, not workload-name or
-    # failure-driven selection, and happens before any backend code generation.
-    mov rdi,r9
-    lea rsi,[rip+field_marker]
-    mov edx,field_marker_end-field_marker
-    mov rcx,r10
-    call memcontains
-    test eax,eax
-    jnz .field
-
-    # ShapeFact-N is the logical-shape authority, but consumer choice follows
-    # the shape itself.  Rank-1/product-1 belongs to the base physicalizer; only
-    # a genuinely productized shape requires the derived consumer.  Presence of
-    # ShapeFact-N alone must never force derived code generation.
-    mov rdi,r9
-    lea rsi,[rip+shape_marker]
-    mov edx,shape_marker_end-shape_marker
-    mov rcx,r10
-    call memcontains
-    test eax,eax
-    jz .base
-    mov rdi,r9
-    mov rcx,r10
+    # One structural canonical-member authority. No string inside a program
+    # name or an operand can impersonate a format or logical shape fact.
+    mov rdi,[rip+source_ptr]; mov rsi,[rip+source_length]
+    lea rdx,[rip+format_key]; mov ecx,format_key_end-format_key
+    call surface_json_member
+    test rax,rax; jz .base
+    mov rdi,rax; mov rsi,rdx
+    lea rdx,[rip+field_marker]; mov ecx,field_marker_end-field_marker
+    call surface_json_string_equal
+    test eax,eax; jnz .field
+    mov rdi,[rip+source_ptr]; mov rcx,[rip+source_length]
     call shape_fact_requires_derived
-    test eax,eax
-    jnz .derived
-    jmp .base
-
-    # One topology compiler owns physical materialization. Register pressure is
-    # solved only after the complete Physical DAG exists; the launcher no longer
-    # guesses a base/wide implementation from a structural-load count.
+    test eax,eax; jnz .derived
     jmp .base
 
 .field:
@@ -280,47 +261,20 @@ _start:
 # Whitespace and JSON strings are tolerated so direct canonical input and the
 # in-process Surface canonicalization use the same rule.
 shape_fact_requires_derived:
-    push rbx
-    push r12
-    push r13
-    push r14
-    push r15
-    mov r12,rdi                         # buffer
-    mov r13,rcx                         # length
-    mov r14d,shape_marker_end-shape_marker
-    lea rsi,[rip+shape_marker]
-    cmp r13,r14
-    jb .sfrd_base
-    xor ebx,ebx                         # candidate offset
-    mov r15,r13
-    sub r15,r14                         # final legal marker offset
-.sfrd_find_marker:
-    cmp rbx,r15
-    ja .sfrd_base
-    xor edx,edx
-.sfrd_match_marker:
-    cmp edx,r14d
-    jae .sfrd_marker_found
-    lea rax,[r12+rbx]
-    mov al,[rax+rdx]
-    cmp al,[rsi+rdx]
-    jne .sfrd_next_candidate
-    inc edx
-    jmp .sfrd_match_marker
-.sfrd_next_candidate:
-    inc rbx
-    jmp .sfrd_find_marker
+    push rbx; push r12; push r13; push r14; push r15
+    mov rsi,rcx
+    lea rdx,[rip+shape_key]; mov ecx,shape_key_end-shape_key
+    call surface_json_member
+    test rax,rax; jz .sfrd_base
+    mov rdi,rax; mov rsi,rdx
+    lea rdx,[rip+axes_key]; mov ecx,axes_key_end-axes_key
+    call surface_json_member
+    test rax,rax; jz .sfrd_base
+    cmp byte ptr [rax],'['; jne .sfrd_base
+    mov r12,rax; mov r13,rdx; mov ebx,1
+    jmp .sfrd_array_ready
 
-.sfrd_marker_found:
-    add rbx,r14                         # scan after "shape_fact_n"
-.sfrd_find_array:
-    cmp rbx,r13
-    jae .sfrd_base
-    mov al,[r12+rbx]
-    inc rbx
-    cmp al,'['
-    jne .sfrd_find_array
-
+.sfrd_array_ready:
     xor r14d,r14d                       # object nesting depth
     xor r15d,r15d                       # top-level axis count
     xor edx,edx                         # bit0=in string, bit1=escape
@@ -391,44 +345,6 @@ shape_fact_requires_derived:
     ret
 
 
-memcontains:
-    push rbx
-    push r12
-    push r13
-    mov r12d,edx
-    cmp rcx,r12
-    jb .mc_no
-    sub rcx,r12
-    xor ebx,ebx
-.mc_outer:
-    cmp rbx,rcx
-    ja .mc_no
-    xor r13d,r13d
-.mc_inner:
-    cmp r13d,r12d
-    jae .mc_yes
-    lea rax,[rdi+rbx]
-    mov dl,[rax+r13]
-    cmp dl,[rsi+r13]
-    jne .mc_next
-    inc r13d
-    jmp .mc_inner
-.mc_next:
-    inc rbx
-    jmp .mc_outer
-.mc_yes:
-    mov eax,1
-    pop r13
-    pop r12
-    pop rbx
-    ret
-.mc_no:
-    xor eax,eax
-    pop r13
-    pop r12
-    pop rbx
-    ret
-
 .close_fail:
     mov eax,SYS_close
     mov rdi,rbx
@@ -446,8 +362,9 @@ memcontains:
 proc_self_exe: .asciz "/proc/self/exe"
 field_marker: .ascii "wheelchair.field/1"
 field_marker_end:
-shape_marker: .ascii "\"shape_fact_n\""
-shape_marker_end:
+format_key: .ascii "format"; format_key_end:
+shape_key: .ascii "shape_fact_n"; shape_key_end:
+axes_key: .ascii "axes"; axes_key_end:
 name_field: .ascii "fieldc"
 name_field_end:
 name_base: .ascii "topologyc"

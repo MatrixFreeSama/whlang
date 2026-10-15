@@ -130,7 +130,7 @@ gr_release_base:
     xor r14d,r14d                       # x86 root count
     mov dword ptr [rsp+24],0            # total root count, including fabric
     mov dword ptr [rsp+12],-1           # invocation x86 root
-    mov dword ptr [rsp+20],0            # extra roots whose work repays lifecycle
+    mov dword ptr [rsp+20],0            # roots whose work repays lifecycle
     call gr_meta_indegree_ptr
     mov qword ptr [rsp+32],rax
 .gr_root_count_scan:
@@ -154,7 +154,7 @@ gr_release_base:
     cmp dword ptr [rsp+12],-1
     jne .gr_root_count_cost
     mov dword ptr [rsp+12],ebx           # first x86 root stays in live context
-    jmp .gr_root_count_next
+
 .gr_root_count_cost:
     mov edi,ebx
     call gr_should_materialize
@@ -174,7 +174,10 @@ gr_release_base:
     # exists; every additional bundle must be justified by one root that passed
     # the same Physical Reality lifecycle comparison used before frontier fusion.
     mov edx,dword ptr [rsp+20]
-    inc edx                               # local context + profitable outward roots
+    test edx,edx
+    jnz .gr_root_cost_count
+    mov edx,1                          # the invocation context already exists
+.gr_root_cost_count:
     cmp edx,r14d
     cmova edx,r14d
     call gr_state_meta_ptr
@@ -186,95 +189,47 @@ gr_release_base:
     cmp edx,ecx
     cmova edx,ecx
     mov dword ptr [rsp+16],edx            # cost-gated fixed bundle count K
+    # Root lifecycle comparisons already closed the same work facts once.
 
-    # The anchors themselves form the temporary bundle vector inside their
-    # existing cache-line state.  This avoids allocating a second root table:
-    # every child anchor independently repays one outward lifecycle.
-    mov ebx,dword ptr [rsp+12]
-    cmp ebx,-1
-    je .gr_runtime_fail
-    mov rdx,rbx
-    shl rdx,6
-    mov dword ptr [r15+rdx+ST_NODE_LOCAL_NEXT],-1
-    mov dword ptr [r15+rdx+ST_NODE_FRONTIER_TAIL],ebx
-    mov dword ptr [r15+rdx+ST_NODE_FRONTIER_ANCHOR_NEXT],-1
-    mov dword ptr [r15+rdx+ST_NODE_FRONTIER_ANCHOR],1
-    mov dword ptr [rsp+56],ebx            # last anchor
-
-    mov r13d,1                            # number of anchors already formed
-    xor ebx,ebx
+    # One work-fact priority and cumulative-cost comparison forms all roots.
+    # No source-index cyclic ownership survives. The existing node cache lines
+    # hold cold work/chain facts; no extra queue or worker is allocated.
+    xor esi,esi
+    call gr_choose_root
+    cmp eax,-1; je .gr_runtime_fail
+    mov [rsp+12],eax
+    mov [rsp+56],eax
+    mov ebx,eax
+    call gr_anchor_root
+    mov r13d,1
 .gr_root_anchor_scan:
-    cmp r13d,dword ptr [rsp+16]
-    jae .gr_root_anchor_done
-    cmp ebx,dword ptr [rip+gr_node_count]
-    jae .gr_runtime_fail                  # cost count and roots disagreed
-    mov rdx,qword ptr [rsp+32]
-    cmp dword ptr [rdx+rbx*4],0
-    jne .gr_root_anchor_next
-    cmp ebx,dword ptr [rsp+12]
-    je .gr_root_anchor_next
-    call gr_meta_realization_tag_ptr
-    cmp dword ptr [rax+rbx*4],GR_REALIZATION_RECONFIGURABLE_FABRIC
-    je .gr_root_anchor_next
-    mov edi,ebx
-    call gr_should_materialize
-    test eax,eax
-    jz .gr_root_anchor_next
-
-    mov eax,dword ptr [rsp+56]
-    mov rdx,rax
-    shl rdx,6
-    mov dword ptr [r15+rdx+ST_NODE_FRONTIER_ANCHOR_NEXT],ebx
-    mov rdx,rbx
-    shl rdx,6
-    mov dword ptr [r15+rdx+ST_NODE_LOCAL_NEXT],-1
-    mov dword ptr [r15+rdx+ST_NODE_FRONTIER_TAIL],ebx
-    mov dword ptr [r15+rdx+ST_NODE_FRONTIER_ANCHOR_NEXT],-1
-    mov dword ptr [r15+rdx+ST_NODE_FRONTIER_ANCHOR],1
-    mov dword ptr [rsp+56],ebx
-    inc r13d
-.gr_root_anchor_next:
-    inc ebx
-    jmp .gr_root_anchor_scan
+    cmp r13d,[rsp+16]; jae .gr_root_anchor_done
+    mov esi,1                       # each extra execution repays lifecycle
+    call gr_choose_root
+    cmp eax,-1; je .gr_runtime_fail
+    mov ebx,eax
+    mov edx,[rsp+56]; shl rdx,6
+    mov [r15+rdx+ST_NODE_FRONTIER_ANCHOR_NEXT],ebx
+    mov [rsp+56],ebx
+    call gr_anchor_root
+    inc r13d; jmp .gr_root_anchor_scan
 .gr_root_anchor_done:
-
-    # Every remaining x86 root joins one of the already-existing fixed bundles.
-    # Cyclic assignment is structural and deterministic; it inspects neither CPU
-    # identity nor runtime load.  Small roots may ride an execution whose lifecycle
-    # is already justified, but they can never create an execution by themselves.
-    mov r13d,dword ptr [rsp+12]           # current anchor
-    xor ebx,ebx
 .gr_root_chain_scan:
-    cmp ebx,dword ptr [rip+gr_node_count]
-    jae .gr_root_chain_done
-    mov rdx,qword ptr [rsp+32]
-    cmp dword ptr [rdx+rbx*4],0
-    jne .gr_root_chain_next
-    call gr_meta_realization_tag_ptr
-    cmp dword ptr [rax+rbx*4],GR_REALIZATION_RECONFIGURABLE_FABRIC
-    je .gr_root_chain_next
-    mov rdx,rbx
-    shl rdx,6
-    cmp dword ptr [r15+rdx+ST_NODE_FRONTIER_ANCHOR],0
-    jne .gr_root_chain_next
-
-    mov rax,r13
-    shl rax,6
-    mov ecx,dword ptr [r15+rax+ST_NODE_FRONTIER_TAIL]
-    mov rsi,rcx
-    shl rsi,6
-    mov dword ptr [r15+rsi+ST_NODE_LOCAL_NEXT],ebx
-    mov dword ptr [r15+rax+ST_NODE_FRONTIER_TAIL],ebx
-    mov dword ptr [r15+rdx+ST_NODE_LOCAL_NEXT],-1
-
-    mov eax,dword ptr [r15+rax+ST_NODE_FRONTIER_ANCHOR_NEXT]
-    cmp eax,-1
-    jne .gr_root_chain_advance
-    mov eax,dword ptr [rsp+12]
-.gr_root_chain_advance:
+    xor esi,esi
+    call gr_choose_root
+    cmp eax,-1; je .gr_root_chain_done
+    mov ebx,eax
+    mov edi,[rsp+12]
+    call gr_least_work_anchor
     mov r13d,eax
-.gr_root_chain_next:
-    inc ebx
+    mov rdx,rax; shl rdx,6
+    mov ecx,[r15+rdx+ST_NODE_FRONTIER_TAIL]
+    mov rsi,rcx; shl rsi,6
+    mov [r15+rsi+ST_NODE_LOCAL_NEXT],ebx
+    mov [r15+rdx+ST_NODE_FRONTIER_TAIL],ebx
+    mov eax,ebx; shl rax,6
+    mov dword ptr [r15+rax+ST_NODE_LOCAL_NEXT],-1
+    call gr_accumulate_root_work
     jmp .gr_root_chain_scan
 .gr_root_chain_done:
 
@@ -471,7 +426,7 @@ gr_materialize_node:
 
 
 # gr_materialize_chain(edi=head_node, esi=clone_flags) -> eax=0 success, 1 refusal.
-# Root-frontier bundles are fixed before any executor starts. A child owns its
+# Root work/ownership closure precedes every executor launch. A child owns its
 # entire chain and returns to the OS only after that fused physical execution is
 # complete. This is not a worker and cannot accept later work.
 gr_materialize_chain:
@@ -712,19 +667,15 @@ gr_release_x86_slot:
 # only when a predecessor proves their true causal readiness.
 
 # gr_should_materialize(edi=node_id) -> eax=1 outward, eax=0 continue locally.
-# Dynamic/unbounded regions publish 0xffffffff and remain outward candidates.
-# Straight-line regions compare their AOT native work price with the same shared
-# outward lifecycle price used by Tensor/Field. Equality stays local.
+# One-shot work plus a proved iteration projection is the same ownership and
+# lifecycle price. Unknown work remains outward; equality stays local.
 gr_should_materialize:
     cmp edi,dword ptr [rip+gr_node_count]
     jae .gsm_outward
-    call gr_meta_work_ticks_ptr
-    mov eax,dword ptr [rax+rdi*4]
-    cmp eax,-1
-    je .gsm_outward
-    mov edx,eax
-    mov rax,qword ptr [rip+gr_outward_materialization_ticks]
-    cmp rdx,rax
+    call gr_node_work_price
+    test ecx,ecx; jnz .gsm_outward
+    test rdx,rdx; jnz .gsm_outward
+    cmp rax,qword ptr [rip+gr_outward_materialization_ticks]
     ja .gsm_outward
     xor eax,eax
     ret
@@ -738,10 +689,17 @@ gr_should_materialize:
 # realization may publish the same event from an asynchronous completion bridge.
 # There is one successor law, not a CPU graph plus an FPGA task graph.
 gr_node_task:
+    # The generated native Region body owns a compact internal register ABI and
+    # may use RBP as a physical scratch carrier.  This runtime boundary is the
+    # single authority that isolates that body from causal-control state.
+    # Preserve every SysV callee-saved register that can cross the boundary;
+    # otherwise a saturated-width local continuation can corrupt its publisher's
+    # continuation cursor.
     push rbx
     push r12
     push r13
     push r14
+    push rbp
     mov ebx,edi
     mov r13d,esi                    # clone flags appropriate to this context
 
@@ -770,6 +728,7 @@ gr_node_task:
     mov esi,r13d
     # Tail-publication keeps the old x86 return depth: exposing asynchronous
     # completion must not charge every native Region an extra call/ret pair.
+    pop rbp
     pop r14
     pop r13
     pop r12
@@ -778,6 +737,7 @@ gr_node_task:
 
 .gnt_fail:
     mov eax,1
+    pop rbp
     pop r14
     pop r13
     pop r12
@@ -897,7 +857,8 @@ gr_publish_completion:
 # the fixed 48-byte physical descriptors:
 #   indegree[N], first_out[N], entry_offsets[N], work_ticks[N],
 #   edge_v[E], next_edge[E], edge_transfer_bytes[E:qword], realization_tag[N],
-#   fabric_descriptor[N:48].
+#   fabric_descriptor[N:48], work_fact[N:16].
+# work_ticks owns the one-shot base for a proved iterative work_fact.
 # A descriptor is a serialization of existing Physical-DAG facts, never a second
 # semantic graph. The helpers derive every address from actual N/E.
 gr_meta_indegree_ptr:
@@ -1001,4 +962,6 @@ gr_static_placement_mask: .zero 128
 
 .p2align 4
 .global gr_template_end
+.include "runtime/region_work_ownership.inc"
+
 gr_template_end:

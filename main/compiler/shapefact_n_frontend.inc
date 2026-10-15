@@ -184,18 +184,28 @@ shapefn_parse_root:
     lea rsi,[rip+shapefn_k_min]
     mov edx,shapefn_k_min_end-shapefn_k_min
     call obj_get
+    test rax,rax; jz .sfp_min_default
     call node_parse_u64
-    test edx,edx
-    jnz .sfp_fail
+    test edx,edx; jnz .sfp_fail
+    jmp .sfp_min_ready
+.sfp_min_default:
+    xor eax,eax
+.sfp_min_ready:
     mov [rip+tensor_shape_extent_min],rax
 
     mov rdi,r13
     lea rsi,[rip+shapefn_k_max]
     mov edx,shapefn_k_max_end-shapefn_k_max
     call obj_get
+    test rax,rax; jz .sfp_max_default
     call node_parse_u64
-    test edx,edx
-    jnz .sfp_fail
+    test edx,edx; jnz .sfp_fail
+    jmp .sfp_max_ready
+.sfp_max_default:
+    mov rax,-1
+    xor edx,edx
+    div qword ptr [rip+tensor_shape_static_product]
+.sfp_max_ready:
     mov [rip+tensor_shape_extent_max],rax
     mov rcx,[rip+tensor_shape_extent_min]
     cmp rcx,rax

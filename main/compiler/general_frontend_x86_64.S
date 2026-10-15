@@ -4,6 +4,8 @@
 .include "compiler/physical_reality.inc"
 .include "compiler/silicon_reality.inc"
 .include "compiler/isa_capabilities.inc"
+.include "compiler/groupfact.inc"
+.include "compiler/physical_predicate.inc"
 .include "build/general_parallel_release_offsets.inc"
 
 # General Wheelchair direct-native semantic frontend. General, Tensor and Field
@@ -74,6 +76,7 @@
 .extern span_eq
 .extern node_parse_u64
 .extern node_parse_f64_bits
+.extern node_parse_f32_bits
 .extern jcur
 .extern jend
 .extern json_node_count
@@ -118,6 +121,7 @@ compile_general_source:
     mov dword ptr [rip+g_output_count],0
     mov dword ptr [rip+g_binding_slot_count],0
     mov dword ptr [rip+g_state_count],0
+    mov dword ptr [rip+g_iter_projection_count],0
     mov dword ptr [rip+g_iter_reg_mode],0
     mov dword ptr [rip+g_cached_binding_slot],PR_FACT_INVALID
     mov dword ptr [rip+g_overflow_wrap],0
@@ -177,6 +181,9 @@ compile_general_source:
     test eax,eax; jnz .bad
     mov rdi,[rip+json_node_count]
     call g_prepare_state_meta_arena
+    test eax,eax; jnz .bad
+    mov rdi,[rip+json_node_count]
+    call g_prepare_iter_projection_arena
     test eax,eax; jnz .bad
     mov rdi,[rip+json_node_count]
     call g_prepare_io_meta_arena
@@ -270,6 +277,9 @@ compile_general_source:
     mov eax,dword ptr [rip+g_input_count]
     mov rdx,[rip+g_input_types_ptr]
     mov [rdx+rax*4],ebx
+    mov edx,eax; imul rdx,rdx,24; add rdx,[rip+g_input_ranges_ptr]
+    mov rdi,r13; mov esi,ebx; call physical_input_range_parse
+    test eax,eax; jnz .bad
     inc dword ptr [rip+g_input_count]
     mov r13,[r13+32]
     jmp .input_loop
@@ -393,6 +403,13 @@ compile_general_source:
     # no algorithm name, rewrite budget, source-size threshold, or second IR is
     # introduced.  Failure means the source cannot be proven, never a fallback.
     call g_semantic_converge_symbols
+    test eax,eax; jnz .bad
+
+    # Downstream structural field consumers define the iterate boundary live-set.
+    # Discovery happens after all symbols exist but before runtime binding layout,
+    # so only actually consumed final StateFacts receive projection slots.
+    mov rdi,[rip+g_root]
+    call g_discover_iterate_projections_node
     test eax,eax; jnz .bad
 
     # 1.3.24: every validated general program stays in the same sovereign
@@ -609,10 +626,11 @@ compile_general_source:
     ret
 
 # ---------------- type/symbol helpers ----------------
+.include "compiler/rankn_type_layout.inc"
 # Parameterized floating types. Native f32/f64 keep their compact IDs. Every
 # wider precision is interned into one represented-program TypePhysicalFact:
 #   +0 u64 PrecisionFact P
-#   +8 u32 packed Fourier geometry, +12 u32 reserved alignment
+#   +8 packed geometry, +16 span, +24 limb count, +32 Fourier stage facts
 # Type identity, precision, and physical geometry therefore have one authority;
 # geometry is planned once by AOT and is never attached to individual values.
 # rdi=P -> eax=interned semantic type/0.
@@ -628,7 +646,7 @@ g_intern_rankn_precision:
     cmp ecx,dword ptr [rip+g_rankn_type_count]
     jae .girp_append
     mov rax,rcx
-    shl rax,4
+    imul rax,rax,RPF_FACT_BYTES
     cmp qword ptr [r8+rax],r12
     je .girp_found
     inc ecx
@@ -640,7 +658,7 @@ g_intern_rankn_precision:
     add ebx,GTYPE_RANKN_FP_BASE
     jc .girp_bad
     mov rax,rcx
-    shl rax,4
+    imul rax,rax,RPF_FACT_BYTES
     mov [r8+rax],r12
     mov qword ptr [r8+rax+8],0
     inc dword ptr [rip+g_rankn_type_count]
@@ -653,8 +671,11 @@ g_intern_rankn_precision:
     mov ecx,ebx
     sub ecx,GTYPE_RANKN_FP_BASE
     mov rdx,rcx
-    shl rdx,4
+    imul rdx,rdx,RPF_FACT_BYTES
     mov dword ptr [r8+rdx+8],eax
+    mov edi,ebx
+    call g_materialize_rankn_fp_layout
+    test rax,rax; jz .girp_bad
     mov eax,ebx
     jmp .girp_done
 .girp_found:
@@ -670,40 +691,15 @@ g_intern_rankn_precision:
     ret
 
 # rdi=span ptr,rsi=len -> eax=interned type/0.
-g_parse_param_fp_span:
-    cmp rsi,3
-    jb .gppfs_bad
-    cmp byte ptr [rdi],'f'
-    jne .gppfs_bad
-    cmp byte ptr [rdi+1],'p'
-    jne .gppfs_bad
-    xor eax,eax
-    mov ecx,2
-.gppfs_loop:
-    cmp rcx,rsi
-    jae .gppfs_done
-    movzx r8d,byte ptr [rdi+rcx]
-    cmp r8b,'0'
-    jb .gppfs_bad
-    cmp r8b,'9'
-    ja .gppfs_bad
-    sub r8d,'0'
-    mov r9,10
-    mul r9
-    test rdx,rdx
-    jnz .gppfs_bad
-    add rax,r8
-    jc .gppfs_bad
-    inc rcx
-    jmp .gppfs_loop
-.gppfs_done:
-    cmp rax,64
-    jbe .gppfs_bad
+g_parse_float_type_span:
+    call g_parse_float_precision_span
+    cmp rax,32; je .gt_f32
+    cmp rax,64; je .gt_f64
+    test rax,rax; jz .gt_bad
     mov rdi,rax
     jmp g_intern_rankn_precision
-.gppfs_bad:
-    xor eax,eax
-    ret
+.include "compiler/float_type_fact.inc"
+FLOAT_TYPE_PRECISION g_parse_float_precision_span
 
 # edi=type -> rax=floating significand precision, 0 for nonfloating.
 g_float_precision:
@@ -719,7 +715,7 @@ g_float_precision:
     cmp eax,dword ptr [rip+g_rankn_type_count]
     jae .gfp_no
     mov rdx,[rip+g_rankn_type_facts_ptr]
-    shl rax,4
+    imul rax,rax,RPF_FACT_BYTES
     mov rax,[rdx+rax]
     cmp rax,64
     jbe .gfp_no
@@ -793,9 +789,7 @@ g_type_from_node:
     mov rdi,r8; mov rsi,r9; lea rdx,[rip+gv_bool]; mov ecx,gv_bool_end-gv_bool; call span_eq; test eax,eax; jnz .gt_bool
     mov rdi,r8; mov rsi,r9; lea rdx,[rip+gv_i64]; mov ecx,gv_i64_end-gv_i64; call span_eq; test eax,eax; jnz .gt_i64
     mov rdi,r8; mov rsi,r9; lea rdx,[rip+gv_u64]; mov ecx,gv_u64_end-gv_u64; call span_eq; test eax,eax; jnz .gt_u64
-    mov rdi,r8; mov rsi,r9; lea rdx,[rip+gv_f32]; mov ecx,gv_f32_end-gv_f32; call span_eq; test eax,eax; jnz .gt_f32
-    mov rdi,r8; mov rsi,r9; lea rdx,[rip+gv_f64]; mov ecx,gv_f64_end-gv_f64; call span_eq; test eax,eax; jnz .gt_f64
-    mov rdi,r8; mov rsi,r9; call g_parse_param_fp_span; test eax,eax; jnz .gt_param_fp
+    mov rdi,r8; mov rsi,r9; call g_parse_float_type_span; test eax,eax; jnz .gt_param_fp
     mov rdi,r8; mov rsi,r9; lea rdx,[rip+gv_string]; mov ecx,gv_string_end-gv_string; call span_eq; test eax,eax; jnz .gt_string
 .gt_bad: xor eax,eax; ret
 .gt_bool: mov eax,GTYPE_BOOL; ret
@@ -869,10 +863,10 @@ g_prepare_state_meta_arena:
     mov eax,SYS_munmap
     syscall
 .gpsm_size:
-    # states[32] + decl[8] + carrier/old/out/lastuse/guard[4 each] = 60 bytes/state.
+    # states/decl/carriers plus one update expression, order, position and pending-use frontier = 84 bytes/state.
     # Guard identity is compile-time Physical-Region metadata only.
     mov rax,rbx
-    imul rax,rax,60
+    imul rax,rax,84
     jo .gpsm_fail
     add rax,63
     jc .gpsm_fail
@@ -909,6 +903,16 @@ g_prepare_state_meta_arena:
     mov [rip+g_phys_state_last_use_ptr],rax
     add rax,rcx
     mov [rip+g_phys_state_guard_ptr],rax
+    add rax,rcx
+    mov [rip+g_phys_update_order_ptr],rax
+    add rax,rcx
+    mov [rip+g_phys_update_position_ptr],rax
+    add rax,rcx
+    mov [rip+g_phys_update_pending_ptr],rax
+    add rax,rcx
+    mov [rip+g_phys_update_total_ptr],rax
+    add rax,rcx
+    mov [rip+g_phys_update_expr_ptr],rax
     xor eax,eax
     pop rbx
     ret
@@ -918,9 +922,71 @@ g_prepare_state_meta_arena:
     ret
 
 # Compiler-side type metadata follows represented DOM cardinality. One arena
-# stages input/output type identities plus one 16-byte Rank-N TypePhysicalFact
+# stages input/output type identities plus one immutable Rank-N TypePhysicalFact
 # per interned fpP type. Distinct fpP types therefore consume only represented-
 # source space; precision and Fourier geometry share one AOT authority.
+
+# Compiler-only final-StateFact projection metadata. A projection exists only
+# when some downstream expression actually consumes iterate.field. Capacity is
+# represented DOM cardinality; no state-count or FOM-specific table exists.
+g_prepare_iter_projection_arena:
+    push rbx
+    mov rbx,rdi
+    test rbx,rbx
+    jnz .gpipa_have
+    mov ebx,1
+.gpipa_have:
+    mov rax,rbx
+    shr rax,32
+    jnz .gpipa_fail
+    mov rdi,[rip+g_iter_projection_arena_ptr]
+    test rdi,rdi
+    jz .gpipa_size
+    mov rsi,[rip+g_iter_projection_arena_bytes]
+    mov eax,SYS_munmap
+    syscall
+.gpipa_size:
+    # iter_symbol[8] + state_name[8] + state_len[8] + slot/type/state_index[4 each]
+    mov rax,rbx
+    imul rax,rax,36
+    jo .gpipa_fail
+    add rax,63
+    jc .gpipa_fail
+    and rax,-64
+    mov [rip+g_iter_projection_arena_bytes],rax
+    mov rsi,rax
+    mov eax,SYS_mmap
+    xor edi,edi
+    mov edx,PROT_READ_WRITE
+    mov r10d,MAP_PRIVATE_ANON
+    mov r8,-1
+    xor r9d,r9d
+    syscall
+    test rax,rax
+    js .gpipa_fail
+    mov [rip+g_iter_projection_arena_ptr],rax
+    mov dword ptr [rip+g_iter_projection_capacity],ebx
+    mov [rip+g_iter_projection_symbol_ptr],rax
+    mov rcx,rbx; shl rcx,3; add rax,rcx
+    mov [rip+g_iter_projection_name_ptr],rax
+    add rax,rcx
+    mov [rip+g_iter_projection_name_len],rax
+    add rax,rcx
+    mov rcx,rbx; shl rcx,2
+    mov [rip+g_iter_projection_slot_ptr],rax
+    add rax,rcx
+    mov [rip+g_iter_projection_type_ptr],rax
+    add rax,rcx
+    mov [rip+g_iter_projection_state_index_ptr],rax
+    mov dword ptr [rip+g_iter_projection_count],0
+    xor eax,eax
+    pop rbx
+    ret
+.gpipa_fail:
+    mov eax,1
+    pop rbx
+    ret
+
 g_prepare_io_meta_arena:
     push rbx
     mov rbx,rdi
@@ -938,7 +1004,7 @@ g_prepare_io_meta_arena:
     mov eax,SYS_munmap
     syscall
 .gpim_size:
-    imul rax,rbx,24             # input u32 + output u32 + Rank-N fact[16]
+    imul rax,rbx,(32+RPF_FACT_BYTES) # input/output metadata plus immutable type facts
     jo .gpim_fail
     add rax,63
     jc .gpim_fail
@@ -961,6 +1027,9 @@ g_prepare_io_meta_arena:
     mov rcx,rbx
     shl rcx,2
     add rax,rcx
+    mov [rip+g_input_ranges_ptr],rax
+    imul rdx,rbx,24
+    add rax,rdx
     mov [rip+g_output_types_ptr],rax
     add rax,rcx
     mov [rip+g_rankn_type_facts_ptr],rax
@@ -994,7 +1063,7 @@ g_prepare_phys_fact_arena:
     syscall
 .gppfa_size:
     mov rsi,rbx
-    imul rsi,rsi,112                 # fourteen aligned lanes/fact
+    imul rsi,rsi,140                 # fact cost, copy demand and causal frontier
     jo .gppfa_fail
     add rsi,63
     jc .gppfa_fail
@@ -1033,6 +1102,8 @@ g_prepare_phys_fact_arena:
     add rax,rdx
     mov [rip+g_phys_const_candidate_uses_ptr],rax
     add rax,rdx
+    mov [rip+g_phys_const_candidate_pool_ptr],rax
+    add rax,rdx
     mov [rip+g_phys_const_resident_bits_ptr],rax
     add rax,rdx
     mov [rip+g_phys_const_resident_type_ptr],rax
@@ -1040,6 +1111,16 @@ g_prepare_phys_fact_arena:
     mov [rip+g_phys_const_resident_reg_ptr],rax
     add rax,rdx
     mov [rip+g_phys_guard_region_uses_ptr],rax
+    add rax,rdx
+    mov [rip+g_packet_fact_scope_ptr],rax
+    lea rdx,[rbx*4]; add rax,rdx
+    mov [rip+g_packet_fact_mixed_ptr],rax
+    add rax,rdx
+    mov [rip+g_phys_cse_resident_cost_ptr],rax
+    add rax,rdx
+    mov [rip+g_phys_cse_candidate_moves_ptr],rax
+    add rax,rdx
+    mov [rip+g_phys_cse_resident_frontier_ptr],rax
     xor eax,eax
     pop rbx
     ret
@@ -1651,6 +1732,29 @@ g_semantic_expr_is_total:
     test rax,rax; jnz .gseit_yes
     mov rdi,r12; xor esi,esi; call g_semantic_var_representative
     test rax,rax; jnz .gseit_yes
+    # Total StateFact reads do not imply immutable invocation purity.
+    mov rdi,r12; lea rsi,[rip+gk_state]; mov edx,gk_state_end-gk_state; call obj_get
+    test rax,rax; jz .gseit_coordinate
+    mov rdi,[rax+8]; mov rsi,[rax+16]; call g_find_state
+    test rax,rax; jnz .gseit_yes
+    jmp .gseit_no
+.gseit_coordinate:
+    # Independent coordinates and identity pullbacks are immutable values.
+    mov rdi,r12; lea rsi,[rip+gk_axis]; mov edx,gk_axis_end-gk_axis; call obj_get
+    test rax,rax; jnz .gseit_yes
+    mov rdi,r12; lea rsi,[rip+gk_load]; mov edx,gk_load_end-gk_load; call obj_get
+    test rax,rax; jz .gseit_op
+    mov rdi,[rax+8]; mov rsi,[rax+16]; call g_find_symbol
+    test rax,rax; jz .gseit_no
+    cmp dword ptr [rax+16],GK_MAP; jne .gseit_no
+    mov rbx,[rax+32]
+    mov rdi,r12; call g_phys_identity_axis_episode
+    test eax,eax; jz .gseit_no
+    mov rdi,rbx; lea rsi,[rip+gk_expr]; mov edx,gk_expr_end-gk_expr; call obj_get
+    test rax,rax; jz .gseit_no
+    mov rdi,rax; call g_semantic_expr_is_total
+    jmp .gseit_done
+.gseit_op:
     mov rdi,r12; lea rsi,[rip+gk_op]; mov edx,gk_op_end-gk_op; call obj_get
     test rax,rax; jz .gseit_no
     mov r13,rax
@@ -1672,6 +1776,31 @@ g_semantic_expr_is_total:
     mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_bit_not]; mov ecx,gv_bit_not_end-gv_bit_not; call span_eq; test eax,eax; jnz .gseit_yes
     mov rdi,[r13+8]; mov rsi,[r13+16]; call g_is_bit_binary; test eax,eax; jnz .gseit_yes
 
+    # Lazy selection may reorder only total children. Native floating-point
+    # operations produce values (including NaN/infinity), not language traps.
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_select]; mov ecx,gv_select_end-gv_select; call span_eq; test eax,eax; jnz .gseit_yes
+    mov rdi,r12; call g_infer_expr; mov r15d,eax
+    cmp eax,GTYPE_F32; je .gseit_fp
+    cmp eax,GTYPE_F64; jne .gseit_numeric
+.gseit_fp:
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_square]; mov ecx,gv_square_end-gv_square; call span_eq; test eax,eax; jnz .gseit_yes
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_cast]; mov ecx,gv_cast_end-gv_cast; call span_eq; test eax,eax; jnz .gseit_yes
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_add]; mov ecx,gv_add_end-gv_add; call span_eq; test eax,eax; jnz .gseit_yes
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_sub]; mov ecx,gv_sub_end-gv_sub; call span_eq; test eax,eax; jnz .gseit_yes
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_mul]; mov ecx,gv_mul_end-gv_mul; call span_eq; test eax,eax; jnz .gseit_yes
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_div]; mov ecx,gv_div_end-gv_div; call span_eq; test eax,eax; jnz .gseit_yes
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_neg]; mov ecx,gv_neg_end-gv_neg; call span_eq; test eax,eax; jnz .gseit_yes
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_abs]; mov ecx,gv_abs_end-gv_abs; call span_eq; test eax,eax; jnz .gseit_yes
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_sqrt]; mov ecx,gv_sqrt_end-gv_sqrt; call span_eq; test eax,eax; jnz .gseit_yes
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_exp]; mov ecx,gv_exp_end-gv_exp; call span_eq; test eax,eax; jnz .gseit_yes
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_log]; mov ecx,gv_log_end-gv_log; call span_eq; test eax,eax; jnz .gseit_yes
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_sin]; mov ecx,gv_sin_end-gv_sin; call span_eq; test eax,eax; jnz .gseit_yes
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_cos]; mov ecx,gv_cos_end-gv_cos; call span_eq; test eax,eax; jnz .gseit_yes
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_min]; mov ecx,gv_min_end-gv_min; call span_eq; test eax,eax; jnz .gseit_yes
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_max]; mov ecx,gv_max_end-gv_max; call span_eq; test eax,eax; jnz .gseit_yes
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_fma]; mov ecx,3; call span_eq; test eax,eax; jnz .gseit_yes
+    jmp .gseit_no
+.gseit_numeric:
     # Integer min/max are total. Integer arithmetic is total only in the existing
     # wrap contract; trap arithmetic remains observable and therefore blocks
     # reordering through a nested subtree.
@@ -1679,6 +1808,17 @@ g_semantic_expr_is_total:
     cmp r15d,GTYPE_I64; je .gseit_int
     cmp r15d,GTYPE_U64; jne .gseit_no
 .gseit_int:
+    cmp r15d,GTYPE_U64; jne .gseit_int_regular
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_mod]; mov ecx,gv_mod_end-gv_mod; call span_eq; test eax,eax; jnz .gseit_unsigned_divisor
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_div]; mov ecx,gv_div_end-gv_div; call span_eq; test eax,eax; jz .gseit_int_regular
+.gseit_unsigned_divisor:
+    mov rdi,r12; lea rsi,[rip+gk_args]; mov edx,gk_args_end-gk_args; call obj_get
+    mov rdi,[rax+24]; mov rdi,[rdi+32]; test rdi,rdi; jz .gseit_no
+    cmp qword ptr [rdi+32],0; jne .gseit_no
+    call g_expr_u64_literal; test edx,edx; jnz .gseit_no
+    test rax,rax; jz .gseit_no
+    jmp .gseit_yes
+.gseit_int_regular:
     mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_min]; mov ecx,gv_min_end-gv_min; call span_eq; test eax,eax; jnz .gseit_yes
     mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_max]; mov ecx,gv_max_end-gv_max; call span_eq; test eax,eax; jnz .gseit_yes
     cmp dword ptr [rip+g_overflow_wrap],1; jne .gseit_no
@@ -1699,91 +1839,113 @@ g_semantic_expr_is_total:
 # when the expression is only an identity shell around a direct fact. This is
 # proof-directed erasure, not AST rewriting: the source node remains untouched.
 g_semantic_identity_representative:
+    push rbx
+    mov ebx,esi
+    call g_semantic_identity_operand
+    test rax,rax; jz .gsir_done
+    mov rdi,rax; mov esi,ebx; call g_semantic_var_representative
+.gsir_done: pop rbx; ret
+
+# rdi=expression, esi=natural type -> rax=proper identity operand or zero.
+# No node rewrite, alternative IR, reassociation or eager arm execution occurs.
+g_semantic_identity_operand:
     push rbx; push r12; push r13; push r14; push r15
     mov r12,rdi; mov r13d,esi
-    mov rdi,r12; call g_infer_expr; cmp eax,r13d; jne .gsir_no
+    mov rdi,r12; call g_infer_expr; cmp eax,r13d; jne .gsio_no
     mov rdi,r12; lea rsi,[rip+gk_op]; mov edx,gk_op_end-gk_op; call obj_get
-    test rax,rax; jz .gsir_no
+    test rax,rax; jz .gsio_no
     mov r14,rax
     mov rdi,r12; lea rsi,[rip+gk_args]; mov edx,gk_args_end-gk_args; call obj_get
-    test rax,rax; jz .gsir_no
-    cmp qword ptr [rax],J_ARRAY; jne .gsir_no
-    mov r15,[rax+24]; test r15,r15; jz .gsir_no
+    test rax,rax; jz .gsio_no
+    cmp qword ptr [rax],J_ARRAY; jne .gsio_no
+    mov r15,[rax+24]; test r15,r15; jz .gsio_no
 
     # Same-type cast is representation identity.
     mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_cast]; mov ecx,gv_cast_end-gv_cast; call span_eq
-    test eax,eax; jz .gsir_binary
-    cmp qword ptr [r15+32],0; jne .gsir_no
-    mov rdi,r15; mov esi,r13d; call g_semantic_var_representative
-    jmp .gsir_done
+    test eax,eax; jz .gsio_binary
+    cmp qword ptr [r15+32],0; jne .gsio_no
+    mov rax,r15; jmp .gsio_operand_type
 
-.gsir_binary:
-    mov rbx,[r15+32]; test rbx,rbx; jz .gsir_no
-    cmp qword ptr [rbx+32],0; jne .gsir_no
-    cmp r13d,GTYPE_BOOL; je .gsir_bool
-    cmp r13d,GTYPE_I64; je .gsir_int
-    cmp r13d,GTYPE_U64; jne .gsir_no
-.gsir_int:
+.gsio_binary:
+    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_select]; mov ecx,gv_select_end-gv_select; call span_eq
+    test eax,eax; jz .gsio_binary_pair
+    mov rbx,[r15+32]; test rbx,rbx; jz .gsio_no
+    mov r14,[rbx+32]; test r14,r14; jz .gsio_no
+    cmp qword ptr [r14+32],0; jne .gsio_no
+    mov rdi,r15; call g_expr_bool_literal; test edx,edx; jnz .gsio_no
+    test eax,eax; jnz .gsio_return_right
+    mov rax,r14; jmp .gsio_operand_type
+.gsio_binary_pair:
+    mov rbx,[r15+32]; test rbx,rbx; jz .gsio_no
+    cmp qword ptr [rbx+32],0; jne .gsio_no
+    cmp r13d,GTYPE_BOOL; je .gsio_bool
+    cmp r13d,GTYPE_I64; je .gsio_int
+    cmp r13d,GTYPE_U64; jne .gsio_no
+.gsio_int:
     # Right identity literal.
     mov rdi,rbx; call g_semantic_int01_literal
-    test ecx,ecx; jnz .gsir_int_left
-    cmp edx,r13d; jne .gsir_int_left
+    test ecx,ecx; jnz .gsio_int_left
+    cmp edx,r13d; jne .gsio_int_left
     mov r12d,eax
-    cmp r12d,0; jne .gsir_right_one
-    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_add]; mov ecx,gv_add_end-gv_add; call span_eq; test eax,eax; jnz .gsir_return_left
-    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_sub]; mov ecx,gv_sub_end-gv_sub; call span_eq; test eax,eax; jnz .gsir_return_left
-    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_bit_or]; mov ecx,gv_bit_or_end-gv_bit_or; call span_eq; test eax,eax; jnz .gsir_return_left
-    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_bit_xor]; mov ecx,gv_bit_xor_end-gv_bit_xor; call span_eq; test eax,eax; jnz .gsir_return_left
-    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_shl]; mov ecx,gv_shl_end-gv_shl; call span_eq; test eax,eax; jnz .gsir_return_left
-    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_shr]; mov ecx,gv_shr_end-gv_shr; call span_eq; test eax,eax; jnz .gsir_return_left
-    jmp .gsir_int_left
-.gsir_right_one:
-    cmp r12d,1; jne .gsir_int_left
-    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_mul]; mov ecx,gv_mul_end-gv_mul; call span_eq; test eax,eax; jnz .gsir_return_left
-    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_div]; mov ecx,gv_div_end-gv_div; call span_eq; test eax,eax; jnz .gsir_return_left
-.gsir_int_left:
+    cmp r12d,0; jne .gsio_right_one
+    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_add]; mov ecx,gv_add_end-gv_add; call span_eq; test eax,eax; jnz .gsio_return_left
+    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_sub]; mov ecx,gv_sub_end-gv_sub; call span_eq; test eax,eax; jnz .gsio_return_left
+    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_bit_or]; mov ecx,gv_bit_or_end-gv_bit_or; call span_eq; test eax,eax; jnz .gsio_return_left
+    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_bit_xor]; mov ecx,gv_bit_xor_end-gv_bit_xor; call span_eq; test eax,eax; jnz .gsio_return_left
+    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_shl]; mov ecx,gv_shl_end-gv_shl; call span_eq; test eax,eax; jnz .gsio_return_left
+    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_shr]; mov ecx,gv_shr_end-gv_shr; call span_eq; test eax,eax; jnz .gsio_return_left
+    jmp .gsio_int_left
+.gsio_right_one:
+    cmp r12d,1; jne .gsio_int_left
+    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_mul]; mov ecx,gv_mul_end-gv_mul; call span_eq; test eax,eax; jnz .gsio_return_left
+    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_div]; mov ecx,gv_div_end-gv_div; call span_eq; test eax,eax; jnz .gsio_return_left
+.gsio_int_left:
     mov rdi,r15; call g_semantic_int01_literal
-    test ecx,ecx; jnz .gsir_no
-    cmp edx,r13d; jne .gsir_no
+    test ecx,ecx; jnz .gsio_no
+    cmp edx,r13d; jne .gsio_no
     mov r12d,eax
-    cmp r12d,0; jne .gsir_left_one
-    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_add]; mov ecx,gv_add_end-gv_add; call span_eq; test eax,eax; jnz .gsir_return_right
-    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_bit_or]; mov ecx,gv_bit_or_end-gv_bit_or; call span_eq; test eax,eax; jnz .gsir_return_right
-    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_bit_xor]; mov ecx,gv_bit_xor_end-gv_bit_xor; call span_eq; test eax,eax; jnz .gsir_return_right
-    jmp .gsir_no
-.gsir_left_one:
-    cmp r12d,1; jne .gsir_no
-    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_mul]; mov ecx,gv_mul_end-gv_mul; call span_eq; test eax,eax; jnz .gsir_return_right
-    jmp .gsir_no
+    cmp r12d,0; jne .gsio_left_one
+    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_add]; mov ecx,gv_add_end-gv_add; call span_eq; test eax,eax; jnz .gsio_return_right
+    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_bit_or]; mov ecx,gv_bit_or_end-gv_bit_or; call span_eq; test eax,eax; jnz .gsio_return_right
+    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_bit_xor]; mov ecx,gv_bit_xor_end-gv_bit_xor; call span_eq; test eax,eax; jnz .gsio_return_right
+    jmp .gsio_no
+.gsio_left_one:
+    cmp r12d,1; jne .gsio_no
+    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_mul]; mov ecx,gv_mul_end-gv_mul; call span_eq; test eax,eax; jnz .gsio_return_right
+    jmp .gsio_no
 
-.gsir_bool:
+.gsio_bool:
     # x && true, true && x, x || false, false || x, x xor false.
-    mov rdi,rbx; call g_expr_bool_literal; test edx,edx; jnz .gsir_bool_left
+    mov rdi,rbx; call g_expr_bool_literal; test edx,edx; jnz .gsio_bool_left
     mov r12d,eax
-    cmp r12d,1; jne .gsir_bool_right_false
-    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_and]; mov ecx,gv_and_end-gv_and; call span_eq; test eax,eax; jnz .gsir_return_left
-    jmp .gsir_bool_left
-.gsir_bool_right_false:
-    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_or]; mov ecx,gv_or_end-gv_or; call span_eq; test eax,eax; jnz .gsir_return_left
-    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_xor]; mov ecx,gv_xor_end-gv_xor; call span_eq; test eax,eax; jnz .gsir_return_left
-.gsir_bool_left:
-    mov rdi,r15; call g_expr_bool_literal; test edx,edx; jnz .gsir_no
+    cmp r12d,1; jne .gsio_bool_right_false
+    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_and]; mov ecx,gv_and_end-gv_and; call span_eq; test eax,eax; jnz .gsio_return_left
+    jmp .gsio_bool_left
+.gsio_bool_right_false:
+    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_or]; mov ecx,gv_or_end-gv_or; call span_eq; test eax,eax; jnz .gsio_return_left
+    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_xor]; mov ecx,gv_xor_end-gv_xor; call span_eq; test eax,eax; jnz .gsio_return_left
+.gsio_bool_left:
+    mov rdi,r15; call g_expr_bool_literal; test edx,edx; jnz .gsio_no
     mov r12d,eax
-    cmp r12d,1; jne .gsir_bool_left_false
-    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_and]; mov ecx,gv_and_end-gv_and; call span_eq; test eax,eax; jnz .gsir_return_right
-    jmp .gsir_no
-.gsir_bool_left_false:
-    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_or]; mov ecx,gv_or_end-gv_or; call span_eq; test eax,eax; jnz .gsir_return_right
-    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_xor]; mov ecx,gv_xor_end-gv_xor; call span_eq; test eax,eax; jnz .gsir_return_right
-    jmp .gsir_no
+    cmp r12d,1; jne .gsio_bool_left_false
+    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_and]; mov ecx,gv_and_end-gv_and; call span_eq; test eax,eax; jnz .gsio_return_right
+    jmp .gsio_no
+.gsio_bool_left_false:
+    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_or]; mov ecx,gv_or_end-gv_or; call span_eq; test eax,eax; jnz .gsio_return_right
+    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_xor]; mov ecx,gv_xor_end-gv_xor; call span_eq; test eax,eax; jnz .gsio_return_right
+    jmp .gsio_no
 
-.gsir_return_left:
-    mov rdi,r15; mov esi,r13d; call g_semantic_var_representative; jmp .gsir_done
-.gsir_return_right:
-    mov rdi,rbx; mov esi,r13d; call g_semantic_var_representative; jmp .gsir_done
-.gsir_no:
+.gsio_return_left:
+    mov rax,r15; jmp .gsio_operand_type
+.gsio_return_right:
+    mov rax,rbx; jmp .gsio_operand_type
+.gsio_operand_type:
+    mov r12,rax; mov rdi,rax; call g_infer_expr
+    cmp eax,r13d; jne .gsio_no
+    mov rax,r12; jmp .gsio_done
+.gsio_no:
     xor eax,eax
-.gsir_done:
+.gsio_done:
     pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
 # rdi=nodeA,rsi=nodeB -> eax=1 iff equivalence follows from the existing typed
@@ -2008,8 +2170,13 @@ g_infer_expr:
 .gie_field:
     mov rdi,r12; lea rsi,[rip+gk_field]; mov edx,gk_field_end-gk_field; call obj_get
     test rax,rax; jz .gie_load
-    mov rdi,rax; call g_resolve_field_expr
+    mov r13,rax
+    mov rdi,r13; call g_resolve_field_expr
+    test rax,rax; jnz .gie_field_static
+    mov rdi,r13; call g_iter_field_info
     test rax,rax; jz .gie_bad
+    mov eax,ecx; jmp .gie_done
+.gie_field_static:
     mov rdi,rax; call g_infer_expr; jmp .gie_done
 .gie_load:
     mov rdi,r12; lea rsi,[rip+gk_load]; mov edx,gk_load_end-gk_load; call obj_get
@@ -2033,9 +2200,6 @@ g_infer_expr:
     mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_cast]; mov ecx,gv_cast_end-gv_cast; call span_eq
     test eax,eax; jz 1f
     mov rdi,r12; lea rsi,[rip+gk_to]; mov edx,gk_to_end-gk_to; call obj_get
-    test rax,rax; jnz .gie_cast_type_found
-    mov rdi,r12; lea rsi,[rip+gk_type]; mov edx,gk_type_end-gk_type; call obj_get
-.gie_cast_type_found:
     test rax,rax; jz .gie_bad
     mov rdi,rax; call g_type_from_node; jmp .gie_done
 1:  mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_not]; mov ecx,gv_not_end-gv_not; call span_eq
@@ -2050,7 +2214,7 @@ g_infer_expr:
     mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_sqrt]; mov ecx,gv_sqrt_end-gv_sqrt; call span_eq
     test eax,eax; jnz .gie_unary_fp_wide
     mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_square]; mov ecx,gv_square_end-gv_square; call span_eq
-    test eax,eax; jnz .gie_unary_fp
+    test eax,eax; jnz .gie_unary_fp_wide
     mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_trunc]; mov ecx,gv_trunc_end-gv_trunc; call span_eq
     test eax,eax; jnz .gie_unary_fp
     mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_exp]; mov ecx,gv_exp_end-gv_exp; call span_eq
@@ -2061,6 +2225,19 @@ g_infer_expr:
     test eax,eax; jnz .gie_unary_fp_wide
     mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_cos]; mov ecx,gv_cos_end-gv_cos; call span_eq
     test eax,eax; jnz .gie_unary_fp_wide
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_fma]; mov ecx,3; call span_eq
+    test eax,eax; jz .gie_select_probe
+    mov r15,r14; xor ebx,ebx
+.gie_fma_operand:
+    mov rdi,r15; call g_infer_expr; test eax,eax; jz .gie_bad
+    test ebx,ebx; jz .gie_fma_first
+    mov edx,eax; mov eax,ebx; call g_low_type
+.gie_fma_first: mov ebx,eax
+    mov r15,[r15+32]; test r15,r15; jnz .gie_fma_operand
+    cmp ebx,GTYPE_F32; je .gie_fma_done
+    cmp ebx,GTYPE_F64; jne .gie_bad
+.gie_fma_done: mov eax,ebx; jmp .gie_done
+.gie_select_probe:
     # select has 3 args; result branch low-dominant
     mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_select]; mov ecx,gv_select_end-gv_select; call span_eq
     test eax,eax; jz .gie_binary
@@ -2077,7 +2254,7 @@ g_infer_expr:
     # comparisons
     mov rdi,[r13+8]; mov rsi,[r13+16]; call g_is_compare_op; test eax,eax; jnz .gie_bool
     mov rdi,[r13+8]; mov rsi,[r13+16]; call g_is_bool_binary; test eax,eax; jnz .gie_bool
-    mov rdi,[r13+8]; mov rsi,[r13+16]; call g_is_shift_op; test eax,eax; jnz .gie_u64
+    mov rdi,[r13+8]; mov rsi,[r13+16]; call g_is_shift_op; test eax,eax; jnz .gie_shift
     mov rdi,[r13+8]; mov rsi,[r13+16]; call g_is_bit_binary; test eax,eax; jnz .gie_int_low
     mov eax,ebx; mov edx,r14d; call g_low_type; jmp .gie_done
 .gie_int_low:
@@ -2095,7 +2272,10 @@ g_infer_expr:
     cmp eax,GTYPE_F32; je .gie_done; cmp eax,GTYPE_F64; je .gie_done
     mov ebx,eax; mov edi,eax; call g_is_rankn_fp; test eax,eax; jz .gie_bad; mov eax,ebx; jmp .gie_done
 .gie_bool: mov eax,GTYPE_BOOL; jmp .gie_done
-.gie_u64: mov eax,GTYPE_U64; jmp .gie_done
+.gie_shift:
+    cmp ebx,GTYPE_U64; je 1f; cmp ebx,GTYPE_I64; jne .gie_bad
+1:  cmp r14d,GTYPE_U64; je 2f; cmp r14d,GTYPE_I64; jne .gie_bad
+2:  mov eax,ebx; jmp .gie_done
 .gie_bad: xor eax,eax
 .gie_done:
     pop r15; pop r14; pop r13; pop r12; pop rbx; ret
@@ -2266,6 +2446,178 @@ g_find_state:
 .gfst_next: inc ecx; jmp .gfst_loop
 .gfst_no: xor eax,eax; ret
 
+
+# field object -> rax=iterate symbol/0, edx=state declaration index, ecx=state type.
+# Static records are deliberately not accepted here; they retain the old
+# compile-time structural expansion authority.
+g_iter_field_info:
+    push rbx; push r12; push r13; push r14; push r15
+    mov rbx,rdi
+    mov rdi,rbx; lea rsi,[rip+gk_record]; mov edx,gk_record_end-gk_record; call obj_get
+    test rax,rax; jz .gifi_no
+    cmp qword ptr [rax],J_STRING; jne .gifi_no
+    mov rdi,[rax+8]; mov rsi,[rax+16]; call g_find_symbol
+    test rax,rax; jz .gifi_no
+    cmp dword ptr [rax+16],GK_ITERATE; jne .gifi_no
+    mov r12,rax
+    mov rdi,rbx; lea rsi,[rip+gk_name]; mov edx,gk_name_end-gk_name; call obj_get
+    test rax,rax; jz .gifi_no
+    cmp qword ptr [rax],J_STRING; jne .gifi_no
+    mov r13,[rax+8]; mov r15,[rax+16]
+    mov rdi,[r12+32]; lea rsi,[rip+gk_states]; mov edx,gk_states_end-gk_states; call obj_get
+    test rax,rax; jz .gifi_no
+    cmp qword ptr [rax],J_ARRAY; jne .gifi_no
+    mov rbx,[rax+24]; xor r14d,r14d
+.gifi_state_loop:
+    test rbx,rbx; jz .gifi_no
+    mov rdi,rbx; lea rsi,[rip+gk_name]; mov edx,gk_name_end-gk_name; call obj_get
+    test rax,rax; jz .gifi_no
+    mov rdi,[rax+8]; mov rsi,[rax+16]; mov rdx,r13; mov rcx,r15; call span_eq
+    test eax,eax; jnz .gifi_found
+    inc r14d; mov rbx,[rbx+32]; jmp .gifi_state_loop
+.gifi_found:
+    mov rdi,rbx; lea rsi,[rip+gk_type]; mov edx,gk_type_end-gk_type; call obj_get
+    test rax,rax; jz .gifi_no
+    mov rdi,rax; call g_type_from_node
+    test eax,eax; jz .gifi_no
+    mov r15d,eax
+    mov rax,r12; mov edx,r14d; mov ecx,r15d
+    jmp .gifi_done
+.gifi_no:
+    xor eax,eax; xor edx,edx; xor ecx,ecx
+.gifi_done:
+    pop r15; pop r14; pop r13; pop r12; pop rbx; ret
+
+# rdi=iterate symbol -> eax=result state declaration index, or -1.
+g_iter_result_state_index:
+    push rbx; push r12; push r13; push r14
+    mov r12,rdi
+    mov rdi,[r12+32]; lea rsi,[rip+gk_result]; mov edx,gk_result_end-gk_result; call obj_get
+    test rax,rax; jz .girsi_no
+    cmp qword ptr [rax],J_STRING; jne .girsi_no
+    mov r13,[rax+8]; mov r14,[rax+16]
+    mov rdi,[r12+32]; lea rsi,[rip+gk_states]; mov edx,gk_states_end-gk_states; call obj_get
+    test rax,rax; jz .girsi_no
+    mov rbx,[rax+24]; xor r12d,r12d
+.girsi_loop:
+    test rbx,rbx; jz .girsi_no
+    mov rdi,rbx; lea rsi,[rip+gk_name]; mov edx,gk_name_end-gk_name; call obj_get
+    test rax,rax; jz .girsi_no
+    mov rdi,[rax+8]; mov rsi,[rax+16]; mov rdx,r13; mov rcx,r14; call span_eq
+    test eax,eax; jnz .girsi_yes
+    inc r12d; mov rbx,[rbx+32]; jmp .girsi_loop
+.girsi_yes:
+    mov eax,r12d; jmp .girsi_done
+.girsi_no:
+    mov eax,-1
+.girsi_done:
+    pop r14; pop r13; pop r12; pop rbx; ret
+
+# rdi=iterate symbol, esi=state index -> eax=projection index or -1.
+g_iter_projection_find_key:
+    xor ecx,ecx
+.gipfk_loop:
+    cmp ecx,dword ptr [rip+g_iter_projection_count]; jae .gipfk_no
+    mov rax,[rip+g_iter_projection_symbol_ptr]
+    cmp qword ptr [rax+rcx*8],rdi; jne .gipfk_next
+    mov rax,[rip+g_iter_projection_state_index_ptr]
+    cmp dword ptr [rax+rcx*4],esi; je .gipfk_yes
+.gipfk_next:
+    inc ecx; jmp .gipfk_loop
+.gipfk_yes:
+    mov eax,ecx; ret
+.gipfk_no:
+    mov eax,-1; ret
+
+# rdi=canonical field object. Register one unique downstream iterate-StateFact
+# projection. -> eax=0 success/no-op, 1 malformed iterate projection/resource.
+g_iter_projection_ensure:
+    push rbx; push r12; push r13; push r14; push r15
+    mov rbx,rdi
+    call g_iter_field_info
+    test rax,rax; jz .gipe_ok                 # static/non-iterate field
+    mov r12,rax; mov r13d,edx; mov r14d,ecx
+    mov rdi,r12; mov esi,r13d; call g_iter_projection_find_key
+    cmp eax,-1; jne .gipe_ok
+    mov r15d,dword ptr [rip+g_iter_projection_count]
+    cmp r15d,dword ptr [rip+g_iter_projection_capacity]; jae .gipe_bad
+    mov rax,[rip+g_iter_projection_symbol_ptr]; mov [rax+r15*8],r12
+    mov rdi,rbx; lea rsi,[rip+gk_name]; mov edx,gk_name_end-gk_name; call obj_get
+    test rax,rax; jz .gipe_bad
+    mov rdx,[rip+g_iter_projection_name_ptr]; mov rcx,[rax+8]; mov [rdx+r15*8],rcx
+    mov rdx,[rip+g_iter_projection_name_len]; mov rcx,[rax+16]; mov [rdx+r15*8],rcx
+    mov rax,[rip+g_iter_projection_type_ptr]; mov [rax+r15*4],r14d
+    mov rax,[rip+g_iter_projection_state_index_ptr]; mov [rax+r15*4],r13d
+    mov rdi,r12; call g_iter_result_state_index
+    cmp eax,r13d; jne .gipe_new_slot
+    mov eax,dword ptr [r12+24]
+    jmp .gipe_store_slot
+.gipe_new_slot:
+    mov eax,dword ptr [rip+g_binding_slot_count]
+    cmp eax,-1; je .gipe_bad
+    inc dword ptr [rip+g_binding_slot_count]
+.gipe_store_slot:
+    mov rdx,[rip+g_iter_projection_slot_ptr]; mov [rdx+r15*4],eax
+    inc dword ptr [rip+g_iter_projection_count]
+.gipe_ok:
+    xor eax,eax; jmp .gipe_done
+.gipe_bad:
+    mov eax,1
+.gipe_done:
+    pop r15; pop r14; pop r13; pop r12; pop rbx; ret
+
+# rdi=canonical field object -> eax=projection index+1, or 0.
+g_iter_projection_lookup_field:
+    push rbx; push r12
+    mov rbx,rdi
+    call g_iter_field_info
+    test rax,rax; jz .giplf_no
+    mov r12,rax
+    mov rdi,r12; mov esi,edx; call g_iter_projection_find_key
+    cmp eax,-1; je .giplf_no
+    inc eax; jmp .giplf_done
+.giplf_no:
+    xor eax,eax
+.giplf_done:
+    pop r12; pop rbx; ret
+
+# Recursive represented-DOM scan. Only real iterate field consumers allocate
+# runtime publication slots; declaration/state cardinality alone cannot do so.
+g_discover_iterate_projections_node:
+    push rbx; push r12
+    mov rbx,rdi
+    test rbx,rbx; jz .gdipn_ok
+    mov rax,[rbx]
+    cmp rax,J_OBJECT; je .gdipn_obj
+    cmp rax,J_ARRAY; je .gdipn_arr
+    jmp .gdipn_ok
+.gdipn_obj:
+    mov rdi,rbx; lea rsi,[rip+gk_field]; mov edx,gk_field_end-gk_field; call obj_get
+    test rax,rax; jz .gdipn_obj_recurse
+    cmp qword ptr [rax],J_OBJECT; jne .gdipn_bad
+    mov rdi,rax; call g_iter_projection_ensure
+    test eax,eax; jnz .gdipn_bad
+.gdipn_obj_recurse:
+    mov r12,[rbx+24]
+.gdipn_obj_loop:
+    test r12,r12; jz .gdipn_ok
+    mov rdi,r12; call g_discover_iterate_projections_node
+    test eax,eax; jnz .gdipn_bad
+    mov r12,[r12+32]; jmp .gdipn_obj_loop
+.gdipn_arr:
+    mov r12,[rbx+24]
+.gdipn_arr_loop:
+    test r12,r12; jz .gdipn_ok
+    mov rdi,r12; call g_discover_iterate_projections_node
+    test eax,eax; jnz .gdipn_bad
+    mov r12,[r12+32]; jmp .gdipn_arr_loop
+.gdipn_ok:
+    xor eax,eax; jmp .gdipn_done
+.gdipn_bad:
+    mov eax,1
+.gdipn_done:
+    pop r12; pop rbx; ret
+
 # field object -> underlying expression node
 g_resolve_field_expr:
     push rbx; push r12
@@ -2308,24 +2660,87 @@ g_dictlookup_value_type:
     mov rdi,rax; call g_type_from_node; pop rbx; ret
 .gdlvt_bad: xor eax,eax; pop rbx; ret
 
+# A code-position consumer is an emission frontier just like an opaque byte
+# primitive. Settle the current scalar window before publishing any label,
+# patch target, cursor comparison, rollback point or measured byte extent.
+# The window's internal cursor observations remain private to its encoder.
+.macro G_EMIT_POSITION reg
+    call g_phys_window_barrier
+    mov \reg,[rip+g_emit_ptr]
+.endm
+
+# Loop entry is a physical emission boundary. The existing target cache-line
+# geometry fixes its byte phase independently of carrier/encoding choices.
+# Padding precedes the published backedge target, never the steady-state body.
+.macro G_EMIT_LOOP_POSITION reg, failure
+    call g_emit_loop_align
+    test eax,eax; jnz \failure
+    mov \reg,[rip+g_emit_ptr]
+.endm
+
 # ---------------- native code buffer primitives ----------------
+# One entry-only layout primitive for General folds and transitions. The AOT
+# payload preserves each source fragment's cache-line phase. Architectural
+# multi-byte NOPs minimize cold fallthrough work; there is no runtime selector.
+g_emit_loop_align:
+    call g_phys_window_barrier
+    mov rdi,[rip+g_emit_ptr]
+    mov rax,rdi; sub rax,[rip+g_code_ptr]
+    neg eax; and eax,PRC_CACHE_LINE_BYTES-1
+    lea rcx,[rdi+rax]; cmp rcx,[rip+g_emit_end]; ja .ge_fail
+    mov esi,eax; call g_phys_fill_nops
+    mov [rip+g_emit_ptr],rdi
+    xor eax,eax; ret
+
+# rdi=proved byte span, esi=length -> rdi=end. Shared by direct emission and
+# Region composition; callers own arena bounds. No flags/value is consumed.
+g_phys_fill_nops:
+    push rbx; push r12
+    mov r12d,esi
+.gpfn_next:
+    test r12d,r12d; jz .gpfn_done
+    mov ebx,9; cmp r12d,ebx; cmovb ebx,r12d
+    lea rax,[rip+gc_nop_offsets]; movzx eax,byte ptr [rax+rbx]
+    lea rsi,[rip+gc_nop_bytes]; add rsi,rax
+    mov ecx,ebx; rep movsb
+    sub r12d,ebx; jmp .gpfn_next
+.gpfn_done: pop r12; pop rbx; ret
+.pushsection .rodata
+gc_nop_offsets: .byte 0,0,1,3,6,10,15,21,28,36
+gc_nop_bytes:
+    .byte 0x90
+    .byte 0x66,0x90
+    .byte 0x0f,0x1f,0x00
+    .byte 0x0f,0x1f,0x40,0x00
+    .byte 0x0f,0x1f,0x44,0x00,0x00
+    .byte 0x66,0x0f,0x1f,0x44,0x00,0x00
+    .byte 0x0f,0x1f,0x80,0x00,0x00,0x00,0x00
+    .byte 0x0f,0x1f,0x84,0x00,0x00,0x00,0x00,0x00
+    .byte 0x66,0x0f,0x1f,0x84,0x00,0x00,0x00,0x00,0x00
+.popsection
 g_emit_u8:
+    call g_phys_window_barrier
     mov rax,[rip+g_emit_ptr]; cmp rax,[rip+g_emit_end]; jae .ge_fail
     mov [rax],dil; inc rax; mov [rip+g_emit_ptr],rax; xor eax,eax; ret
 .ge_fail: mov dword ptr [rip+g_code_overflow],1; mov eax,1; ret
 g_emit_u16:
+    call g_phys_window_barrier
     mov rax,[rip+g_emit_ptr]; lea rcx,[rax+2]; cmp rcx,[rip+g_emit_end]; ja .ge_fail
     mov [rax],di; mov [rip+g_emit_ptr],rcx; xor eax,eax; ret
 g_emit_u24:
+    call g_phys_window_barrier
     mov rax,[rip+g_emit_ptr]; lea rcx,[rax+3]; cmp rcx,[rip+g_emit_end]; ja .ge_fail
     mov [rax],di; shr edi,16; mov [rax+2],dil; mov [rip+g_emit_ptr],rcx; xor eax,eax; ret
 g_emit_u32:
+    call g_phys_window_barrier
     mov rax,[rip+g_emit_ptr]; lea rcx,[rax+4]; cmp rcx,[rip+g_emit_end]; ja .ge_fail
     mov [rax],edi; mov [rip+g_emit_ptr],rcx; xor eax,eax; ret
 g_emit_u64:
+    call g_phys_window_barrier
     mov rax,[rip+g_emit_ptr]; lea rcx,[rax+8]; cmp rcx,[rip+g_emit_end]; ja .ge_fail
     mov [rax],rdi; mov [rip+g_emit_ptr],rcx; xor eax,eax; ret
 g_emit_bytes:
+    call g_phys_window_barrier
     mov rax,[rip+g_emit_ptr]; mov ecx,esi; lea rdx,[rax+rcx]; cmp rdx,[rip+g_emit_end]; ja .ge_fail
 .geb_loop: test ecx,ecx; jz .geb_done; mov dl,[rdi]; mov [rax],dl; inc rdi; inc rax; dec ecx; jmp .geb_loop
 .geb_done: mov [rip+g_emit_ptr],rax; xor eax,eax; ret
@@ -2336,7 +2751,19 @@ g_emit_push_imm64:
 # 1.3.13 register-native expression primitive: materialize an immediate
 # directly into the runtime value register without routing through the machine stack.
 g_emit_mov_rax_imm64:
-    push rdi; mov edi,0xB848; call g_emit_u16; pop rdi; jmp g_emit_u64
+    mov rsi,rdi; xor edi,edi
+    jmp g_emit_phys_gpr_literal
+# edi=owned GPR, rsi=exact literal bits. Every literal uses the same encoder;
+# no RAX staging carrier is born for a literal consumed in another register.
+g_emit_phys_gpr_literal:
+    push rbx; push r12
+    mov ebx,edi; mov r12,rsi
+    mov eax,ebx; shr eax,3; and eax,1; or eax,0x48
+    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepgl_done
+    mov eax,ebx; and eax,7; add eax,0xB8
+    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepgl_done
+    mov rdi,r12; call g_emit_u64
+.gepgl_done: pop r12; pop rbx; ret
 g_emit_load_rax_abs:
     cmp dword ptr [rip+g_fragment_emit_open],0
     je 901f
@@ -2414,23 +2841,25 @@ g_emit_mov_eax_imm:
 # near branch helpers. Return rax = displacement field pointer.
 g_emit_jz_patch:
     mov edi,0x840F; call g_emit_u16
-    mov rdx,[rip+g_emit_ptr]; xor edi,edi; call g_emit_u32; mov rax,rdx; ret
+    G_EMIT_POSITION rdx; xor edi,edi; call g_emit_u32; mov rax,rdx; ret
 g_emit_jnz_patch:
     mov edi,0x850F; call g_emit_u16
-    mov rdx,[rip+g_emit_ptr]; xor edi,edi; call g_emit_u32; mov rax,rdx; ret
+    G_EMIT_POSITION rdx; xor edi,edi; call g_emit_u32; mov rax,rdx; ret
 # edi=near-Jcc second opcode byte (80..8F). Return displacement pointer.
 g_emit_jcc_patch_byte:
     push rbx
     mov ebx,edi
     mov edi,0x0F; call g_emit_u8; test eax,eax; jnz .gejpb_bad
     mov edi,ebx; call g_emit_u8; test eax,eax; jnz .gejpb_bad
-    mov rbx,[rip+g_emit_ptr]; xor edi,edi; call g_emit_u32; test eax,eax; jnz .gejpb_bad
+    G_EMIT_POSITION rbx; xor edi,edi; call g_emit_u32; test eax,eax; jnz .gejpb_bad
+    inc qword ptr [rip+g_phys_control_edge_serial]
     mov rax,rbx; pop rbx; ret
 .gejpb_bad:
     xor eax,eax; pop rbx; ret
 g_emit_jmp_patch:
+    inc qword ptr [rip+g_phys_control_edge_serial]
     mov edi,0xE9; call g_emit_u8
-    mov rdx,[rip+g_emit_ptr]; xor edi,edi; call g_emit_u32; mov rax,rdx; ret
+    G_EMIT_POSITION rdx; xor edi,edi; call g_emit_u32; mov rax,rdx; ret
 g_patch_rel32:
     # rdi=disp ptr, rsi=target
     mov rax,rsi; sub rax,rdi; sub rax,4; mov [rdi],eax; ret
@@ -2486,6 +2915,14 @@ g_alloc_runtime_temp_bytes:
 # No fixed bytes-per-limb envelope survives.
 # edi=encoded fpP -> rax=64-byte aligned object span /0.
 g_rankn_fp_object_span:
+    mov eax,edi
+    sub eax,GTYPE_RANKN_FP_BASE
+    imul rax,rax,RPF_FACT_BYTES
+    add rax,[rip+g_rankn_type_facts_ptr]
+    mov rax,[rax+RPF_FACT_SPAN]
+    ret
+
+g_materialize_rankn_fp_layout:
     push rbx
     push r12
     push r13
@@ -2501,11 +2938,14 @@ g_rankn_fp_object_span:
     jc .grfos_bad
     shr rax,6
     mov r13,rax                              # N
-    mov edi,ebx
-    call g_rankn_fourier_geom_pack
-    test eax,eax
-    jz .grfos_bad
-    mov r14d,eax                             # packed geometry
+    mov eax,ebx
+    sub eax,GTYPE_RANKN_FP_BASE
+    imul rax,rax,RPF_FACT_BYTES
+    add rax,[rip+g_rankn_type_facts_ptr]
+    mov [rsp+8],rax                          # sole type-layout destination
+    mov [rax+RPF_FACT_LIMBS],r13
+    mov r14d,[rax+RPF_FACT_PACKED]
+    test r14d,r14d; jz .grfos_bad
 
     # NFFT = 2^a2 * 3^a3 * 5^a5.
     mov ecx,r14d
@@ -2536,6 +2976,20 @@ g_rankn_fp_object_span:
     dec edx
     jmp .grfos_f5
 .grfos_have_fft:
+    mov r8,[rsp+8]
+    mov eax,r14d; and eax,255
+    mov [r8+RPF_FACT_FOURIER],eax
+    mov ecx,r14d; shr ecx,8; and ecx,255
+    mov [r8+RPF_FACT_FOURIER+4],ecx
+    mov ecx,r14d; shr ecx,16; and ecx,255
+    mov [r8+RPF_FACT_FOURIER+8],ecx
+    mov ecx,r14d; shr ecx,24
+    mov [r8+RPF_FACT_FOURIER+12],ecx
+    mov [r8+RPF_FACT_FOURIER+24],r15
+    mov ecx,eax
+    mov rax,r12; add rax,rcx; dec rax
+    xor edx,edx; div rcx
+    mov [r8+RPF_FACT_FOURIER+16],rax
     # primary_end = header + N payload limbs.
     mov rbx,r13
     shl rbx,3
@@ -2554,13 +3008,6 @@ g_rankn_fp_object_span:
     shl rcx,4
     jc .grfos_bad
     add rax,rcx
-    jc .grfos_bad
-    mov rcx,r15
-    shl rcx,3
-    jc .grfos_bad
-    add rax,rcx
-    jc .grfos_bad
-    add rax,16
     jc .grfos_bad
     add rax,63
     jc .grfos_bad
@@ -2641,6 +3088,8 @@ g_rankn_fp_object_span:
     add rax,63
     jc .grfos_bad
     and rax,-64
+    mov r8,[rsp+8]
+    mov [r8+RPF_FACT_SPAN],rax
     jmp .grfos_done
 .grfos_bad:
     xor eax,eax
@@ -2671,15 +3120,14 @@ g_alloc_rankn_fp_temp:
     xor eax,eax
     ret
 
-# Native-math fpP workspace.  One transcendental relation receives 32 ordinary
-# P-derived object spans.  The multiplier is structural workspace depth, not a
-# precision tier; every P>64 follows this same allocation relation.
+# Native-math workspace consumes the source-derived live slot extent.
+# P determines each carrier span; the capability determines their live count.
 g_alloc_rankn_fp_math_temp:
     call g_rankn_fp_object_span
     test rax,rax
     jz .garfmt_bad
-    shl rax,5                         # 32 equal exact object spans
-    jc .garfmt_bad
+    imul rax,rsi                      # source-derived capability extent
+    jo .garfmt_bad
     mov rdi,rax
     call g_alloc_runtime_temp_bytes
     test rax,rax
@@ -2790,29 +3238,21 @@ g_rankn_fourier_geom_pack:
     jnz .grfgp_candidate_next
     cmp rax,r8
     jae .grfgp_candidate_next
-    # Same continuous physical surface as the native runtime ingress fallback:
-    # N*(100*a2 + 120*a3 + 180*a5 + 10*a3^2 + 30*a5^2) + 40*n.
+    # One cost vocabulary prices the stage DAG and coefficient traffic.
+    # Independent quadratic radix penalties have no physical consumer.
     mov eax,r10d
-    imul eax,eax,100
+    imul eax,eax,PRC_FOURIER_RADIX2_TICKS
     mov ecx,[rsp+48]
-    mov edx,ecx
-    imul ecx,ecx,120
+    imul ecx,ecx,PRC_FOURIER_RADIX3_TICKS
     add eax,ecx
-    imul edx,edx
-    imul edx,edx,10
-    add eax,edx
     mov ecx,[rsp+64]
-    mov edx,ecx
-    imul ecx,ecx,180
+    imul ecx,ecx,PRC_FOURIER_RADIX5_TICKS
     add eax,ecx
-    imul edx,edx
-    imul edx,edx,30
-    add eax,edx
     mov ecx,eax
     mov rax,r11
     imul rax,rcx
     mov rcx,[rsp+16]
-    imul rcx,rcx,40
+    imul rcx,rcx,PRC_FOURIER_COEFFICIENT_TICKS
     add rax,rcx
     cmp rax,[rsp+0]
     jae .grfgp_candidate_next
@@ -2941,20 +3381,15 @@ g_emit_rankn_fp_cast_top:
     cmp r13d,GTYPE_F32; je .gerct_f32
     jmp .gerct_bad
 .gerct_f64:
-    mov edi,0x5F; call g_emit_u8
-    mov rdi,GENERAL_RANKN_FP_TO_F64_VA; call g_emit_call_abs
-    test eax,eax; jnz .gerct_bad
-    xor edi,edi; call g_emit_rankn_fp_status_check; test eax,eax; jnz .gerct_bad
-    mov edi,0x50; call g_emit_u8
-    jmp .gerct_ok
+    mov r14,GENERAL_RANKN_FP_TO_F64_VA
+    jmp .gerct_native
 .gerct_f32:
+    mov r14,GENERAL_RANKN_FP_TO_F32_VA
+.gerct_native:
     mov edi,0x5F; call g_emit_u8
-    mov rdi,GENERAL_RANKN_FP_TO_F64_VA; call g_emit_call_abs
+    mov rdi,r14; call g_emit_call_abs
     test eax,eax; jnz .gerct_bad
-    xor edi,edi; call g_emit_rankn_fp_status_check; test eax,eax; jnz .gerct_bad
     mov edi,0x50; call g_emit_u8
-    lea rdi,[rip+gc_cast_f64_f32]; mov esi,gc_cast_f64_f32_end-gc_cast_f64_f32; call g_emit_bytes
-    test eax,eax; jnz .gerct_bad
     jmp .gerct_ok
 .gerct_ok: xor eax,eax; jmp .gerct_done
 .gerct_bad: mov eax,1
@@ -2993,6 +3428,7 @@ g_emit_rankn_fp_binary_op:
 .gewbo_add: mov r12,GENERAL_RANKN_FP_ADD_VA; jmp .gewbo_emit
 .gewbo_sub: mov r12,GENERAL_RANKN_FP_SUB_VA; jmp .gewbo_emit
 .gewbo_mul:
+    mov edi,r14d; call g_require_rankn_twiddles
     mov r12,GENERAL_RANKN_FP_MUL_VA
     jmp .gewbo_emit
 .gewbo_div: mov r12,GENERAL_RANKN_FP_DIV_VA
@@ -3032,11 +3468,18 @@ g_emit_rankn_fp_unary_top:
 .gewut_done: pop r12; pop rbx; ret
 
 # edi=wide type, rsi=runtime transcendental authority VA.  Incoming generated
-# stack top is one fpP pointer; result is the slot-0 pointer of one local 32-slot
+# stack top is one fpP pointer; result is the slot-0 pointer of one source-derived
 # math workspace.  No named precision or algorithm selector exists here.
 g_emit_rankn_fp_math_unary_top:
     push rbx; push r12; push r13
     mov r13d,edi; mov r12,rsi
+    call g_require_rankn_twiddles
+    lea rax,[rip+g_rankn_math_layout_facts]
+.gerfmu_layout:
+    cmp [rax],r12; je .gerfmu_layout_found
+    add rax,16; jmp .gerfmu_layout
+.gerfmu_layout_found:
+    mov rsi,[rax+8]
     mov edi,r13d; call g_alloc_rankn_fp_math_temp; test rax,rax; jz .gerfmu_bad
     mov rbx,rax
     mov edi,0x5E; call g_emit_u8                   # pop rsi = source pointer
@@ -3184,8 +3627,7 @@ g_emit_u64_shift_imm:
 g_try_emit_u64_const_binary:
     push rbx; push r12; push r13; push r14; push r15
     mov rbx,rdi
-    mov rax,[rip+g_emit_ptr]; mov [rip+g_scalar_opt_emit_start],rax
-    cmp dword ptr [rip+g_overflow_wrap],1; jne .gteuc_no
+    G_EMIT_POSITION rax; mov [rip+g_scalar_opt_emit_start],rax
     mov rdi,rbx; lea rsi,[rip+gk_op]; mov edx,gk_op_end-gk_op; call obj_get
     test rax,rax; jz .gteuc_no
     mov r14,[rax+8]; mov r15,[rax+16]
@@ -3244,6 +3686,10 @@ g_try_emit_u64_const_binary:
 .gteuc_k_min: mov dword ptr [rip+g_scalar_opt_kind],11; jmp .gteuc_emit
 .gteuc_k_max: mov dword ptr [rip+g_scalar_opt_kind],12
 .gteuc_emit:
+    cmp dword ptr [rip+g_overflow_wrap],1; je .gteuc_semantics_ready
+    mov eax,dword ptr [rip+g_scalar_opt_kind]
+    cmp eax,3; jbe .gteuc_no                 # add/sub/mul need original trap guards
+.gteuc_semantics_ready:
     # preserve this recursion frame's constant/operator across nested emitter
     mov r13,[rip+g_scalar_const_value]
     mov r15d,dword ptr [rip+g_scalar_opt_kind]
@@ -3280,23 +3726,19 @@ g_try_emit_u64_const_binary:
     call g_emit_pop_rax; mov rdi,r13; call g_emit_mov_rcx_imm64
     lea rdi,[rip+gc_const_mul]; mov esi,gc_const_mul_end-gc_const_mul; call g_emit_bytes; jmp .gteuc_push_done
 .gteuc_div:
-    cmp r13,1; je .gteuc_identity
-    mov rax,r13; lea rcx,[rax-1]; test rax,rcx; jnz .gteuc_div_general
-    bsf rcx,r13; mov edi,ecx; mov esi,1; call g_emit_u64_shift_imm; jmp .gteuc_type_done
-.gteuc_div_general:
-    call g_emit_pop_rax; mov rdi,r13; call g_emit_mov_rcx_imm64
-    lea rdi,[rip+gc_const_udiv]; mov esi,gc_const_udiv_end-gc_const_udiv; call g_emit_bytes; jmp .gteuc_push_done
 .gteuc_mod:
-    cmp r13,1; jne .gteuc_mod_nonone
-    call g_emit_pop_rax; xor edi,edi; call g_emit_push_imm64; jmp .gteuc_type_done
-.gteuc_mod_nonone:
-    mov rax,r13; lea rcx,[rax-1]; test rax,rcx; jnz .gteuc_mod_general
-    dec r13
-    call g_emit_pop_rax; mov rdi,r13; call g_emit_mov_rcx_imm64
-    lea rdi,[rip+gc_const_and]; mov esi,gc_const_and_end-gc_const_and; call g_emit_bytes; jmp .gteuc_push_done
-.gteuc_mod_general:
-    call g_emit_pop_rax; mov rdi,r13; call g_emit_mov_rcx_imm64
-    lea rdi,[rip+gc_const_umod]; mov esi,gc_const_umod_end-gc_const_umod; call g_emit_bytes; jmp .gteuc_push_done
+    # The stack owns RAX already. The common emitter preserves only actual
+    # implicit MUL conflicts; an in-place AND/SHR never borrows R10.
+    call g_emit_pop_rax
+    push qword ptr [rip+g_phys_int_reserved_mask]
+    or dword ptr [rip+g_phys_int_reserved_mask],(1<<11)
+    call g_phys_int_temp_reset
+.gteuc_mod_reciprocal:
+    mov ecx,r15d; sub ecx,4; xor ecx,1
+    xor edi,edi; mov rsi,r13; call g_emit_phys_u64_const_divmod
+    pop qword ptr [rip+g_phys_int_reserved_mask]
+    test eax,eax; jnz .gteuc_rollback
+    jmp .gteuc_push_done
 .gteuc_and:
     cmp r13,-1; je .gteuc_identity
     call g_emit_pop_rax; mov rdi,r13; call g_emit_mov_rcx_imm64
@@ -3441,12 +3883,217 @@ g_note_fragment_dependency:
 .gnfd_done:
     ret
 
+# RangeFact: unsigned remainder by 0<d<=2^63 lies in [0,INT64_MAX].
+# This fact changes only the conversion primitive, never signedness, overflow,
+# division order or result bits. All other ranges keep the full u64 converter.
+g_u64_expr_fits_signed:
+    push rbx; push r12; push r13
+    mov r12,rdi
+    mov rdi,r12; call g_expr_u64_literal
+    test edx,edx; jnz .guefs_mod
+    test rax,rax; js .guefs_no
+    jmp .guefs_yes
+.guefs_mod:
+    mov rdi,r12; lea rsi,[rip+gk_op]; mov edx,gk_op_end-gk_op; call obj_get
+    test rax,rax; jz .guefs_no
+    mov rdi,[rax+8]; mov rsi,[rax+16]; lea rdx,[rip+gv_mod]; mov ecx,gv_mod_end-gv_mod; call span_eq
+    test eax,eax; jz .guefs_no
+    mov rdi,r12; lea rsi,[rip+gk_args]; mov edx,gk_args_end-gk_args; call obj_get
+    test rax,rax; jz .guefs_no
+    mov rax,[rax+24]; test rax,rax; jz .guefs_no
+    mov rdi,[rax+32]; test rdi,rdi; jz .guefs_no
+    call g_expr_u64_literal
+    test edx,edx; jnz .guefs_no
+    test rax,rax; jz .guefs_no
+    mov rcx,0x8000000000000000
+    cmp rax,rcx; ja .guefs_no
+.guefs_yes: mov eax,1; jmp .guefs_done
+.guefs_no: xor eax,eax
+.guefs_done: pop r13; pop r12; pop rbx; ret
+
+# RAX numeric payload -> RAX floating bits; use the inner value recipe shared
+# with the stack ABI. No operand-stack materialization belongs to this carrier.
+# edi=source U64/I64, esi=F32/F64.
+# edi=source integer type, esi=target FP type, edx=caller-owned XMM.
+# RAX carries the integer. Conversion consumes that exact dependency edge;
+# no fixed XMM scratch may overwrite another live ValueFact.
+g_emit_phys_int_fp_value:
+    push rbx; push r12; push r13; push r14
+    mov ebx,edi; mov r12d,esi; mov r13d,edx
+    cmp ebx,GTYPE_I64; je .gepifv_signed
+    cmp ebx,GTYPE_U64; jne .gepifv_bad
+    lea rdi,[rip+gc_test_rax]; mov esi,gc_test_rax_end-gc_test_rax; call g_emit_bytes
+    mov edi,0x89; call g_emit_jcc_patch_byte; mov r14,rax
+    lea rdi,[rip+gc_unsigned_fp_split]; mov esi,gc_unsigned_fp_split_end-gc_unsigned_fp_split; call g_emit_bytes
+    mov edi,r13d; mov esi,r12d; call g_emit_phys_cvt_rax_fp
+    test eax,eax; jnz .gepifv_bad
+    mov edi,0x58; mov esi,r13d; mov edx,r13d; mov ecx,r13d; mov r8d,r12d
+    call g_emit_phys_vex_scalar3
+    test eax,eax; jnz .gepifv_bad
+    call g_emit_jmp_patch; mov rbx,rax
+    mov rdi,r14; G_EMIT_POSITION rsi; call g_patch_rel32
+    mov edi,r13d; mov esi,r12d; call g_emit_phys_cvt_rax_fp
+    test eax,eax; jnz .gepifv_bad
+    mov rdi,rbx; G_EMIT_POSITION rsi; call g_patch_rel32
+    xor eax,eax; jmp .gepifv_done
+.gepifv_signed:
+    mov edi,r13d; mov esi,r12d; call g_emit_phys_cvt_rax_fp
+    jmp .gepifv_done
+.gepifv_bad: mov eax,1
+.gepifv_done: pop r14; pop r13; pop r12; pop rbx; ret
+
+# edi=destination XMM, esi=FP type. Signed integer operand is always RAX/64.
+# Only the ISA register geometry differs; one conversion/rounding relation.
+g_emit_phys_cvt_rax_fp:
+    push rbx; push r12
+    mov ebx,edi; mov r12d,esi
+    cmp ebx,31; ja .gepcaf_bad
+    cmp r12d,GTYPE_F64; je .gepcaf_type_ok
+    cmp r12d,GTYPE_F32; jne .gepcaf_bad
+.gepcaf_type_ok:
+    # A scalar conversion owns its low value only. A zero idiom closes the
+    # unowned merge bits and removes every previous-iteration carrier edge.
+    mov edi,0x157; cmp ebx,15; jbe 1f
+    test dword ptr [rip+isa_cap_bits],ISA_CAP_WIDE_REGFILE; jz .gepcaf_bad
+    or edi,0x8000
+1:  mov esi,ebx; mov edx,ebx; mov ecx,ebx
+    call physical_encode_rrr
+    test edx,edx; jz .gepcaf_bad
+    sub rsp,8; mov [rsp],rax; mov rdi,rsp; mov esi,edx; call g_emit_bytes; add rsp,8
+    mov edi,0x192a; cmp r12d,GTYPE_F64; jne 2f
+    mov edi,0x1d2a
+2:  cmp ebx,15; jbe 3f
+    or edi,0x8000
+3:  mov esi,ebx; mov edx,ebx; xor ecx,ecx
+    call physical_encode_rrr
+    test edx,edx; jz .gepcaf_bad
+    sub rsp,8; mov [rsp],rax; mov rdi,rsp; mov esi,edx; call g_emit_bytes; add rsp,8
+    xor eax,eax; jmp .gepcaf_done
+.gepcaf_bad: mov eax,1
+.gepcaf_done: pop r12; pop rbx; ret
+
+# edi=GPR destination, esi=local XMM source, edx=natural FP width.
+# CVTT consumes the existing native value without precision promotion.
+g_emit_phys_cvt_fp_i64:
+    push rbx; push r12; push r13
+    mov ebx,edi; mov r12d,esi; mov r13d,edx
+    cmp ebx,15; ja .gepcfi_bad
+    cmp r12d,31; ja .gepcfi_bad
+    cmp r13d,GTYPE_F32; je .gepcfi_type_ok
+    cmp r13d,GTYPE_F64; jne .gepcfi_bad
+.gepcfi_type_ok:
+    cmp r12d,15; ja .gepcfi_evex
+    mov edi,0xF2; cmp r13d,GTYPE_F64; je 1f; mov edi,0xF3
+1:  call g_emit_u8
+    mov eax,ebx; shr eax,3; shl eax,2; or eax,0x48
+    mov ecx,r12d; shr ecx,3; or eax,ecx
+    mov edi,eax; call g_emit_u8
+    mov edi,0x2C0F; call g_emit_u16
+    jmp .gepcfi_modrm
+.gepcfi_evex:
+    test dword ptr [rip+isa_cap_bits],ISA_CAP_WIDE_REGFILE; jz .gepcfi_bad
+    mov edi,0x62; call g_emit_u8
+    mov eax,0x11
+    mov ecx,ebx; shr ecx,3; xor ecx,1; shl ecx,7; or eax,ecx
+    mov ecx,r12d; shr ecx,4; xor ecx,1; shl ecx,6; or eax,ecx
+    mov ecx,r12d; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,5; or eax,ecx
+    mov edi,eax; call g_emit_u8
+    mov edi,0xFE; cmp r13d,GTYPE_F32; je 2f; mov edi,0xFF
+2:  call g_emit_u8
+    mov edi,8; call g_emit_u8
+    mov edi,0x2C; call g_emit_u8
+.gepcfi_modrm:
+    mov eax,ebx; and eax,7; shl eax,3
+    mov ecx,r12d; and ecx,7; or eax,ecx; or eax,0xC0
+    mov edi,eax; call g_emit_u8; jmp .gepcfi_done
+.gepcfi_bad: mov eax,1
+.gepcfi_done: pop r13; pop r12; pop rbx; ret
+
+# Natural FP payload -> U64. Signed CVTT remains a separate numeric relation.
+g_emit_fp_u64_stack:
+    push rbx
+    mov ebx,edi; call g_emit_pop_rax
+    mov edi,ebx; call g_emit_fp_u64_payload
+    test eax,eax; jnz 1f
+    mov edi,0x50; call g_emit_u8
+1:  pop rbx; ret
+
+g_emit_fp_u64_payload:
+    mov esi,64; cmp edi,GTYPE_F64; je 1f
+    mov esi,32; cmp edi,GTYPE_F32; jne 2f
+1:  call physical_fp_u64_fragment
+    test rax,rax; jz 2f
+    mov rdi,rax; mov esi,ecx; jmp g_emit_bytes
+2:  mov eax,1; ret
+
+# edi=destination GPR, esi=source XMM, edx=natural FP type.
+g_emit_phys_cvt_fp_u64:
+    push rbx; push r12
+    mov ebx,edi; mov r12d,edx
+    mov edi,esi; mov esi,edx; call g_emit_phys_xmm_to_rax
+    test eax,eax; jnz 1f
+    mov edi,r12d; call g_emit_fp_u64_payload
+    test eax,eax; jnz 1f
+    mov edi,ebx; xor esi,esi; call g_emit_phys_gpr_move
+1:  pop r12; pop rbx; ret
+
+# Existing stack consumers project through the same conversion authority.
+g_emit_int_fp_stack:
+    push rbx; push r12
+    mov ebx,edi; mov r12d,esi
+    call g_emit_pop_rax
+    mov edi,ebx; mov esi,r12d; xor edx,edx; call g_emit_phys_int_fp_value
+    test eax,eax; jnz .geifs_done
+    xor edi,edi; mov esi,r12d; call g_emit_phys_xmm_to_rax
+    test eax,eax; jnz .geifs_done
+    mov edi,0x50; call g_emit_u8
+.geifs_done: pop r12; pop rbx; ret
+
+# edi=resident ordinal, esi=natural type. Frame carrier -> exact RAX payload.
+g_emit_packet_resident_rax:
+    push rbx; push r12
+    mov r12d,esi
+    mov rcx,[rip+g_phys_cse_resident_reg_ptr]; mov edi,dword ptr [rcx+rdi*4]
+    imul edi,dword ptr [rip+group_lane_factor]; shl edi,3
+    mov eax,[rip+g_packet_scalar_lane]; shl eax,3
+    cmp r12d,GTYPE_F32; jne 1f
+    mov eax,[rip+g_packet_scalar_lane]; shl eax,2
+1:  add edi,eax; mov ebx,edi
+    mov edi,0x49; cmp r12d,GTYPE_F32; jne 2f
+    mov edi,0x41
+2:  call g_emit_u8
+    mov edi,0x24848b; call g_emit_u24
+    mov edi,ebx; call g_emit_u32
+    pop r12; pop rbx; ret
+
 # ---------------- expression emitter ----------------
 # g_emit_expr(rdi=expr) -> eax type/0, generated value pushed as one qword.
 g_emit_expr:
     push rbx; push r12; push r13; push r14; push r15
     mov r12,rdi
     cmp qword ptr [r12],J_OBJECT; jne .gee_bad
+    cmp dword ptr [rip+g_phys_cse_memory_carrier],0; je .gee_register_episode
+    mov rdi,r12; call g_infer_expr; mov r14d,eax
+    mov esi,eax; mov rdi,r12; call g_phys_cse_find_resident
+    cmp eax,0; jl .gee_episode_fresh
+    mov edi,eax; mov esi,r14d; call g_emit_packet_resident_rax
+    jmp .gee_episode_push
+.gee_register_episode:
+    cmp dword ptr [rip+g_phys_stack_episode],1; jne .gee_episode_fresh
+    mov rdi,r12; call g_infer_expr; mov r14d,eax
+    mov esi,eax; mov rdi,r12; call g_phys_cse_find_resident
+    cmp eax,0; jl .gee_episode_fresh
+    mov rcx,[rip+g_phys_cse_resident_reg_ptr]; mov ebx,dword ptr [rcx+rax*4]
+    cmp r14d,GTYPE_U64; je .gee_episode_int
+    cmp r14d,GTYPE_I64; je .gee_episode_int
+    mov edi,ebx; mov esi,r14d; call g_emit_phys_xmm_to_rax
+    jmp .gee_episode_push
+.gee_episode_int:
+    mov edi,ebx; mov esi,GTYPE_F64; call g_emit_phys_xmm_to_rax
+.gee_episode_push:
+    mov edi,0x50; call g_emit_u8
+    mov eax,r14d; jmp .gee_done
+.gee_episode_fresh:
     # Reuse an already materialized immutable PredicateFact instead of
     # re-emitting the same comparison/boolean DAG. Preserve the new physical
     # dependency explicitly so parallel fragment execution remains truthful.
@@ -3499,8 +4146,8 @@ g_emit_expr:
     mov rax,r13; call node_parse_f64_bits; test edx,edx; jnz .gee_bad
     mov rdi,rax; call g_emit_push_imm64; mov eax,GTYPE_F64; jmp .gee_done
 .gee_lit_f32:
-    mov rax,r13; call node_parse_f64_bits; test edx,edx; jnz .gee_bad
-    movq xmm0,rax; cvtsd2ss xmm0,xmm0; movd edi,xmm0
+    mov rax,r13; call node_parse_f32_bits; test edx,edx; jnz .gee_bad
+    mov edi,eax
     call g_emit_push_imm64; mov eax,GTYPE_F32; jmp .gee_done
 .gee_lit_rankn_fp:
     mov rax,r13; call node_parse_f64_bits; test edx,edx; jnz .gee_bad
@@ -3563,7 +4210,17 @@ g_emit_expr:
 .gee_field:
     mov rdi,r12; lea rsi,[rip+gk_field]; mov edx,gk_field_end-gk_field; call obj_get
     test rax,rax; jz .gee_load
-    mov rdi,rax; call g_resolve_field_expr; test rax,rax; jz .gee_bad
+    mov r13,rax
+    mov rdi,r13; call g_resolve_field_expr; test rax,rax; jnz .gee_field_static
+    mov rdi,r13; call g_iter_projection_lookup_field
+    test eax,eax; jz .gee_bad
+    dec eax; mov r14d,eax
+    mov rdx,[rip+g_iter_projection_slot_ptr]; mov eax,dword ptr [rdx+r14*4]
+    call g_binding_slot_addr; mov rdi,rax; call g_emit_load_rax_abs
+    mov edi,0x50; call g_emit_u8
+    mov rdx,[rip+g_iter_projection_type_ptr]; mov eax,dword ptr [rdx+r14*4]
+    jmp .gee_done
+.gee_field_static:
     mov rdi,rax; call g_emit_expr; jmp .gee_done
 .gee_load:
     mov rdi,r12; lea rsi,[rip+gk_load]; mov edx,gk_load_end-gk_load; call obj_get
@@ -3601,16 +4258,40 @@ g_emit_expr:
     mov rdi,r12; lea rsi,[rip+gk_args]; mov edx,gk_args_end-gk_args; call obj_get
     test rax,rax; jz .gee_bad
     mov r14,[rax+24]; test r14,r14; jz .gee_bad
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_fma]; mov ecx,3; call span_eq
+    test eax,eax; jz .gee_cast_probe
+    test dword ptr [rip+isa_cap_bits],ISA_CAP_FMA; jz .gee_bad
+    mov rdi,r12; call g_infer_expr; mov r15d,eax
+    cmp eax,GTYPE_F32; je .gee_fma_ready
+    cmp eax,GTYPE_F64; jne .gee_bad
+.gee_fma_ready:
+    xor ebx,ebx
+.gee_fma_operand:
+    test r14,r14; jz .gee_bad
+    mov rdi,r14; call g_emit_expr; test eax,eax; jz .gee_bad
+    mov edi,eax; mov esi,r15d; call g_convert_stack_top; test eax,eax; jnz .gee_bad
+    mov r14,[r14+32]; inc ebx; cmp ebx,3; jb .gee_fma_operand
+    test r14,r14; jnz .gee_bad
+    mov edi,0; mov esi,r15d; call physical_fma_fragment
+    test rax,rax; jz .gee_bad
+    mov rdi,rax; mov esi,ecx; call g_emit_bytes
+    mov eax,r15d; jmp .gee_done
+.gee_cast_probe:
     # cast
     mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_cast]; mov ecx,gv_cast_end-gv_cast; call span_eq
     test eax,eax; jz .gee_not
     mov rdi,r14; call g_emit_expr; mov ebx,eax; test ebx,ebx; jz .gee_bad
     mov rdi,r12; lea rsi,[rip+gk_to]; mov edx,gk_to_end-gk_to; call obj_get
-    test rax,rax; jnz .gee_cast_type_found
-    mov rdi,r12; lea rsi,[rip+gk_type]; mov edx,gk_type_end-gk_type; call obj_get
-.gee_cast_type_found:
     test rax,rax; jz .gee_bad
     mov rdi,rax; call g_type_from_node; mov r13d,eax; test r13d,r13d; jz .gee_bad
+    cmp ebx,GTYPE_U64; jne .gee_cast_range_ready
+    cmp r13d,GTYPE_F32; je .gee_cast_range_probe
+    cmp r13d,GTYPE_F64; jne .gee_cast_range_ready
+.gee_cast_range_probe:
+    mov rdi,r14; call g_u64_expr_fits_signed
+    test eax,eax; jz .gee_cast_range_ready
+    mov ebx,GTYPE_I64
+.gee_cast_range_ready:
     mov eax,ebx; mov edx,r13d; call g_emit_cast_top; test eax,eax; jnz .gee_bad
     mov eax,r13d; jmp .gee_done
 .gee_not:
@@ -3629,10 +4310,17 @@ g_emit_expr:
     test eax,eax; jz .gee_abs
     mov rdi,r14; call g_emit_expr; mov ebx,eax
     cmp eax,GTYPE_I64; je .gee_neg_i
+    cmp eax,GTYPE_U64; je .gee_neg_u
     cmp eax,GTYPE_F64; je .gee_neg_f64
     cmp eax,GTYPE_F32; je .gee_neg_f32
     mov edi,eax; call g_is_rankn_fp; test eax,eax; jnz .gee_neg_wide
     jmp .gee_bad
+.gee_neg_u:
+    # Unsigned negation is the existing subtraction relation with zero lhs.
+    lea rdi,[rip+gc_zero_lhs_stack]; mov esi,gc_zero_lhs_stack_end-gc_zero_lhs_stack; call g_emit_bytes
+    lea rdi,[rip+gv_sub]; mov esi,gv_sub_end-gv_sub; mov edx,ebx; call g_emit_int_op
+    test eax,eax; jnz .gee_bad
+    mov eax,ebx; jmp .gee_done
 .gee_neg_i:
     cmp dword ptr [rip+g_overflow_wrap],1; je .gee_neg_i_wrap
     lea rdi,[rip+gc_neg_i64_trap]; mov esi,gc_neg_i64_trap_end-gc_neg_i64_trap; call g_emit_bytes; mov eax,ebx; jmp .gee_done
@@ -3677,7 +4365,12 @@ g_emit_expr:
     mov rdi,r14; call g_emit_expr; mov ebx,eax
     cmp eax,GTYPE_F64; je .gee_square_f64
     cmp eax,GTYPE_F32; je .gee_square_f32
-    jmp .gee_bad
+    mov edi,eax; call g_is_rankn_fp; test eax,eax; jz .gee_bad
+    # Duplicate the immutable pointer, then consume the old MUL relation.
+    mov edi,0x2434FF; call g_emit_u24     # push qword ptr [rsp]
+    lea rdi,[rip+gv_mul]; mov esi,gv_mul_end-gv_mul; mov edx,ebx
+    call g_emit_rankn_fp_binary_op; test eax,eax; jnz .gee_bad
+    mov eax,ebx; jmp .gee_done
 .gee_square_f64: lea rdi,[rip+gc_square_f64]; mov esi,gc_square_f64_end-gc_square_f64; call g_emit_bytes; mov eax,ebx; jmp .gee_done
 .gee_square_f32: lea rdi,[rip+gc_square_f32]; mov esi,gc_square_f32_end-gc_square_f32; call g_emit_bytes; mov eax,ebx; jmp .gee_done
 
@@ -3700,8 +4393,8 @@ g_emit_expr:
     mov edi,eax; call g_is_rankn_fp; test eax,eax; jz .gee_bad
     mov edi,ebx; mov rsi,GENERAL_RANKN_FP_EXP_VA; call g_emit_rankn_fp_math_unary_top; test eax,eax; jnz .gee_bad
     mov eax,ebx; jmp .gee_done
-.gee_exp_f64: lea rdi,[rip+gc_exp_f64]; mov esi,gc_exp_f64_end-gc_exp_f64; call g_emit_bytes; mov eax,ebx; jmp .gee_done
-.gee_exp_f32: lea rdi,[rip+gc_exp_f32]; mov esi,gc_exp_f32_end-gc_exp_f32; call g_emit_bytes; mov eax,ebx; jmp .gee_done
+.gee_exp_f64: lea rdi,[rip+gc_exp_f64]; mov esi,OFFSET FLAT:gc_exp_f64_size; call g_emit_bytes; mov eax,ebx; jmp .gee_done
+.gee_exp_f32: lea rdi,[rip+gc_exp_f32]; mov esi,OFFSET FLAT:gc_exp_f32_size; call g_emit_bytes; mov eax,ebx; jmp .gee_done
 
 .gee_log_probe:
     mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_log]; mov ecx,gv_log_end-gv_log; call span_eq
@@ -3712,8 +4405,8 @@ g_emit_expr:
     mov edi,eax; call g_is_rankn_fp; test eax,eax; jz .gee_bad
     mov edi,ebx; mov rsi,GENERAL_RANKN_FP_LOG_VA; call g_emit_rankn_fp_math_unary_top; test eax,eax; jnz .gee_bad
     mov eax,ebx; jmp .gee_done
-.gee_log_f64: lea rdi,[rip+gc_log_f64]; mov esi,gc_log_f64_end-gc_log_f64; call g_emit_bytes; mov eax,ebx; jmp .gee_done
-.gee_log_f32: lea rdi,[rip+gc_log_f32]; mov esi,gc_log_f32_end-gc_log_f32; call g_emit_bytes; mov eax,ebx; jmp .gee_done
+.gee_log_f64: lea rdi,[rip+gc_log_f64]; mov esi,OFFSET FLAT:gc_log_f64_size; call g_emit_bytes; mov eax,ebx; jmp .gee_done
+.gee_log_f32: lea rdi,[rip+gc_log_f32]; mov esi,OFFSET FLAT:gc_log_f32_size; call g_emit_bytes; mov eax,ebx; jmp .gee_done
 
 .gee_sin_probe:
     mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_sin]; mov ecx,gv_sin_end-gv_sin; call span_eq
@@ -3724,8 +4417,8 @@ g_emit_expr:
     mov edi,eax; call g_is_rankn_fp; test eax,eax; jz .gee_bad
     mov edi,ebx; mov rsi,GENERAL_RANKN_FP_SIN_VA; call g_emit_rankn_fp_math_unary_top; test eax,eax; jnz .gee_bad
     mov eax,ebx; jmp .gee_done
-.gee_sin_f64: lea rdi,[rip+gc_sin_f64]; mov esi,gc_sin_f64_end-gc_sin_f64; call g_emit_bytes; mov eax,ebx; jmp .gee_done
-.gee_sin_f32: lea rdi,[rip+gc_sin_f32]; mov esi,gc_sin_f32_end-gc_sin_f32; call g_emit_bytes; mov eax,ebx; jmp .gee_done
+.gee_sin_f64: lea rdi,[rip+gc_sin_f64]; mov esi,OFFSET FLAT:gc_sin_f64_size; call g_emit_bytes; mov eax,ebx; jmp .gee_done
+.gee_sin_f32: lea rdi,[rip+gc_sin_f32]; mov esi,OFFSET FLAT:gc_sin_f32_size; call g_emit_bytes; mov eax,ebx; jmp .gee_done
 .gee_cos_probe:
     mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_cos]; mov ecx,gv_cos_end-gv_cos; call span_eq
     test eax,eax; jz .gee_select
@@ -3735,8 +4428,8 @@ g_emit_expr:
     mov edi,eax; call g_is_rankn_fp; test eax,eax; jz .gee_bad
     mov edi,ebx; mov rsi,GENERAL_RANKN_FP_COS_VA; call g_emit_rankn_fp_math_unary_top; test eax,eax; jnz .gee_bad
     mov eax,ebx; jmp .gee_done
-.gee_cos_f64: lea rdi,[rip+gc_cos_f64]; mov esi,gc_cos_f64_end-gc_cos_f64; call g_emit_bytes; mov eax,ebx; jmp .gee_done
-.gee_cos_f32: lea rdi,[rip+gc_cos_f32]; mov esi,gc_cos_f32_end-gc_cos_f32; call g_emit_bytes; mov eax,ebx; jmp .gee_done
+.gee_cos_f64: lea rdi,[rip+gc_cos_f64]; mov esi,OFFSET FLAT:gc_cos_f64_size; call g_emit_bytes; mov eax,ebx; jmp .gee_done
+.gee_cos_f32: lea rdi,[rip+gc_cos_f32]; mov esi,OFFSET FLAT:gc_cos_f32_size; call g_emit_bytes; mov eax,ebx; jmp .gee_done
 
 .gee_select:
     mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_select]; mov ecx,gv_select_end-gv_select; call span_eq
@@ -3773,10 +4466,10 @@ g_emit_expr:
     mov rdi,r13; call g_emit_expr; test eax,eax; jz .gee_bad
     mov edi,eax; mov esi,ebx; call g_convert_stack_top; test eax,eax; jnz .gee_bad
     call g_emit_jmp_patch; mov r13,rax
-    mov rsi,[rip+g_emit_ptr]; mov rdi,r15; call g_patch_rel32
+    G_EMIT_POSITION rsi; mov rdi,r15; call g_patch_rel32
     mov rdi,r14; call g_emit_expr; test eax,eax; jz .gee_bad
     mov edi,eax; mov esi,ebx; call g_convert_stack_top; test eax,eax; jnz .gee_bad
-    mov rsi,[rip+g_emit_ptr]; mov rdi,r13; call g_patch_rel32
+    G_EMIT_POSITION rsi; mov rdi,r13; call g_patch_rel32
     mov eax,ebx; jmp .gee_done
 
 .gee_andor:
@@ -3793,9 +4486,9 @@ g_emit_expr:
     mov r14,[r14+32]; test r14,r14; jz .gee_bad
     mov rdi,r14; call g_emit_expr; cmp eax,GTYPE_BOOL; jne .gee_bad
     call g_emit_jmp_patch; mov r13,rax
-    mov rsi,[rip+g_emit_ptr]; mov rdi,r15; call g_patch_rel32
+    G_EMIT_POSITION rsi; mov rdi,r15; call g_patch_rel32
     xor edi,edi; call g_emit_push_imm64
-    mov rsi,[rip+g_emit_ptr]; mov rdi,r13; call g_patch_rel32
+    G_EMIT_POSITION rsi; mov rdi,r13; call g_patch_rel32
     mov eax,GTYPE_BOOL; jmp .gee_done
 .gee_lazy_or:
     mov rdi,r14; call g_emit_expr; cmp eax,GTYPE_BOOL; jne .gee_bad
@@ -3804,9 +4497,9 @@ g_emit_expr:
     mov r14,[r14+32]; test r14,r14; jz .gee_bad
     mov rdi,r14; call g_emit_expr; cmp eax,GTYPE_BOOL; jne .gee_bad
     call g_emit_jmp_patch; mov r13,rax
-    mov rsi,[rip+g_emit_ptr]; mov rdi,r15; call g_patch_rel32
+    G_EMIT_POSITION rsi; mov rdi,r15; call g_patch_rel32
     mov edi,1; call g_emit_push_imm64
-    mov rsi,[rip+g_emit_ptr]; mov rdi,r13; call g_patch_rel32
+    G_EMIT_POSITION rsi; mov rdi,r13; call g_patch_rel32
     mov eax,GTYPE_BOOL; jmp .gee_done
 
 .gee_binary:
@@ -3846,10 +4539,11 @@ g_emit_expr:
     test eax,eax; jnz .gee_bad
     mov eax,ebx; jmp .gee_done
 .gee_shift:
-    cmp ebx,GTYPE_U64; jne .gee_bad; cmp r12d,GTYPE_U64; jne .gee_bad
-    mov rdi,[r13+8]; mov rsi,[r13+16]; call g_emit_shift_top2
+    cmp ebx,GTYPE_U64; je 1f; cmp ebx,GTYPE_I64; jne .gee_bad
+1:  cmp r12d,GTYPE_U64; je 2f; cmp r12d,GTYPE_I64; jne .gee_bad
+2:  mov rdi,[r13+8]; mov rsi,[r13+16]; call g_emit_shift_top2
     test eax,eax; jnz .gee_bad
-    mov eax,GTYPE_U64; jmp .gee_done
+    mov eax,ebx; jmp .gee_done
 .gee_mod:
     cmp ebx,GTYPE_I64; je 1f; cmp ebx,GTYPE_U64; jne .gee_bad
 1:  cmp r12d,ebx; jne .gee_bad
@@ -3876,12 +4570,10 @@ g_emit_expr:
 # vendor/backend split.
 g_phys_fp_geometry_refresh:
     mov dword ptr [rip+g_phys_fp_carrier_count],16
-    mov dword ptr [rip+g_phys_fp_old_base],8
     mov dword ptr [rip+g_phys_fp_all_mask],0x0000FFFF
     test dword ptr [rip+isa_cap_bits],ISA_CAP_WIDE_REGFILE
     jz .gpfgr_done
     mov dword ptr [rip+g_phys_fp_carrier_count],32
-    mov dword ptr [rip+g_phys_fp_old_base],16
     mov dword ptr [rip+g_phys_fp_all_mask],-1
 .gpfgr_done:
     ret
@@ -3891,35 +4583,8 @@ g_phys_fp_geometry_refresh:
 g_phys_assign_state_carriers:
     call g_phys_fp_geometry_refresh
     push rbx; push r12; push r13; push r14; push r15
-    # First count FP state facts.  Once partial residency is required, reserve
-    # one additional transient XMM carrier for spill materialization instead of
-    # preserving a maximal old/output bank that could force whole-path fallback.
-    mov dword ptr [rip+g_phys_fp_total],0
-    xor ecx,ecx
-.gpasc_precount:
-    cmp ecx,dword ptr [rip+g_reg_iter_total]; jae .gpasc_precount_done
-    cmp dword ptr [rip+g_reg_iter_counted],1; jne .gpasc_precount_data
-    cmp ecx,dword ptr [rip+g_reg_iter_counter_index]; je .gpasc_precount_next
-.gpasc_precount_data:
-    mov eax,ecx; shl rax,5; mov r11,[rip+g_states_ptr]; add r11,rax
-    mov edx,dword ptr [r11+16]
-    cmp edx,GTYPE_F64; je .gpasc_precount_fp
-    cmp edx,GTYPE_F32; jne .gpasc_precount_next
-.gpasc_precount_fp:
-    inc dword ptr [rip+g_phys_fp_total]
-.gpasc_precount_next:
-    inc ecx; jmp .gpasc_precount
-.gpasc_precount_done:
-    # Resident old-version FP capacity is target geometry, not a semantic or
-    # workload threshold. The high XMM half is the mature old-authority domain;
-    # its width is derived from the actual carrier domain. Anonymous temporaries
-    # and shared facts compete in the complementary pool.
-    mov eax,dword ptr [rip+g_phys_fp_carrier_count]
-    sub eax,dword ptr [rip+g_phys_fp_old_base]
-    cmp dword ptr [rip+g_phys_fp_total],eax; jae .gpasc_budget_ready
-    mov eax,dword ptr [rip+g_phys_fp_total]
-.gpasc_budget_ready:
-    mov dword ptr [rip+g_phys_fp_resident_budget],eax
+    # Start with the established frame authority. Shared facts and actual
+    # anonymous pressure are proved before old/next residency is admitted.
     mov dword ptr [rip+g_reg_iter_fp_count],0
     mov dword ptr [rip+g_reg_iter_int_count],0
     mov dword ptr [rip+g_phys_fp_reserved_mask],0
@@ -3930,55 +4595,25 @@ g_phys_assign_state_carriers:
     mov rax,[rip+g_reg_iter_carrier_kind_ptr]; mov dword ptr [rax+rcx*4],G_PHYS_CARRIER_SPILL
     mov rax,[rip+g_reg_iter_old_reg_ptr]; mov dword ptr [rax+rcx*4],-1
     mov rax,[rip+g_reg_iter_out_reg_ptr]; mov dword ptr [rax+rcx*4],-1
-    cmp dword ptr [rip+g_reg_iter_counted],1; jne .gpasc_data
+    mov eax,ecx; shl rax,5; mov r11,[rip+g_states_ptr]; add r11,rax
+    cmp dword ptr [r11+28],-1; je .gpasc_dead
+    cmp dword ptr [rip+g_reg_iter_counted],0; je .gpasc_data
     cmp ecx,dword ptr [rip+g_reg_iter_counter_index]; jne .gpasc_data
     mov rax,[rip+g_reg_iter_carrier_kind_ptr]; mov dword ptr [rax+rcx*4],G_PHYS_CARRIER_COUNTER
     mov rax,[rip+g_reg_iter_old_reg_ptr]; mov dword ptr [rax+rcx*4],3   # RBX
     inc ecx; jmp .gpasc_loop
+.gpasc_dead:
+    inc ecx; jmp .gpasc_loop
 .gpasc_data:
-    mov eax,ecx; shl rax,5; mov r11,[rip+g_states_ptr]; add r11,rax
     mov edx,dword ptr [r11+16]
     cmp edx,GTYPE_F64; je .gpasc_fp
     cmp edx,GTYPE_F32; je .gpasc_fp
+    cmp edx,GTYPE_BOOL; je .gpasc_int
     cmp edx,GTYPE_U64; je .gpasc_int
     cmp edx,GTYPE_I64; je .gpasc_int
     jmp .gpasc_bad
 .gpasc_fp:
     mov rax,[rip+g_reg_iter_carrier_kind_ptr]; mov dword ptr [rax+rcx*4],G_PHYS_CARRIER_FP
-    mov r12d,dword ptr [rip+g_reg_iter_fp_count]
-    cmp r12d,dword ptr [rip+g_phys_fp_resident_budget]; jae .gpasc_fp_spill
-    mov r13d,r12d
-    add r13d,dword ptr [rip+g_phys_fp_old_base]      # old-version authority
-    mov rax,[rip+g_reg_iter_old_reg_ptr]; mov dword ptr [rax+rcx*4],r13d
-    cmp dword ptr [rip+g_phys_fp_transient_outputs],0; jne .gpasc_fp_transient_out
-    # First physical candidate: preserve a disjoint next-version carrier only
-    # when that carrier is actually free. Collision with any existing authority
-    # is resolved by the same transient ValueFact path; no state-count threshold
-    # owns the choice.
-    lea r14d,[r12d+1]
-    push rcx
-    mov eax,1; mov ecx,r14d; shl eax,cl
-    test dword ptr [rip+g_phys_fp_reserved_mask],eax
-    pop rcx
-    jnz .gpasc_fp_transient_out
-    mov rax,[rip+g_reg_iter_out_reg_ptr]; mov dword ptr [rax+rcx*4],r14d
-    push rcx
-    mov eax,1; mov ecx,r13d; shl eax,cl
-    or dword ptr [rip+g_phys_fp_reserved_mask],eax
-    mov eax,1; mov ecx,r14d; shl eax,cl
-    or dword ptr [rip+g_phys_fp_reserved_mask],eax
-    pop rcx
-    jmp .gpasc_fp_spill
-.gpasc_fp_transient_out:
-    # Same DAG, second physical realization: next-version ValueFacts borrow the
-    # anonymous carrier pool and cross the simultaneous-update boundary through
-    # the same execution-local next-version handoff. No private backend is introduced.
-    mov rax,[rip+g_reg_iter_out_reg_ptr]; mov dword ptr [rax+rcx*4],-1
-    push rcx
-    mov eax,1; mov ecx,r13d; shl eax,cl
-    or dword ptr [rip+g_phys_fp_reserved_mask],eax
-    pop rcx
-.gpasc_fp_spill:
     inc dword ptr [rip+g_reg_iter_fp_count]
     inc ecx; jmp .gpasc_loop
 .gpasc_int:
@@ -4024,6 +4659,12 @@ g_phys_assign_state_carriers:
 # Reset the anonymous FP carrier pool, then subtract any carrier retained by a
 # constant ValueFact. Constant residency and temporary allocation therefore
 # share one physical authority instead of owning disjoint hard-coded worlds.
+# Every root can consume mixed numeric/BOOL children. One lifetime resets
+# both anonymous domains; a result type never restricts child carrier types.
+g_phys_temp_reset:
+    call g_phys_fp_temp_reset
+    jmp g_phys_int_temp_reset
+
 g_phys_fp_temp_reset:
     push rcx
     mov dword ptr [rip+g_phys_fp_temp_live],0
@@ -4031,9 +4672,12 @@ g_phys_fp_temp_reset:
     mov ecx,dword ptr [rip+g_phys_fp_reserved_mask]
     not ecx
     and eax,ecx
-    mov dword ptr [rip+g_phys_fp_temp_mask],eax
+    cmp dword ptr [rip+g_packet_ready],0; je 995f
+    mov ecx,[rip+g_packet_register_live]; not ecx; and eax,ecx
+995: mov dword ptr [rip+g_phys_fp_temp_mask],eax
     xor ecx,ecx
 .gpfptr_cse_loop:
+    cmp dword ptr [rip+g_phys_cse_memory_carrier],0; jne .gpfptr_cse_done
     cmp ecx,dword ptr [rip+g_phys_cse_resident_count]; jae .gpfptr_cse_done
     mov rax,qword ptr [rip+g_phys_cse_resident_reg_ptr]
     mov edx,dword ptr [rax+rcx*4]
@@ -4084,6 +4728,7 @@ g_phys_fp_temp_free:
     test dword ptr [rip+g_phys_fp_reserved_mask],eax; jnz .gpfptf_done
     xor ecx,ecx
 .gpfptf_cse_loop:
+    cmp dword ptr [rip+g_phys_cse_memory_carrier],0; jne .gpfptf_const_start
     cmp ecx,dword ptr [rip+g_phys_cse_resident_count]; jae .gpfptf_const_start
     mov rdx,qword ptr [rip+g_phys_cse_resident_reg_ptr]
     cmp dword ptr [rdx+rcx*4],edi; je .gpfptf_done
@@ -4103,54 +4748,18 @@ g_phys_fp_temp_free:
 .gpfptf_done:
     ret
 
-# EVEX.128 scalar register realization for the full architectural XMM0..31
-# carrier file. edi=opcode, esi=dst, edx=src1, ecx=src2,
-# r8d=GTYPE_F32/F64. The operation and rounding point are unchanged.
-g_emit_phys_evex_scalar3:
-    push rbx; push r12; push r13; push r14; push r15
-    mov ebx,edi; mov r12d,esi; mov r13d,edx; mov r14d,ecx; mov r15d,r8d
-    cmp r12d,31; ja .gepev3_bad
-    cmp r13d,31; ja .gepev3_bad
-    cmp r14d,31; ja .gepev3_bad
-    cmp r15d,GTYPE_F64; je .gepev3_type_ok
-    cmp r15d,GTYPE_F32; jne .gepev3_bad
-.gepev3_type_ok:
-    mov edi,0x62; call g_emit_u8; test eax,eax; jnz .gepev3_bad
-    # P0: ~R ~X ~B ~R' 00 01 (0F map).
-    mov eax,1
-    mov ecx,r12d; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,7; or eax,ecx
-    mov ecx,r14d; shr ecx,4; and ecx,1; xor ecx,1; shl ecx,6; or eax,ecx
-    mov ecx,r14d; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,5; or eax,ecx
-    mov ecx,r12d; shr ecx,4; and ecx,1; xor ecx,1; shl ecx,4; or eax,ecx
-    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepev3_bad
-    # P1: W, inverted src1 low nibble, fixed bit2, F2/F3 scalar prefix.
-    mov eax,r13d; and eax,15; xor eax,15; shl eax,3; or eax,4
-    cmp r15d,GTYPE_F64; jne 731f
-    or eax,0x83                         # W=1, pp=F2
-    jmp 732f
-731:or eax,2                             # W=0, pp=F3
-732:mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepev3_bad
-    # P2: scalar L'L=00, no mask/broadcast; V' extends src1 bit4.
-    mov eax,r13d; shr eax,4; and eax,1; xor eax,1; shl eax,3
-    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepev3_bad
-    mov edi,ebx; call g_emit_u8; test eax,eax; jnz .gepev3_bad
-    mov eax,r12d; and eax,7; shl eax,3
-    mov ecx,r14d; and ecx,7; or eax,ecx; or eax,0xC0
-    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepev3_bad
-    xor eax,eax; jmp .gepev3_done
-.gepev3_bad:
-    mov eax,1
-.gepev3_done:
-    pop r15; pop r14; pop r13; pop r12; pop rbx; ret
-
 # Emit one scalar FP carrier copy through the existing VEX/EVEX authority.
 # edi=dst, esi=src, edx=GTYPE_F32/F64; equal identities emit nothing.
 g_emit_phys_xmm_move:
     cmp edi,esi
     je .gepxm_ok
+    # A scalar ValueFact owns only its semantic low lane. Use the source as both
+    # VMOV scalar inputs so the whole XMM carrier is renamed from src; preserving
+    # dead high-lane bits from the old destination would create a false
+    # cross-generation dependency with no semantic owner.
     mov r8d,edx
     mov ecx,esi
-    mov edx,edi
+    mov edx,esi
     mov esi,edi
     mov edi,0x10
     call g_emit_phys_vex_scalar3
@@ -4162,136 +4771,265 @@ g_emit_phys_xmm_move:
 # Materialize runtime RAX/EAX bits directly into an arbitrary XMM carrier.
 # edi=dst, esi=GTYPE_F32/F64.
 g_emit_phys_xmm_from_rax:
-    push rbx; push r12
-    mov ebx,edi; mov r12d,esi
-    cmp ebx,15; ja .gepxr_evex
-    mov edi,0x66; call g_emit_u8; test eax,eax; jnz .gepxr_bad
-    cmp r12d,GTYPE_F64; je .gepxr_f64
-    cmp r12d,GTYPE_F32; jne .gepxr_bad
-    cmp ebx,8; jb .gepxr_opcode
-    mov edi,0x44; call g_emit_u8; test eax,eax; jnz .gepxr_bad
-    jmp .gepxr_opcode
-.gepxr_f64:
-    mov edi,0x48
-    cmp ebx,8; jb 1f
-    or edi,4
-1:  call g_emit_u8; test eax,eax; jnz .gepxr_bad
-.gepxr_opcode:
-    mov edi,0x0F; call g_emit_u8; test eax,eax; jnz .gepxr_bad
-    mov edi,0x6E; call g_emit_u8; test eax,eax; jnz .gepxr_bad
-    mov eax,ebx; and eax,7; shl eax,3; or eax,0xC0
-    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepxr_bad
-    xor eax,eax; jmp .gepxr_done
-.gepxr_evex:
-    cmp ebx,31; ja .gepxr_bad
-    cmp r12d,GTYPE_F64; je 741f
-    cmp r12d,GTYPE_F32; jne .gepxr_bad
-741:
-    mov edi,0x62; call g_emit_u8; test eax,eax; jnz .gepxr_bad
-    mov eax,0xE1
-    mov ecx,ebx; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,7; and eax,0x7F; or eax,ecx
-    mov ecx,ebx; shr ecx,4; and ecx,1; xor ecx,1; shl ecx,4; and eax,0xEF; or eax,ecx
-    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepxr_bad
-    mov edi,0x7D
-    cmp r12d,GTYPE_F64; jne 742f
-    mov edi,0xFD
-742:call g_emit_u8; test eax,eax; jnz .gepxr_bad
-    mov edi,0x08; call g_emit_u8; test eax,eax; jnz .gepxr_bad
-    mov edi,0x6E; call g_emit_u8; test eax,eax; jnz .gepxr_bad
-    mov eax,ebx; and eax,7; shl eax,3; or eax,0xC0
-    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepxr_bad
-    xor eax,eax; jmp .gepxr_done
-.gepxr_bad:
-    mov eax,1
-.gepxr_done:
-    pop r12; pop rbx; ret
+    mov edx,0x6e; jmp g_emit_phys_scalar_bits_transport
 
-# Extract arbitrary scalar XMM bits into runtime RAX/EAX. edi=src, esi=type.
+# Extract the same scalar payload through the common native encoder.
 g_emit_phys_xmm_to_rax:
-    push rbx; push r12
-    mov ebx,edi; mov r12d,esi
-    cmp ebx,15; ja .gepxt_evex
-    mov edi,0x66; call g_emit_u8; test eax,eax; jnz .gepxt_bad
-    cmp r12d,GTYPE_F64; je .gepxt_f64
-    cmp r12d,GTYPE_F32; jne .gepxt_bad
-    mov eax,0x40
-    mov ecx,ebx; shr ecx,3; and ecx,1; shl ecx,2; or eax,ecx
-    cmp eax,0x40; je .gepxt_opcode
-    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepxt_bad
-    jmp .gepxt_opcode
-.gepxt_f64:
-    mov eax,0x48
-    mov ecx,ebx; shr ecx,3; and ecx,1; shl ecx,2; or eax,ecx
-    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepxt_bad
-.gepxt_opcode:
-    mov edi,0x0F; call g_emit_u8; test eax,eax; jnz .gepxt_bad
-    mov edi,0x7E; call g_emit_u8; test eax,eax; jnz .gepxt_bad
-    mov eax,ebx; and eax,7; shl eax,3; or eax,0xC0
-    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepxt_bad
-    xor eax,eax; jmp .gepxt_done
-.gepxt_evex:
-    cmp ebx,31; ja .gepxt_bad
-    cmp r12d,GTYPE_F64; je 751f
-    cmp r12d,GTYPE_F32; jne .gepxt_bad
-751:
-    mov edi,0x62; call g_emit_u8; test eax,eax; jnz .gepxt_bad
-    mov eax,0xE1
-    mov ecx,ebx; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,7; and eax,0x7F; or eax,ecx
-    mov ecx,ebx; shr ecx,4; and ecx,1; xor ecx,1; shl ecx,4; and eax,0xEF; or eax,ecx
-    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepxt_bad
-    mov edi,0x7D
-    cmp r12d,GTYPE_F64; jne 752f
-    mov edi,0xFD
-752:call g_emit_u8; test eax,eax; jnz .gepxt_bad
-    mov edi,0x08; call g_emit_u8; test eax,eax; jnz .gepxt_bad
-    mov edi,0x7E; call g_emit_u8; test eax,eax; jnz .gepxt_bad
-    mov eax,ebx; and eax,7; shl eax,3; or eax,0xC0
-    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepxt_bad
-    xor eax,eax; jmp .gepxt_done
-.gepxt_bad:
-    mov eax,1
-.gepxt_done:
-    pop r12; pop rbx; ret
+    mov edx,0x7e
+g_emit_phys_scalar_bits_transport:
+    mov r8d,esi
+    mov esi,edi
+    mov edi,edx; or edi,0x500
+    cmp r8d,GTYPE_F64; je 1f
+    cmp r8d,GTYPE_F32; jne 3f
+    jmp 2f
+1:  or edi,0x1000
+2:  cmp esi,15; jbe 4f
+    or edi,0x8000
+4:  xor edx,edx; xor ecx,ecx; call physical_encode_rrr
+    test edx,edx; jz 3f
+    sub rsp,8; mov [rsp],rax
+    mov rdi,rsp; mov esi,edx; call g_emit_bytes
+    add rsp,8; ret
+3:  mov eax,1; ret
 
 # VEX.128 scalar three-operand arithmetic.
 # edi=opcode (58 add, 5c sub, 59 mul), esi=dst, edx=src1, ecx=src2,
 # r8d=GTYPE_F32/F64. No reassociation or contraction is performed.
 g_emit_phys_vex_scalar3:
-    push rbx; push r12; push r13; push r14; push r15
-    mov ebx,edi; mov r12d,esi; mov r13d,edx; mov r14d,ecx; mov r15d,r8d
-    cmp r15d,GTYPE_F64; je .gepv3_type_ok
-    cmp r15d,GTYPE_F32; jne .gepv3_bad
-.gepv3_type_ok:
-    cmp r12d,15; ja .gepv3_evex
-    cmp r13d,15; ja .gepv3_evex
-    cmp r14d,15; ja .gepv3_evex
-    mov edi,0xC4; call g_emit_u8; test eax,eax; jnz .gepv3_bad
-    # VEX byte 2: ~R ~X ~B 00001. X is unused and therefore encoded as 1.
-    mov eax,r12d; shr eax,3; and eax,1; xor eax,1; shl eax,7
-    or eax,0x40
-    mov ecx,r14d; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,5; or eax,ecx
-    or eax,1
-    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepv3_bad
-    # VEX byte 3: W=0, inverted src1 in vvvv, L=0, pp=F2/F3.
-    mov eax,r13d; and eax,15; xor eax,15; shl eax,3
-    cmp r15d,GTYPE_F64; jne 1f
-    or eax,3                             # F2
-    jmp 2f
-1:  or eax,2                             # F3
-2:  mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepv3_bad
-    mov edi,ebx; call g_emit_u8; test eax,eax; jnz .gepv3_bad
-    mov eax,r12d; and eax,7; shl eax,3
-    mov ecx,r14d; and ecx,7; or eax,ecx; or eax,0xC0
-    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepv3_bad
-    xor eax,eax; jmp .gepv3_done
-.gepv3_evex:
-    mov edi,ebx; mov esi,r12d; mov edx,r13d; mov ecx,r14d; mov r8d,r15d
-    call g_emit_phys_evex_scalar3
-    test eax,eax; jnz .gepv3_bad
-    xor eax,eax; jmp .gepv3_done
-.gepv3_bad:
+    mov eax,esi; or eax,edx; or eax,ecx
+    cmp eax,15; jbe g_emit_phys_scalar3_shared
+    or edi,0x8000
+g_emit_phys_scalar3_shared:
+    or edi,0x100
+    cmp r8d,GTYPE_F64; je 1f
+    cmp r8d,GTYPE_F32; jne 3f
+    or edi,0x800; jmp 2f
+1:  or edi,0xc00
+    test edi,0x8000; jz 2f
+    or edi,0x1000
+2:  jmp g_phys_window_scalar_descriptor
+g_emit_phys_rrr_descriptor:
+    call physical_encode_rrr
+    test edx,edx; jz 3f
+    sub rsp,8; mov [rsp],rax
+    mov rdi,rsp; mov esi,edx; call g_emit_bytes
+    add rsp,8; ret
+3:  mov eax,1; ret
+
+# Load one immutable scalar ConstantFact directly from the generated
+# RIP-relative pool into an XMM carrier.  This is the address form of the same
+# ValueFact, not a constant-specific execution backend. edi=dst, esi=type,
+# rdx=compile-time pool address or 0 during discarded proof emission.
+g_emit_phys_xmm_from_const_mem:
+    push rbx; push r12; push r13
+    mov ebx,edi; mov r12d,esi; mov r13,rdx
+    cmp ebx,31; ja .gepxcm_bad
+    cmp r12d,GTYPE_F64; je .gepxcm_type_ok
+    cmp r12d,GTYPE_F32; jne .gepxcm_bad
+.gepxcm_type_ok:
+    cmp ebx,15; ja .gepxcm_evex
+    mov edi,0xC5; call g_emit_u8; test eax,eax; jnz .gepxcm_bad
+    # Two-byte VEX VMOVQ/VMOVD from RIP-relative memory.  These forms define
+    # the whole scalar carrier and therefore carry no dead-high-lane dependency.
+    mov eax,ebx; shr eax,3; and eax,1; xor eax,1; shl eax,7
+    cmp r12d,GTYPE_F64; jne 755f
+    or eax,0x7A
+    jmp 756f
+755:or eax,0x79
+756:mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepxcm_bad
+    mov edi,0x7E; call g_emit_u8; test eax,eax; jnz .gepxcm_bad
+    mov eax,ebx; and eax,7; shl eax,3; or eax,5
+    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepxcm_bad
+    jmp .gepxcm_disp
+.gepxcm_evex:
+    mov edi,0x62; call g_emit_u8; test eax,eax; jnz .gepxcm_bad
     mov eax,1
-.gepv3_done:
+    mov ecx,ebx; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,7; or eax,ecx
+    or eax,0x60
+    mov ecx,ebx; shr ecx,4; and ecx,1; xor ecx,1; shl ecx,4; or eax,ecx
+    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepxcm_bad
+    mov edi,0x7D
+    cmp r12d,GTYPE_F64; jne 757f
+    mov edi,0xFD
+757:call g_emit_u8; test eax,eax; jnz .gepxcm_bad
+    mov edi,0x08; call g_emit_u8; test eax,eax; jnz .gepxcm_bad
+    mov edi,0x6E; call g_emit_u8; test eax,eax; jnz .gepxcm_bad
+    mov eax,ebx; and eax,7; shl eax,3; or eax,5
+    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepxcm_bad
+.gepxcm_disp:
+    G_EMIT_POSITION rbx
+    xor edi,edi; call g_emit_u32; test eax,eax; jnz .gepxcm_bad
+    test r13,r13; jz .gepxcm_ok
+    mov rdi,rbx; mov rsi,r13; call g_patch_rel32
+.gepxcm_ok:
+    xor eax,eax; jmp .gepxcm_done
+.gepxcm_bad:
+    mov eax,1
+.gepxcm_done:
+    pop r13; pop r12; pop rbx; ret
+
+# Direct scalar StateFact frame transport.  Mutable state uses the tagged
+# R15-relative AddressFact already owned by General Physical Reality; FP payloads
+# move between that address and XMM without a synthetic GPR carrier.
+# edi=XMM, esi=GTYPE_F32/F64, rdx=tagged state address -> eax 0/1.
+g_emit_phys_xmm_to_state_mem:
+    push rbx; push r12; push r13
+    mov ebx,edi; mov r12d,esi; mov r13,rdx
+    cmp ebx,31; ja .gepxsm_bad
+    cmp r12d,GTYPE_F64; je .gepxsm_type_ok
+    cmp r12d,GTYPE_F32; jne .gepxsm_bad
+.gepxsm_type_ok:
+    mov rax,r13; shr rax,48; cmp eax,0xffff; jne .gepxsm_bad
+    cmp ebx,15; ja .gepxsm_evex
+    mov edi,0xC4; call g_emit_u8; test eax,eax; jnz .gepxsm_bad
+    # VEX3: R selects XMM, X unused=1, B extends R15 base and is therefore 0.
+    mov eax,ebx; shr eax,3; and eax,1; xor eax,1; shl eax,7
+    or eax,0x40; or eax,1
+    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepxsm_bad
+    mov edi,0x79; call g_emit_u8; test eax,eax; jnz .gepxsm_bad
+    mov edi,0x7E
+    cmp r12d,GTYPE_F64; jne 758f
+    mov edi,0xD6
+758:call g_emit_u8; test eax,eax; jnz .gepxsm_bad
+    mov eax,ebx; and eax,7; shl eax,3; or eax,0x87
+    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepxsm_bad
+    mov edi,r13d; call g_emit_u32; test eax,eax; jnz .gepxsm_bad
+    xor eax,eax; jmp .gepxsm_done
+.gepxsm_evex:
+    mov edi,0x62; call g_emit_u8; test eax,eax; jnz .gepxsm_bad
+    mov eax,1
+    mov ecx,ebx; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,7; or eax,ecx
+    or eax,0x40
+    mov ecx,ebx; shr ecx,4; and ecx,1; xor ecx,1; shl ecx,4; or eax,ecx
+    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepxsm_bad
+    mov edi,0x7D
+    cmp r12d,GTYPE_F64; jne 759f
+    mov edi,0xFD
+759:call g_emit_u8; test eax,eax; jnz .gepxsm_bad
+    mov edi,0x08; call g_emit_u8; test eax,eax; jnz .gepxsm_bad
+    mov edi,0x7E; call g_emit_u8; test eax,eax; jnz .gepxsm_bad
+    mov eax,ebx; and eax,7; shl eax,3; or eax,0x87
+    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepxsm_bad
+    mov edi,r13d; call g_emit_u32; test eax,eax; jnz .gepxsm_bad
+    xor eax,eax; jmp .gepxsm_done
+.gepxsm_bad:
+    mov eax,1
+.gepxsm_done:
+    pop r13; pop r12; pop rbx; ret
+
+# edi=XMM destination, esi=GTYPE_F32/F64, rdx=tagged state address -> eax 0/1.
+g_emit_phys_xmm_from_state_mem:
+    push rbx; push r12; push r13
+    mov ebx,edi; mov r12d,esi; mov r13,rdx
+    cmp ebx,31; ja .gepxlm_bad
+    cmp r12d,GTYPE_F64; je .gepxlm_type_ok
+    cmp r12d,GTYPE_F32; jne .gepxlm_bad
+.gepxlm_type_ok:
+    mov rax,r13; shr rax,48; cmp eax,0xffff; jne .gepxlm_bad
+    cmp ebx,15; ja .gepxlm_evex
+    mov edi,0xC4; call g_emit_u8; test eax,eax; jnz .gepxlm_bad
+    mov eax,ebx; shr eax,3; and eax,1; xor eax,1; shl eax,7
+    or eax,0x40; or eax,1
+    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepxlm_bad
+    mov edi,0x79
+    cmp r12d,GTYPE_F64; jne 765f
+    mov edi,0x7A
+765:call g_emit_u8; test eax,eax; jnz .gepxlm_bad
+    mov edi,0x6E
+    cmp r12d,GTYPE_F64; jne 766f
+    mov edi,0x7E
+766:call g_emit_u8; test eax,eax; jnz .gepxlm_bad
+    mov eax,ebx; and eax,7; shl eax,3; or eax,0x87
+    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepxlm_bad
+    mov edi,r13d; call g_emit_u32; test eax,eax; jnz .gepxlm_bad
+    xor eax,eax; jmp .gepxlm_done
+.gepxlm_evex:
+    mov edi,0x62; call g_emit_u8; test eax,eax; jnz .gepxlm_bad
+    mov eax,1
+    mov ecx,ebx; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,7; or eax,ecx
+    or eax,0x40
+    mov ecx,ebx; shr ecx,4; and ecx,1; xor ecx,1; shl ecx,4; or eax,ecx
+    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepxlm_bad
+    mov edi,0x7D
+    cmp r12d,GTYPE_F64; jne 767f
+    mov edi,0xFD
+767:call g_emit_u8; test eax,eax; jnz .gepxlm_bad
+    mov edi,0x08; call g_emit_u8; test eax,eax; jnz .gepxlm_bad
+    mov edi,0x6E; call g_emit_u8; test eax,eax; jnz .gepxlm_bad
+    mov eax,ebx; and eax,7; shl eax,3; or eax,0x87
+    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepxlm_bad
+    mov edi,r13d; call g_emit_u32; test eax,eax; jnz .gepxlm_bad
+    xor eax,eax; jmp .gepxlm_done
+.gepxlm_bad:
+    mov eax,1
+.gepxlm_done:
+    pop r13; pop r12; pop rbx; ret
+
+# VEX/EVEX.128 scalar arithmetic with an immutable RIP-relative memory source.
+# edi=opcode (58 add, 5c sub, 59 mul, 5e div, 5d min, 5f max),
+# esi=dst, edx=src1, rcx=compile-time address of immutable scalar bits or 0
+# during a discarded proof emission, r8d=GTYPE_F32/F64.  This is the same
+# arithmetic authority as g_emit_phys_vex_scalar3; only the physical operand
+# form differs.  No reassociation, contraction, or ConstantFact-specific
+# arithmetic path exists here.
+g_emit_phys_vex_scalar3_mem:
+    push rbx; push r12; push r13; push r14; push r15
+    mov ebx,edi; mov r12d,esi; mov r13d,edx; mov r14,rcx; mov r15d,r8d
+    cmp r12d,31; ja .gepv3m_bad
+    cmp r13d,31; ja .gepv3m_bad
+    cmp r15d,GTYPE_F64; je .gepv3m_type_ok
+    cmp r15d,GTYPE_F32; jne .gepv3m_bad
+.gepv3m_type_ok:
+    cmp r12d,15; ja .gepv3m_evex
+    cmp r13d,15; ja .gepv3m_evex
+    mov edi,0xC4; call g_emit_u8; test eax,eax; jnz .gepv3m_bad
+    # VEX byte 2: ~R, memory X/B=1, map=0F(1).
+    mov eax,r12d; shr eax,3; and eax,1; xor eax,1; shl eax,7
+    or eax,0x60
+    or eax,1
+    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepv3m_bad
+    # VEX byte 3: W=0, inverted src1, scalar F2/F3 prefix.
+    mov eax,r13d; and eax,15; xor eax,15; shl eax,3
+    cmp r15d,GTYPE_F64; jne 761f
+    or eax,3
+    jmp 762f
+761:or eax,2
+762:mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepv3m_bad
+    mov edi,ebx; call g_emit_u8; test eax,eax; jnz .gepv3m_bad
+    mov eax,r12d; and eax,7; shl eax,3; or eax,5
+    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepv3m_bad
+    jmp .gepv3m_disp
+.gepv3m_evex:
+    mov edi,0x62; call g_emit_u8; test eax,eax; jnz .gepv3m_bad
+    # P0: ~R, memory X/B=1, ~R', map=0F(1).
+    mov eax,1
+    mov ecx,r12d; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,7; or eax,ecx
+    or eax,0x60
+    mov ecx,r12d; shr ecx,4; and ecx,1; xor ecx,1; shl ecx,4; or eax,ecx
+    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepv3m_bad
+    # P1/P2 match the register form; only ModRM changes to RIP-relative memory.
+    mov eax,r13d; and eax,15; xor eax,15; shl eax,3; or eax,4
+    cmp r15d,GTYPE_F64; jne 763f
+    or eax,0x83
+    jmp 764f
+763:or eax,2
+764:mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepv3m_bad
+    mov eax,r13d; shr eax,4; and eax,1; xor eax,1; shl eax,3
+    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepv3m_bad
+    mov edi,ebx; call g_emit_u8; test eax,eax; jnz .gepv3m_bad
+    mov eax,r12d; and eax,7; shl eax,3; or eax,5
+    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepv3m_bad
+.gepv3m_disp:
+    G_EMIT_POSITION rbx
+    xor edi,edi; call g_emit_u32; test eax,eax; jnz .gepv3m_bad
+    test r14,r14; jz .gepv3m_ok
+    mov rdi,rbx; mov rsi,r14; call g_patch_rel32
+.gepv3m_ok:
+    xor eax,eax; jmp .gepv3m_done
+.gepv3m_bad:
+    mov eax,1
+.gepv3m_done:
     pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
 # VEX/EVEX.128 bitwise register realization over ordinary XMM carriers.
@@ -4351,33 +5089,9 @@ g_emit_phys_vex_bits3:
 # more realization of an ordinary FP ValueFact, not a math runtime call.
 # edi=dst/src XMM, esi=GTYPE_F32/F64 -> eax 0/1.
 g_emit_phys_sqrt_inplace:
-    push rbx; push r12
-    mov ebx,edi; mov r12d,esi
-    cmp ebx,15; ja .gepsi_evex
-    cmp r12d,GTYPE_F64; je .gepsi_f64
-    cmp r12d,GTYPE_F32; jne .gepsi_bad
-    mov edi,0xF3; call g_emit_u8; test eax,eax; jnz .gepsi_bad
-    jmp .gepsi_rex
-.gepsi_f64:
-    mov edi,0xF2; call g_emit_u8; test eax,eax; jnz .gepsi_bad
-.gepsi_rex:
-    cmp ebx,8; jb .gepsi_opcode
-    mov edi,0x45; call g_emit_u8; test eax,eax; jnz .gepsi_bad
-.gepsi_opcode:
-    mov edi,0x0F; call g_emit_u8; test eax,eax; jnz .gepsi_bad
-    mov edi,0x51; call g_emit_u8; test eax,eax; jnz .gepsi_bad
-    mov eax,ebx; and eax,7; mov ecx,eax; shl eax,3; or eax,ecx; or eax,0xC0
-    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepsi_bad
-    xor eax,eax; jmp .gepsi_done
-.gepsi_evex:
-    mov edi,0x51; mov esi,ebx; mov edx,ebx; mov ecx,ebx; mov r8d,r12d
-    call g_emit_phys_evex_scalar3
-    test eax,eax; jnz .gepsi_bad
-    xor eax,eax; jmp .gepsi_done
-.gepsi_bad:
-    mov eax,1
-.gepsi_done:
-    pop r12; pop rbx; ret
+    mov r8d,esi
+    mov esi,edi; mov edx,edi; mov ecx,edi; mov edi,0x51
+    jmp g_emit_phys_vex_scalar3
 
 # Existing scalar physical carrier, square in-place.  This is multiplication of
 # one ValueFact by itself, represented once so shared subtrees survive canonical
@@ -4399,54 +5113,21 @@ g_emit_phys_square_inplace:
 # old ValueFact carrier path extended with one native rounding primitive; there is
 # no math runtime, helper call, or precision side channel.
 g_emit_phys_trunc_inplace:
-    push rbx; push r12
-    mov ebx,edi; mov r12d,esi
-    cmp ebx,15; ja .gepti_evex
-    cmp r12d,GTYPE_F64; je .gepti_f64
-    cmp r12d,GTYPE_F32; jne .gepti_bad
-    mov r12d,0x0A; jmp .gepti_emit
-.gepti_f64:
-    mov r12d,0x0B
-.gepti_emit:
-    mov edi,0x66; call g_emit_u8; test eax,eax; jnz .gepti_bad
-    cmp ebx,8; jb .gepti_norex
-    mov edi,0x45; call g_emit_u8; test eax,eax; jnz .gepti_bad
-.gepti_norex:
-    mov edi,0x0F; call g_emit_u8; test eax,eax; jnz .gepti_bad
-    mov edi,0x3A; call g_emit_u8; test eax,eax; jnz .gepti_bad
-    mov edi,r12d; call g_emit_u8; test eax,eax; jnz .gepti_bad
-    mov eax,ebx; and eax,7; mov ecx,eax; shl eax,3; or eax,ecx; or eax,0xC0
-    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepti_bad
-    mov edi,3; call g_emit_u8; test eax,eax; jnz .gepti_bad
-    xor eax,eax; jmp .gepti_done
-.gepti_evex:
-    cmp ebx,31; ja .gepti_bad
-    cmp r12d,GTYPE_F64; je 761f
-    cmp r12d,GTYPE_F32; jne .gepti_bad
-761:
-    mov edi,0x62; call g_emit_u8; test eax,eax; jnz .gepti_bad
-    mov eax,3
-    mov ecx,ebx; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,7; or eax,ecx
-    mov ecx,ebx; shr ecx,4; and ecx,1; xor ecx,1; shl ecx,6; or eax,ecx
-    mov ecx,ebx; shr ecx,3; and ecx,1; xor ecx,1; shl ecx,5; or eax,ecx
-    mov ecx,ebx; shr ecx,4; and ecx,1; xor ecx,1; shl ecx,4; or eax,ecx
-    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepti_bad
-    mov eax,ebx; and eax,15; xor eax,15; shl eax,3; or eax,5
-    cmp r12d,GTYPE_F64; jne 762f
-    or eax,0x80
-762:mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepti_bad
-    mov eax,ebx; shr eax,4; and eax,1; xor eax,1; shl eax,3
-    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepti_bad
-    mov edi,0x0A
-    cmp r12d,GTYPE_F64; jne 763f
-    mov edi,0x0B
-763:call g_emit_u8; test eax,eax; jnz .gepti_bad
-    mov eax,ebx; and eax,7; mov ecx,eax; shl eax,3; or eax,ecx; or eax,0xC0
-    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepti_bad
-    mov edi,3; call g_emit_u8; test eax,eax; jnz .gepti_bad
-    xor eax,eax; jmp .gepti_done
-.gepti_bad: mov eax,1
-.gepti_done: pop r12; pop rbx; ret
+    mov r8d,esi
+    mov esi,edi; mov edx,edi; mov ecx,edi
+    mov edi,0x70a
+    cmp r8d,GTYPE_F64; je 1f
+    cmp r8d,GTYPE_F32; jne .gepti_bad
+    jmp 2f
+1:  inc edi
+2:  cmp esi,15; jbe 3f
+    or edi,0x8000
+    cmp r8d,GTYPE_F64; jne 3f
+    or edi,0x1000
+3:  call g_emit_phys_rrr_descriptor
+    test eax,eax; jnz .gepti_bad
+    mov edi,3; jmp g_emit_u8
+.gepti_bad: mov eax,1; ret
 
 # Unary sign ValueFacts stay inside the scalar Physical DAG.  Runtime RAX is an
 # existing transient bit carrier for scalar FP materialization, so neg/abs need no
@@ -4524,45 +5205,17 @@ g_emit_phys_fp_sign_inplace:
 # actually meets a lower/higher precision fact. In-place conversion is safe only
 # on a caller-owned destination/temporary, never on a borrowed resident authority.
 g_emit_phys_fp_convert_inplace:
-    push rbx; push r12; push r13
-    mov ebx,edi; mov r12d,esi; mov r13d,edx
-    cmp r12d,r13d; je .gepfc_ok
-    cmp ebx,15; ja .gepfc_evex
-    cmp r12d,GTYPE_F64; je .gepfc_from_f64
-    cmp r12d,GTYPE_F32; jne .gepfc_bad
-    cmp r13d,GTYPE_F64; jne .gepfc_bad
-    mov edi,0xF3                         # CVTSS2SD
-    jmp .gepfc_prefix
-.gepfc_from_f64:
-    cmp r13d,GTYPE_F32; jne .gepfc_bad
-    mov edi,0xF2                         # CVTSD2SS
-.gepfc_prefix:
-    call g_emit_u8; test eax,eax; jnz .gepfc_bad
-    cmp ebx,8; jb .gepfc_opcode
-    mov edi,0x45                         # REX.R|REX.B for xmm8..15 same-reg
-    call g_emit_u8; test eax,eax; jnz .gepfc_bad
-.gepfc_opcode:
-    mov edi,0x0F; call g_emit_u8; test eax,eax; jnz .gepfc_bad
-    mov edi,0x5A; call g_emit_u8; test eax,eax; jnz .gepfc_bad
-    mov eax,ebx; and eax,7; mov ecx,eax; shl eax,3; or eax,ecx; or eax,0xC0
-    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepfc_bad
-.gepfc_evex:
-    cmp ebx,31; ja .gepfc_bad
-    cmp r12d,GTYPE_F64; je 771f
-    cmp r12d,GTYPE_F32; jne .gepfc_bad
-    cmp r13d,GTYPE_F64; jne .gepfc_bad
-    jmp 772f
-771:cmp r13d,GTYPE_F32; jne .gepfc_bad
-772:mov edi,0x5A; mov esi,ebx; mov edx,ebx; mov ecx,ebx; mov r8d,r12d
-    call g_emit_phys_evex_scalar3
-    test eax,eax; jnz .gepfc_bad
-.gepfc_ok:
-    xor eax,eax; jmp .gepfc_done
-.gepfc_bad:
-    mov eax,1
-.gepfc_done:
-    pop r13; pop r12; pop rbx; ret
-
+    cmp esi,edx; je .gepfc_ok
+    cmp esi,GTYPE_F32; je 1f
+    cmp esi,GTYPE_F64; jne .gepfc_bad
+    cmp edx,GTYPE_F32; jne .gepfc_bad
+    jmp 2f
+1:  cmp edx,GTYPE_F64; jne .gepfc_bad
+2:  mov r8d,esi
+    mov esi,edi; mov edx,edi; mov ecx,edi; mov edi,0x5A
+    jmp g_emit_phys_vex_scalar3
+.gepfc_ok: xor eax,eax; ret
+.gepfc_bad: mov eax,1; ret
 
 # ---------------- unified physical predicate realization ----------------
 # Predicates are ordinary Physical-DAG values.  They are materialized in RAX
@@ -4576,6 +5229,7 @@ g_emit_phys_setcc_rax:
     mov edi,0x0F; call g_emit_u8; test eax,eax; jnz .gepsr_bad
     mov edi,ebx; call g_emit_u8; test eax,eax; jnz .gepsr_bad
     mov edi,0xC0; call g_emit_u8; test eax,eax; jnz .gepsr_bad
+.gepsr_normalize:
     mov edi,0x0F; call g_emit_u8; test eax,eax; jnz .gepsr_bad
     mov edi,0xB6; call g_emit_u8; test eax,eax; jnz .gepsr_bad
     mov edi,0xC0; call g_emit_u8; test eax,eax; jnz .gepsr_bad
@@ -4584,6 +5238,15 @@ g_emit_phys_setcc_rax:
     mov eax,1
 .gepsr_done:
     pop rbx; ret
+
+# Same scalar PredicateFact fragment for every floating carrier and width.
+g_emit_phys_fp_setcc_rax:
+    push rbx
+    call physical_fp_setcc_fragment
+    test rax,rax; jz .gepsr_bad
+    mov rdi,rax; mov esi,ecx; call g_emit_bytes
+    test eax,eax; jnz .gepsr_bad
+    jmp .gepsr_normalize
 
 # edi=lhs XMM, esi=rhs XMM, edx=GTYPE_F32/F64. Emit flags for lhs ? rhs.
 # VEX3 covers XMM0..15 on every AVX target; EVEX is used only when the existing
@@ -4634,6 +5297,67 @@ g_emit_phys_fp_cmp_flags:
 .gepfcf_done:
     pop r13; pop r12; pop rbx; ret
 
+# One typed floating compare relation for FLAGS and BOOL value consumers.
+# rdi=left, rsi=right, edx=consumer FP type, rcx=operator string node.
+# Return RAX=canonical operator span (zero on failure), ECX=span length.
+# Operands retain their original evaluation order. Only resident carrier order
+# is exchanged: a<b becomes b>a, a<=b becomes b>=a. Ordered greater relations
+# include IEEE unordered rejection in one ISA condition; no extra parity edge.
+g_emit_phys_fp_compare_relation:
+    push rbx; push r12; push r13; push r14; push r15
+    sub rsp,40
+    mov r12,rdi; mov r13,rsi; mov ebx,edx
+    mov r14,[rcx+8]; mov r15,[rcx+16]
+    mov dword ptr [rsp+8],0; mov dword ptr [rsp+12],0
+    mov dword ptr [rsp+32],0
+    mov rdi,r14; mov rsi,r15; lea rdx,[rip+gv_lt]; mov ecx,gv_lt_end-gv_lt; call span_eq
+    test eax,eax; jnz .gepfcr_greater
+    mov rdi,r14; mov rsi,r15; lea rdx,[rip+gv_le]; mov ecx,gv_le_end-gv_le; call span_eq
+    test eax,eax; jz .gepfcr_left
+    lea r14,[rip+gv_ge]; mov r15d,gv_ge_end-gv_ge
+    jmp .gepfcr_swap
+.gepfcr_greater:
+    lea r14,[rip+gv_gt]; mov r15d,gv_gt_end-gv_gt
+.gepfcr_swap:
+    mov dword ptr [rsp+32],1
+.gepfcr_left:
+    mov rdi,r12; mov esi,ebx; call g_phys_fp_direct_source
+    test eax,eax; jz .gepfcr_left_temp
+    mov [rsp],edx; jmp .gepfcr_right
+.gepfcr_left_temp:
+    call g_phys_fp_temp_alloc; test eax,eax; js .gepfcr_bad
+    mov [rsp],eax; mov dword ptr [rsp+8],1
+    mov rdi,r12; mov esi,eax; mov edx,ebx; call g_emit_phys_fp_value_to
+    cmp eax,ebx; jne .gepfcr_bad
+.gepfcr_right:
+    mov rdi,r13; mov esi,ebx; call g_phys_fp_direct_source
+    test eax,eax; jz .gepfcr_right_temp
+    mov [rsp+4],edx; jmp .gepfcr_compare
+.gepfcr_right_temp:
+    call g_phys_fp_temp_alloc; test eax,eax; js .gepfcr_bad
+    mov [rsp+4],eax; mov dword ptr [rsp+12],1
+    mov rdi,r13; mov esi,eax; mov edx,ebx; call g_emit_phys_fp_value_to
+    cmp eax,ebx; jne .gepfcr_bad
+.gepfcr_compare:
+    mov edi,[rsp]; mov esi,[rsp+4]; mov edx,ebx
+    cmp dword ptr [rsp+32],0; je .gepfcr_flags
+    xchg edi,esi
+.gepfcr_flags:
+    call g_emit_phys_fp_cmp_flags; test eax,eax; jnz .gepfcr_bad
+    mov [rsp+16],r14; mov [rsp+24],r15
+    jmp .gepfcr_release
+.gepfcr_bad:
+    mov qword ptr [rsp+16],0; mov qword ptr [rsp+24],0
+.gepfcr_release:
+    cmp dword ptr [rsp+12],0; je .gepfcr_release_left
+    mov edi,[rsp+4]; call g_phys_fp_temp_free
+.gepfcr_release_left:
+    cmp dword ptr [rsp+8],0; je .gepfcr_return
+    mov edi,[rsp]; call g_phys_fp_temp_free
+.gepfcr_return:
+    mov rax,[rsp+16]; mov ecx,[rsp+24]
+    add rsp,40; pop r15; pop r14; pop r13; pop r12; pop rbx; ret
+
 # rdi=operator span, rsi=len, edx=numeric comparison type -> generated RAX=0/1.
 # Flags must already describe lhs-rhs.
 g_emit_phys_cmp_result_rax:
@@ -4671,55 +5395,106 @@ g_emit_phys_cmp_result_rax:
     cmp r13d,GTYPE_I64; jne .gepcr_emit
     mov edi,0x9D
 .gepcr_emit:
+    cmp r13d,GTYPE_F32; je .gepcr_fp
+    cmp r13d,GTYPE_F64; je .gepcr_fp
     call g_emit_phys_setcc_rax
+    jmp .gepcr_done
+.gepcr_fp:
+    call g_emit_phys_fp_setcc_rax
     jmp .gepcr_done
 .gepcr_bad:
     mov eax,1
 .gepcr_done:
     pop r13; pop r12; pop rbx; ret
 
-# rdi=operator span, rsi=len, edx=comparison type. FLAGS already describe
-# lhs-rhs. Emit the direct control edge for predicate=false and return its
-# displacement field pointer in RAX. This is the control-form counterpart of
-# g_emit_phys_cmp_result_rax; both consume the same comparison relation.
-g_emit_phys_cmp_false_patch:
-    push rbx; push r12; push r13
-    mov rbx,rdi; mov r12,rsi; mov r13d,edx
+# rdi=op span, rsi=len, edx=type, r8d=branch truth -> RAX patch chain.
+# IEEE unordered truth is consumed as a parity edge, without a 0/1 carrier.
+g_emit_phys_cmp_branch_patch:
+    push rbx; push r12; push r13; push r14; push r15
+    mov rbx,rdi; mov r12,rsi; mov r13d,edx; mov r14d,r8d
+    xor r15d,r15d
     mov rdi,rbx; mov rsi,r12; lea rdx,[rip+gv_eq]; mov ecx,gv_eq_end-gv_eq; call span_eq
-    test eax,eax; jnz .gepcfp_eq
+    test eax,eax; jnz .gepcbp_eq
     mov rdi,rbx; mov rsi,r12; lea rdx,[rip+gv_ne]; mov ecx,gv_ne_end-gv_ne; call span_eq
-    test eax,eax; jnz .gepcfp_ne
+    test eax,eax; jnz .gepcbp_ne
     mov rdi,rbx; mov rsi,r12; lea rdx,[rip+gv_lt]; mov ecx,gv_lt_end-gv_lt; call span_eq
-    test eax,eax; jnz .gepcfp_lt
+    test eax,eax; jnz .gepcbp_lt
     mov rdi,rbx; mov rsi,r12; lea rdx,[rip+gv_le]; mov ecx,gv_le_end-gv_le; call span_eq
-    test eax,eax; jnz .gepcfp_le
+    test eax,eax; jnz .gepcbp_le
     mov rdi,rbx; mov rsi,r12; lea rdx,[rip+gv_gt]; mov ecx,gv_gt_end-gv_gt; call span_eq
-    test eax,eax; jnz .gepcfp_gt
+    test eax,eax; jnz .gepcbp_gt
     mov rdi,rbx; mov rsi,r12; lea rdx,[rip+gv_ge]; mov ecx,gv_ge_end-gv_ge; call span_eq
-    test eax,eax; jnz .gepcfp_ge
-    xor eax,eax; jmp .gepcfp_done
-.gepcfp_eq: mov edi,0x85; jmp .gepcfp_emit          # false(eq) => jne
-.gepcfp_ne: mov edi,0x84; jmp .gepcfp_emit          # false(ne) => je
-.gepcfp_lt:
-    mov edi,0x83                                     # unsigned/FP: jae
-    cmp r13d,GTYPE_I64; jne .gepcfp_emit
-    mov edi,0x8D; jmp .gepcfp_emit                   # signed: jge
-.gepcfp_le:
-    mov edi,0x87                                     # unsigned/FP: ja
-    cmp r13d,GTYPE_I64; jne .gepcfp_emit
-    mov edi,0x8F; jmp .gepcfp_emit                   # signed: jg
-.gepcfp_gt:
-    mov edi,0x86                                     # unsigned/FP: jbe
-    cmp r13d,GTYPE_I64; jne .gepcfp_emit
-    mov edi,0x8E; jmp .gepcfp_emit                   # signed: jle
-.gepcfp_ge:
-    mov edi,0x82                                     # unsigned/FP: jb
-    cmp r13d,GTYPE_I64; jne .gepcfp_emit
-    mov edi,0x8C                                     # signed: jl
-.gepcfp_emit:
-    call g_emit_jcc_patch_byte
-.gepcfp_done:
-    pop r13; pop r12; pop rbx; ret
+    test eax,eax; jz .gepcbp_bad
+    mov ebx,0x82; cmp r13d,GTYPE_I64; jne .gepcbp_emit
+    mov ebx,0x8C; jmp .gepcbp_emit
+.gepcbp_eq: mov ebx,0x85; mov r15d,1; jmp .gepcbp_emit
+.gepcbp_ne: mov ebx,0x84; mov r15d,2; jmp .gepcbp_emit
+.gepcbp_lt:
+    mov ebx,0x83; mov r15d,1; cmp r13d,GTYPE_I64; jne .gepcbp_emit
+    mov ebx,0x8D; jmp .gepcbp_emit
+.gepcbp_le:
+    mov ebx,0x87; mov r15d,1; cmp r13d,GTYPE_I64; jne .gepcbp_emit
+    mov ebx,0x8F; jmp .gepcbp_emit
+.gepcbp_gt:
+    mov ebx,0x86; cmp r13d,GTYPE_I64; jne .gepcbp_emit
+    mov ebx,0x8E
+.gepcbp_emit:
+    xor ebx,r14d
+    cmp r13d,GTYPE_F32; je .gepcbp_fp
+    cmp r13d,GTYPE_F64; jne .gepcbp_single
+.gepcbp_fp:
+    test r15d,r15d; jz .gepcbp_single
+    # eq/lt/le are false unordered; ne is true unordered.
+    dec r15d
+    xor r15d,r14d
+    mov edi,0x8A; call g_emit_jcc_patch_byte
+    test rax,rax; jz .gepcbp_bad
+    mov r12,rax
+    mov edi,ebx; call g_emit_jcc_patch_byte
+    test rax,rax; jz .gepcbp_bad
+    test r15d,r15d; jnz .gepcbp_skip_unordered
+    mov rdx,r12; sub rdx,rax; mov [rax],edx
+    jmp .gepcbp_done
+.gepcbp_skip_unordered:
+    mov r13,rax
+    mov rdi,r12; G_EMIT_POSITION rsi; call g_patch_rel32
+    mov rax,r13; jmp .gepcbp_done
+.gepcbp_single:
+    mov edi,ebx; call g_emit_jcc_patch_byte; jmp .gepcbp_done
+.gepcbp_bad: xor eax,eax
+.gepcbp_done:
+    pop r15; pop r14; pop r13; pop r12; pop rbx; ret
+
+# Compiler-only chain links occupy unresolved rel32 fields and disappear when
+# their single consumer publishes the continuation. No runtime table survives.
+g_phys_patch_chain:
+    push rbx; push r12
+    mov r12,rsi
+.gpredchain_next:
+    cmp rdi,-1; je .gpredchain_done
+    test rdi,rdi; jz .gpredchain_done
+    movsxd rbx,dword ptr [rdi]
+    test rbx,rbx; jz .gpredchain_last
+    add rbx,rdi
+.gpredchain_last:
+    mov rsi,r12; call g_patch_rel32
+    mov rdi,rbx; jmp .gpredchain_next
+.gpredchain_done: pop r12; pop rbx; ret
+
+# rdi=head address, rsi=new chain. Append without creating a second fact table.
+g_phys_chain_append:
+    cmp rsi,-1; je .gpredappend_done
+    test rsi,rsi; jz .gpredappend_done
+    mov rax,rsi
+.gpredappend_next:
+    movsxd rdx,dword ptr [rax]
+    test rdx,rdx; jz .gpredappend_tail
+    add rax,rdx; jmp .gpredappend_next
+.gpredappend_tail:
+    mov rdx,[rdi]; test rdx,rdx; jz .gpredappend_head
+    sub rdx,rax; mov [rax],edx
+.gpredappend_head: mov [rdi],rsi
+.gpredappend_done: ret
 
 # edi=resident BOOL XMM (0..15). Emit VPTEST xmm,xmm so a control consumer
 # reads the PredicateFact in its existing physical carrier without converting
@@ -4758,6 +5533,7 @@ g_emit_phys_resident_bool_jz_index:
     cmp dword ptr [rcx+rbx*4],GTYPE_BOOL; jne .geprbji_bad
     mov rcx,qword ptr [rip+g_phys_cse_resident_reg_ptr]
     mov edi,dword ptr [rcx+rbx*4]
+    test edi,edi; js .geprbji_control
     cmp edi,15; ja .geprbji_extract
     call g_emit_phys_xmm_bool_test
     test eax,eax; jnz .geprbji_bad
@@ -4773,24 +5549,161 @@ g_emit_phys_resident_bool_jz_index:
     jmp .geprbji_done
 .geprbji_bad:
     xor eax,eax
+    jmp .geprbji_done
+.geprbji_control:
+    # A control-only fact owns a continuation, not an observable 0/1 value.
+    # Its children still consume the same already-produced shared facts.
+    call g_phys_temp_reset
+    mov rax,[rip+g_phys_cse_resident_expr_ptr]
+    mov rdi,[rax+rbx*8]
+    call g_emit_phys_bool_jz_patch
 .geprbji_done:
     pop rbx; ret
 
-# rdi=BOOL expression. Return a near-branch patch for predicate=false in RAX.
-# A comparison consumed only by control stays in FLAGS and never materializes a
-# 0/1 ValueFact. Repeated episode PredicateFacts retain their shared resident
-# authority and therefore use the ordinary cached-value path instead of being
-# recomputed. Non-comparison boolean relations fall back to that same value form.
-g_emit_phys_bool_jz_patch:
+# rdi=BOOL expr, rsi=true chain address, rdx=false chain address,
+# ecx=fallthrough truth. The same lazy graph serves control and value consumers.
+g_emit_phys_predicate_edges:
     push rbx; push r12; push r13; push r14; push r15
-    sub rsp,32
-    mov r12,rdi
+    sub rsp,48
+    mov r12,rdi; mov r13,rsi; mov r14,rdx; mov ebx,ecx
+    mov qword ptr [rsp],0
+    mov qword ptr [rsp+8],0
+    cmp qword ptr [r12],J_OBJECT; jne .geppe_bad
+.geppe_identity:
+    mov rdi,r12; mov esi,GTYPE_BOOL; call g_semantic_identity_operand
+    test rax,rax; jz .geppe_source
+    mov r12,rax; jmp .geppe_identity
+.geppe_source:
+    mov rdi,r12; mov esi,GTYPE_BOOL; call g_phys_cse_demand_resident
+    mov rdi,r12; mov esi,GTYPE_BOOL; call g_phys_cse_find_resident
+    cmp eax,0; jge .geppe_leaf
+    mov rdi,r12; lea rsi,[rip+gk_literal]; mov edx,gk_literal_end-gk_literal; call obj_get
+    test rax,rax; jz .geppe_op
+    cmp qword ptr [rax],J_TRUE; je .geppe_true
+    cmp qword ptr [rax],J_FALSE; jne .geppe_bad
+    xor eax,eax; jmp .geppe_literal
+.geppe_true: mov eax,1
+.geppe_literal:
+    cmp eax,ebx; je .geppe_ok
+    mov r15,r14; test eax,eax; jz .geppe_literal_emit
+    mov r15,r13
+.geppe_literal_emit:
+    call g_emit_jmp_patch; test rax,rax; jz .geppe_bad
+    mov rdi,r15; mov rsi,rax; call g_phys_chain_append; jmp .geppe_ok
+.geppe_op:
+    mov rdi,r12; lea rsi,[rip+gk_op]; mov edx,gk_op_end-gk_op; call obj_get
+    test rax,rax; jz .geppe_leaf
+    mov r15,rax
+    mov rdi,r12; lea rsi,[rip+gk_args]; mov edx,gk_args_end-gk_args; call obj_get
+    test rax,rax; jz .geppe_leaf
+    mov rax,[rax+24]; mov [rsp+16],rax; test rax,rax; jz .geppe_bad
+    mov rdi,[r15+8]; mov rsi,[r15+16]; lea rdx,[rip+gv_not]; mov ecx,gv_not_end-gv_not; call span_eq
+    test eax,eax; jnz .geppe_not
+    mov rdi,[r15+8]; mov rsi,[r15+16]; lea rdx,[rip+gv_and]; mov ecx,gv_and_end-gv_and; call span_eq
+    test eax,eax; jnz .geppe_and
+    mov rdi,[r15+8]; mov rsi,[r15+16]; lea rdx,[rip+gv_or]; mov ecx,gv_or_end-gv_or; call span_eq
+    test eax,eax; jnz .geppe_or
+    mov rdi,[r15+8]; mov rsi,[r15+16]; lea rdx,[rip+gv_select]; mov ecx,gv_select_end-gv_select; call span_eq
+    test eax,eax; jnz .geppe_select
+.geppe_leaf:
+    mov esi,ebx; xor esi,1; mov rdi,r12; call g_emit_phys_bool_leaf_patch
+    test rax,rax; jz .geppe_bad
+    mov rdi,r14; test ebx,ebx; jnz .geppe_leaf_append
+    mov rdi,r13
+.geppe_leaf_append:
+    mov rsi,rax; call g_phys_chain_append; jmp .geppe_ok
+.geppe_not:
+    mov rdi,[rsp+16]; cmp qword ptr [rdi+32],0; jne .geppe_bad
+    mov rsi,r14; mov rdx,r13; mov ecx,ebx; xor ecx,1
+    call g_emit_phys_predicate_edges; jmp .geppe_done
+.geppe_and:
+    mov rdi,[rsp+16]; mov rax,[rdi+32]; test rax,rax; jz .geppe_bad
+    cmp qword ptr [rax+32],0; jne .geppe_bad
+    mov [rsp+24],rax
+    lea rsi,[rsp]; mov rdx,r14; mov ecx,1
+    call g_emit_phys_predicate_edges; test eax,eax; jnz .geppe_bad
+    mov rdi,[rsp]; G_EMIT_POSITION rsi; call g_phys_patch_chain
+    jmp .geppe_tail
+.geppe_or:
+    mov rdi,[rsp+16]; mov rax,[rdi+32]; test rax,rax; jz .geppe_bad
+    cmp qword ptr [rax+32],0; jne .geppe_bad
+    mov [rsp+24],rax
+    mov rsi,r13; lea rdx,[rsp]; xor ecx,ecx
+    call g_emit_phys_predicate_edges; test eax,eax; jnz .geppe_bad
+    mov rdi,[rsp]; G_EMIT_POSITION rsi; call g_phys_patch_chain
+.geppe_tail:
+    mov rdi,[rsp+24]; mov rsi,r13; mov rdx,r14; mov ecx,ebx
+    inc dword ptr [rip+g_packet_fact_scope]
+    call g_emit_phys_predicate_edges
+    dec dword ptr [rip+g_packet_fact_scope]; jmp .geppe_done
+.geppe_select:
+    mov rdi,[rsp+16]; mov rax,[rdi+32]; test rax,rax; jz .geppe_bad
+    mov [rsp+24],rax
+    mov rax,[rax+32]; test rax,rax; jz .geppe_bad
+    cmp qword ptr [rax+32],0; jne .geppe_bad
+    mov [rsp+32],rax
+    # A constant arm already is a continuation; bind it without a value or jump.
+    mov rdi,rax; lea rsi,[rip+gk_literal]; mov edx,gk_literal_end-gk_literal; call obj_get
+    test rax,rax; jz .geppe_select_general
+    cmp qword ptr [rax],J_TRUE; je .geppe_select_false_true
+    cmp qword ptr [rax],J_FALSE; jne .geppe_bad
+    mov rdi,[rsp+16]; lea rsi,[rsp]; mov rdx,r14; mov ecx,1
+    jmp .geppe_select_constant_cond
+.geppe_select_false_true:
+    mov rdi,[rsp+16]; lea rsi,[rsp]; mov rdx,r13; mov ecx,1
+.geppe_select_constant_cond:
+    call g_emit_phys_predicate_edges; test eax,eax; jnz .geppe_bad
+    mov rdi,[rsp]; G_EMIT_POSITION rsi; call g_phys_patch_chain
+    jmp .geppe_tail
+.geppe_select_general:
+    mov rdi,[rsp+16]; lea rsi,[rsp]; lea rdx,[rsp+8]; mov ecx,1
+    call g_emit_phys_predicate_edges; test eax,eax; jnz .geppe_bad
+    mov rdi,[rsp]; G_EMIT_POSITION rsi; call g_phys_patch_chain
+    mov rdi,[rsp+24]; mov rsi,r13; mov rdx,r14; mov ecx,ebx
+    inc dword ptr [rip+g_packet_fact_scope]
+    call g_emit_phys_predicate_edges
+    dec dword ptr [rip+g_packet_fact_scope]; test eax,eax; jnz .geppe_bad
+    call g_emit_jmp_patch; test rax,rax; jz .geppe_bad
+    mov rdi,r14; test ebx,ebx; jz .geppe_select_merge
+    mov rdi,r13
+.geppe_select_merge:
+    mov rsi,rax; call g_phys_chain_append
+    mov rdi,[rsp+8]; G_EMIT_POSITION rsi; call g_phys_patch_chain
+    mov rdi,[rsp+32]; mov rsi,r13; mov rdx,r14; mov ecx,ebx
+    inc dword ptr [rip+g_packet_fact_scope]
+    call g_emit_phys_predicate_edges
+    dec dword ptr [rip+g_packet_fact_scope]; jmp .geppe_done
+.geppe_ok: xor eax,eax; jmp .geppe_done
+.geppe_bad: mov eax,1
+.geppe_done:
+    add rsp,48
+    pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
+# Existing consumers own one false continuation; true falls through in place.
+g_emit_phys_bool_jz_patch:
+    sub rsp,24
+    mov qword ptr [rsp],0; mov qword ptr [rsp+8],0
+    lea rsi,[rsp]; lea rdx,[rsp+8]; mov ecx,1
+    call g_emit_phys_predicate_edges; test eax,eax; jnz .gepbw_bad
+    mov rdi,[rsp]; G_EMIT_POSITION rsi; call g_phys_patch_chain
+    mov rax,[rsp+8]; test rax,rax; jnz .gepbw_done
+    # Empty continuation is a compile-time success token, never emitted code.
+    mov rax,-1; jmp .gepbw_done
+.gepbw_bad: xor eax,eax
+.gepbw_done: add rsp,24; ret
+
+g_emit_phys_bool_leaf_patch:
+    push rbx; push r12; push r13; push r14; push r15
+    sub rsp,48
+    mov r12,rdi
+    mov dword ptr [rsp+32],esi
+    mov rdi,r12; mov esi,GTYPE_BOOL; call g_phys_cse_demand_resident
     mov rdi,r12; mov esi,GTYPE_BOOL; call g_phys_cse_find_resident
     cmp eax,0; jl .gepbjp_uncached
     mov edi,eax
     call g_emit_phys_resident_bool_jz_index
     test rax,rax; jz .gepbjp_bad
+    mov edx,dword ptr [rsp+32]; xor byte ptr [rax-1],dl
     jmp .gepbjp_done
 .gepbjp_uncached:
     cmp qword ptr [r12],J_OBJECT; jne .gepbjp_value_form
@@ -4846,7 +5759,7 @@ g_emit_phys_bool_jz_patch:
 .gepbjp_int_lit_cmp:
     mov edi,dword ptr [rsp+24]; mov esi,dword ptr [rsp+28]; call g_emit_phys_gpr_cmp_imm32
     test eax,eax; jnz .gepbjp_int_lit_free_bad
-    mov rdi,[r13+8]; mov rsi,[r13+16]; mov edx,ebx; call g_emit_phys_cmp_false_patch
+    mov rdi,[r13+8]; mov rsi,[r13+16]; mov edx,ebx; mov r8d,dword ptr [rsp+32]; call g_emit_phys_cmp_branch_patch
     mov rbx,rax
     cmp dword ptr [rsp+8],1; jne .gepbjp_int_lit_ret
     mov edi,dword ptr [rsp+24]; call g_phys_int_temp_free
@@ -4858,26 +5771,10 @@ g_emit_phys_bool_jz_patch:
     jmp .gepbjp_bad
 
 .gepbjp_int_regs:
-    call g_phys_int_temp_alloc; cmp eax,0; jl .gepbjp_bad
-    mov dword ptr [rsp+24],eax
-    call g_phys_int_temp_alloc; cmp eax,0; jl .gepbjp_int_free_l_bad
-    mov dword ptr [rsp+28],eax
-    mov rdi,r14; mov esi,dword ptr [rsp+24]; mov edx,ebx; call g_emit_phys_int_expr_to
-    cmp eax,ebx; jne .gepbjp_int_free_both_bad
-    mov rdi,r15; mov esi,dword ptr [rsp+28]; mov edx,ebx; call g_emit_phys_int_expr_to
-    cmp eax,ebx; jne .gepbjp_int_free_both_bad
-    mov edi,dword ptr [rsp+24]; mov esi,dword ptr [rsp+28]; call g_emit_phys_gpr_cmp
-    test eax,eax; jnz .gepbjp_int_free_both_bad
-    mov rdi,[r13+8]; mov rsi,[r13+16]; mov edx,ebx; call g_emit_phys_cmp_false_patch
-    mov rbx,rax
-    mov edi,dword ptr [rsp+28]; call g_phys_int_temp_free
-    mov edi,dword ptr [rsp+24]; call g_phys_int_temp_free
-    mov rax,rbx; jmp .gepbjp_done
-.gepbjp_int_free_both_bad:
-    mov edi,dword ptr [rsp+28]; call g_phys_int_temp_free
-.gepbjp_int_free_l_bad:
-    mov edi,dword ptr [rsp+24]; call g_phys_int_temp_free
-    jmp .gepbjp_bad
+    mov rdi,r14; mov rsi,r15; mov edx,ebx; call g_emit_phys_int_compare_flags
+    test eax,eax; jnz .gepbjp_bad
+    mov rdi,[r13+8]; mov rsi,[r13+16]; mov edx,ebx; mov r8d,dword ptr [rsp+32]; call g_emit_phys_cmp_branch_patch
+    jmp .gepbjp_done
 
 .gepbjp_fp:
     cmp ebx,GTYPE_F32; je 7441f
@@ -4885,70 +5782,35 @@ g_emit_phys_bool_jz_patch:
 7441:cmp dword ptr [rsp+16],GTYPE_F32; je 7442f
     cmp dword ptr [rsp+16],GTYPE_F64; jne .gepbjp_value_form
 7442:
-    mov dword ptr [rsp+8],0
-    mov dword ptr [rsp+12],0
-    # Consume already-resident ValueFacts directly as compare operands. Only an
-    # expression that truly needs realization borrows an anonymous XMM.
-    mov rdi,r14; mov esi,dword ptr [rsp+20]; call g_phys_fp_direct_source
-    test eax,eax; jz .gepbjp_fp_lhs_temp
-    mov dword ptr [rsp+24],edx
-    jmp .gepbjp_fp_rhs_source
-.gepbjp_fp_lhs_temp:
-    call g_phys_fp_temp_alloc; cmp eax,0; jl .gepbjp_bad
-    mov dword ptr [rsp+24],eax; mov dword ptr [rsp+8],1
-    mov rdi,r14; mov esi,eax; mov edx,dword ptr [rsp+20]; call g_emit_phys_fp_value_to
-    cmp eax,dword ptr [rsp+20]; jne .gepbjp_fp_free_l_bad
-.gepbjp_fp_rhs_source:
-    mov rdi,r15; mov esi,dword ptr [rsp+20]; call g_phys_fp_direct_source
-    test eax,eax; jz .gepbjp_fp_rhs_temp
-    mov dword ptr [rsp+28],edx
-    jmp .gepbjp_fp_cmp_ready
-.gepbjp_fp_rhs_temp:
-    call g_phys_fp_temp_alloc; cmp eax,0; jl .gepbjp_fp_free_l_bad
-    mov dword ptr [rsp+28],eax; mov dword ptr [rsp+12],1
-    mov rdi,r15; mov esi,eax; mov edx,dword ptr [rsp+20]; call g_emit_phys_fp_value_to
-    cmp eax,dword ptr [rsp+20]; jne .gepbjp_fp_free_both_bad
-.gepbjp_fp_cmp_ready:
-    mov edi,dword ptr [rsp+24]; mov esi,dword ptr [rsp+28]; mov edx,dword ptr [rsp+20]; call g_emit_phys_fp_cmp_flags
-    test eax,eax; jnz .gepbjp_fp_free_both_bad
-    mov rdi,[r13+8]; mov rsi,[r13+16]; mov edx,dword ptr [rsp+20]; call g_emit_phys_cmp_false_patch
-    mov rbx,rax
-    cmp dword ptr [rsp+12],1; jne .gepbjp_fp_free_l_ok
-    mov edi,dword ptr [rsp+28]; call g_phys_fp_temp_free
-.gepbjp_fp_free_l_ok:
-    cmp dword ptr [rsp+8],1; jne .gepbjp_fp_ret
-    mov edi,dword ptr [rsp+24]; call g_phys_fp_temp_free
-.gepbjp_fp_ret:
-    mov rax,rbx; jmp .gepbjp_done
-.gepbjp_fp_free_both_bad:
-    cmp dword ptr [rsp+12],1; jne .gepbjp_fp_free_l_bad
-    mov edi,dword ptr [rsp+28]; call g_phys_fp_temp_free
-.gepbjp_fp_free_l_bad:
-    cmp dword ptr [rsp+8],1; jne .gepbjp_bad
-    mov edi,dword ptr [rsp+24]; call g_phys_fp_temp_free
-    jmp .gepbjp_bad
+    mov rdi,r14; mov rsi,r15; mov edx,dword ptr [rsp+20]; mov rcx,r13
+    call g_emit_phys_fp_compare_relation
+    test rax,rax; jz .gepbjp_bad
+    mov rdi,rax; mov esi,ecx; mov edx,dword ptr [rsp+20]
+    mov r8d,dword ptr [rsp+32]; call g_emit_phys_cmp_branch_patch
+    jmp .gepbjp_done
 
 .gepbjp_value_form:
     mov rdi,r12; call g_emit_phys_bool_expr_to_rax
     test eax,eax; jnz .gepbjp_bad
     lea rdi,[rip+gc_test_rax]; mov esi,gc_test_rax_end-gc_test_rax; call g_emit_bytes
-    call g_emit_jz_patch
+    mov edi,0x84; xor edi,dword ptr [rsp+32]; call g_emit_jcc_patch_byte
     jmp .gepbjp_done
 .gepbjp_bad:
     xor eax,eax
 .gepbjp_done:
-    add rsp,32
+    add rsp,48
     pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
 # rdi=BOOL expression -> eax=0 success, generated runtime RAX=0/1.
-# Lazy boolean semantics are retained with the same patching authority as the
-# generic emitter, but operands themselves remain Physical-DAG values.
+# Value demand consumes the same lazy continuation graph. Resident predicates
+# and semantic leaves retain their existing carrier authority.
 g_emit_phys_bool_expr_to_rax:
     push rbx; push r12; push r13; push r14; push r15
     sub rsp,32
     mov r12,rdi
     cmp qword ptr [r12],J_OBJECT; jne .gepbe_bad
 
+    mov rdi,r12; mov esi,GTYPE_BOOL; call g_phys_cse_demand_resident
     # Episode-scoped PredicateFacts share the same Physical ValueFact authority
     # as repeated arithmetic.  BOOL payload bits live in an XMM carrier selected
     # by the existing whole-episode pressure model; consumers recover the exact
@@ -4962,7 +5824,37 @@ g_emit_phys_bool_expr_to_rax:
     test eax,eax; jnz .gepbe_bad
     xor eax,eax; jmp .gepbe_done
 .gepbe_uncached:
-
+    mov rdi,r12; lea rsi,[rip+gk_state]; mov edx,gk_state_end-gk_state; call obj_get
+    test rax,rax; jz .gepbe_var
+    mov rdi,[rax+8]; mov rsi,[rax+16]; call g_find_state
+    test rax,rax; jz .gepbe_bad
+    cmp dword ptr [rax+16],GTYPE_BOOL; jne .gepbe_bad
+    mov ebx,dword ptr [rax+24]
+    mov rdi,r12; mov esi,GTYPE_BOOL; call g_phys_int_direct_source
+    test eax,eax; jz .gepbe_state_spill
+    xor edi,edi; mov esi,edx; call g_emit_phys_gpr_move
+    jmp .gepbe_done
+.gepbe_state_spill:
+    mov eax,ebx; call g_state_slot_addr; mov rdi,rax; call g_emit_load_rax_abs
+    jmp .gepbe_done
+.gepbe_var:
+    mov rdi,r12; lea rsi,[rip+gk_var]; mov edx,gk_var_end-gk_var; call obj_get
+    test rax,rax; jz .gepbe_literal
+    mov rdi,[rax+8]; mov rsi,[rax+16]; call g_find_symbol
+    test rax,rax; jz .gepbe_bad
+    mov rdi,rax; call g_semantic_resolve_symbol
+    test rax,rax; jz .gepbe_bad
+    cmp dword ptr [rax+20],GTYPE_BOOL; jne .gepbe_bad
+    cmp dword ptr [rax+24],-1; je .gepbe_bad
+    mov ebx,dword ptr [rax+16]
+    mov eax,dword ptr [rax+24]
+    cmp ebx,GK_INPUT; jne .gepbe_binding
+    call g_input_slot_addr; jmp .gepbe_load
+.gepbe_binding:
+    call g_binding_slot_addr
+.gepbe_load:
+    mov rdi,rax; call g_emit_load_rax_abs; jmp .gepbe_done
+.gepbe_literal:
     # Boolean literal.
     mov rdi,r12; lea rsi,[rip+gk_literal]; mov edx,gk_literal_end-gk_literal; call obj_get
     test rax,rax; jz .gepbe_op
@@ -4984,12 +5876,14 @@ g_emit_phys_bool_expr_to_rax:
     test rax,rax; jz .gepbe_bad
     mov r14,[rax+24]; test r14,r14; jz .gepbe_bad
 
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_select]; mov ecx,gv_select_end-gv_select; call span_eq
+    test eax,eax; jnz .gepbe_control
     mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_not]; mov ecx,gv_not_end-gv_not; call span_eq
     test eax,eax; jnz .gepbe_not
     mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_and]; mov ecx,gv_and_end-gv_and; call span_eq
-    test eax,eax; jnz .gepbe_and
+    test eax,eax; jnz .gepbe_control
     mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_or]; mov ecx,gv_or_end-gv_or; call span_eq
-    test eax,eax; jnz .gepbe_or
+    test eax,eax; jnz .gepbe_control
     mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+gv_xor]; mov ecx,gv_xor_end-gv_xor; call span_eq
     test eax,eax; jnz .gepbe_xor
     mov rdi,[r13+8]; mov rsi,[r13+16]; call g_is_compare_op
@@ -4998,35 +5892,25 @@ g_emit_phys_bool_expr_to_rax:
 
 .gepbe_not:
     cmp qword ptr [r14+32],0; jne .gepbe_bad
-    mov rdi,r14; call g_emit_phys_bool_expr_to_rax; test eax,eax; jnz .gepbe_bad
-    mov edi,0x83; call g_emit_u8; test eax,eax; jnz .gepbe_bad
-    mov edi,0xF0; call g_emit_u8; test eax,eax; jnz .gepbe_bad
-    mov edi,1; call g_emit_u8; jmp .gepbe_done
-
-.gepbe_and:
-    mov r15,[r14+32]; test r15,r15; jz .gepbe_bad
-    cmp qword ptr [r15+32],0; jne .gepbe_bad
-    mov rdi,r14; call g_emit_phys_bool_expr_to_rax; test eax,eax; jnz .gepbe_bad
-    lea rdi,[rip+gc_test_rax]; mov esi,gc_test_rax_end-gc_test_rax; call g_emit_bytes
-    call g_emit_jz_patch; mov [rsp],rax
-    mov rdi,r15; call g_emit_phys_bool_expr_to_rax; test eax,eax; jnz .gepbe_bad
-    call g_emit_jmp_patch; mov [rsp+8],rax
-    mov rsi,[rip+g_emit_ptr]; mov rdi,[rsp]; call g_patch_rel32
-    xor edi,edi; call g_emit_mov_rax_imm64
-    mov rsi,[rip+g_emit_ptr]; mov rdi,[rsp+8]; call g_patch_rel32
-    xor eax,eax; jmp .gepbe_done
-
-.gepbe_or:
-    mov r15,[r14+32]; test r15,r15; jz .gepbe_bad
-    cmp qword ptr [r15+32],0; jne .gepbe_bad
-    mov rdi,r14; call g_emit_phys_bool_expr_to_rax; test eax,eax; jnz .gepbe_bad
-    lea rdi,[rip+gc_test_rax]; mov esi,gc_test_rax_end-gc_test_rax; call g_emit_bytes
-    call g_emit_jnz_patch; mov [rsp],rax
-    mov rdi,r15; call g_emit_phys_bool_expr_to_rax; test eax,eax; jnz .gepbe_bad
-    call g_emit_jmp_patch; mov [rsp+8],rax
-    mov rsi,[rip+g_emit_ptr]; mov rdi,[rsp]; call g_patch_rel32
+    mov rdi,r14; call g_emit_phys_bool_expr_to_rax
+    test eax,eax; jnz .gepbe_bad
+    # The existing bool primitive owns normalized 0/1 inversion. Consume its
+    # register relation directly; stack transport belongs only to stack users.
+    lea rdi,[rip+gc_not_bool+1]
+    mov esi,gc_not_bool_end-gc_not_bool-2
+    call g_emit_bytes
+    jmp .gepbe_done
+.gepbe_control:
+    mov rdi,r12; call g_emit_phys_bool_jz_patch
+    test rax,rax; jz .gepbe_bad
+    mov rbx,rax
     mov edi,1; call g_emit_mov_rax_imm64
-    mov rsi,[rip+g_emit_ptr]; mov rdi,[rsp+8]; call g_patch_rel32
+    test eax,eax; jnz .gepbe_bad
+    call g_emit_jmp_patch; mov [rsp+8],rax
+    mov rdi,rbx; G_EMIT_POSITION rsi; call g_phys_patch_chain
+    xor edi,edi; call g_emit_mov_rax_imm64
+    test eax,eax; jnz .gepbe_bad
+    mov rdi,[rsp+8]; G_EMIT_POSITION rsi; call g_patch_rel32
     xor eax,eax; jmp .gepbe_done
 
 .gepbe_xor:
@@ -5109,26 +5993,10 @@ g_emit_phys_bool_expr_to_rax:
     jmp .gepbe_bad
 
 .gepbe_compare_int_regs:
-    call g_phys_int_temp_alloc; cmp eax,0; jl .gepbe_bad
-    mov dword ptr [rsp+24],eax
-    call g_phys_int_temp_alloc; cmp eax,0; jl .gepbe_cmp_int_free_l
-    mov dword ptr [rsp+28],eax
-    mov rdi,r14; mov esi,dword ptr [rsp+24]; mov edx,ebx; call g_emit_phys_int_expr_to
-    cmp eax,ebx; jne .gepbe_cmp_int_free_both
-    mov rdi,r15; mov esi,dword ptr [rsp+28]; mov edx,ebx; call g_emit_phys_int_expr_to
-    cmp eax,ebx; jne .gepbe_cmp_int_free_both
-    mov edi,dword ptr [rsp+24]; mov esi,dword ptr [rsp+28]; call g_emit_phys_gpr_cmp
-    test eax,eax; jnz .gepbe_cmp_int_free_both
+    mov rdi,r14; mov rsi,r15; mov edx,ebx; call g_emit_phys_int_compare_flags
+    test eax,eax; jnz .gepbe_bad
     mov rdi,[r13+8]; mov rsi,[r13+16]; mov edx,ebx; call g_emit_phys_cmp_result_rax
-    mov ebx,eax
-    mov edi,dword ptr [rsp+28]; call g_phys_int_temp_free
-    mov edi,dword ptr [rsp+24]; call g_phys_int_temp_free
-    mov eax,ebx; jmp .gepbe_done
-.gepbe_cmp_int_free_both:
-    mov edi,dword ptr [rsp+28]; call g_phys_int_temp_free
-.gepbe_cmp_int_free_l:
-    mov edi,dword ptr [rsp+24]; call g_phys_int_temp_free
-    jmp .gepbe_bad
+    jmp .gepbe_done
 
 .gepbe_compare_fp:
     # Both operands must already be scalar FP; precision convergence is the same
@@ -5138,46 +6006,12 @@ g_emit_phys_bool_expr_to_rax:
 7413:cmp dword ptr [rsp+16],GTYPE_F32; je 7414f
     cmp dword ptr [rsp+16],GTYPE_F64; jne .gepbe_bad
 7414:
-    mov dword ptr [rsp+8],0
-    mov dword ptr [rsp+12],0
-    mov rdi,r14; mov esi,dword ptr [rsp+20]; call g_phys_fp_direct_source
-    test eax,eax; jz .gepbe_cmp_fp_lhs_temp
-    mov dword ptr [rsp+24],edx
-    jmp .gepbe_cmp_fp_rhs_source
-.gepbe_cmp_fp_lhs_temp:
-    call g_phys_fp_temp_alloc; cmp eax,0; jl .gepbe_bad
-    mov dword ptr [rsp+24],eax; mov dword ptr [rsp+8],1
-    mov rdi,r14; mov esi,eax; mov edx,dword ptr [rsp+20]; call g_emit_phys_fp_value_to
-    cmp eax,dword ptr [rsp+20]; jne .gepbe_cmp_fp_free_l
-.gepbe_cmp_fp_rhs_source:
-    mov rdi,r15; mov esi,dword ptr [rsp+20]; call g_phys_fp_direct_source
-    test eax,eax; jz .gepbe_cmp_fp_rhs_temp
-    mov dword ptr [rsp+28],edx
-    jmp .gepbe_cmp_fp_ready
-.gepbe_cmp_fp_rhs_temp:
-    call g_phys_fp_temp_alloc; cmp eax,0; jl .gepbe_cmp_fp_free_l
-    mov dword ptr [rsp+28],eax; mov dword ptr [rsp+12],1
-    mov rdi,r15; mov esi,eax; mov edx,dword ptr [rsp+20]; call g_emit_phys_fp_value_to
-    cmp eax,dword ptr [rsp+20]; jne .gepbe_cmp_fp_free_both
-.gepbe_cmp_fp_ready:
-    mov edi,dword ptr [rsp+24]; mov esi,dword ptr [rsp+28]; mov edx,dword ptr [rsp+20]
-    call g_emit_phys_fp_cmp_flags; test eax,eax; jnz .gepbe_cmp_fp_free_both
-    mov rdi,[r13+8]; mov rsi,[r13+16]; mov edx,dword ptr [rsp+20]; call g_emit_phys_cmp_result_rax
-    mov ebx,eax
-    cmp dword ptr [rsp+12],1; jne .gepbe_cmp_fp_free_l_ok
-    mov edi,dword ptr [rsp+28]; call g_phys_fp_temp_free
-.gepbe_cmp_fp_free_l_ok:
-    cmp dword ptr [rsp+8],1; jne .gepbe_cmp_fp_ret
-    mov edi,dword ptr [rsp+24]; call g_phys_fp_temp_free
-.gepbe_cmp_fp_ret:
-    mov eax,ebx; jmp .gepbe_done
-.gepbe_cmp_fp_free_both:
-    cmp dword ptr [rsp+12],1; jne .gepbe_cmp_fp_free_l
-    mov edi,dword ptr [rsp+28]; call g_phys_fp_temp_free
-.gepbe_cmp_fp_free_l:
-    cmp dword ptr [rsp+8],1; jne .gepbe_bad
-    mov edi,dword ptr [rsp+24]; call g_phys_fp_temp_free
-    jmp .gepbe_bad
+    mov rdi,r14; mov rsi,r15; mov edx,dword ptr [rsp+20]; mov rcx,r13
+    call g_emit_phys_fp_compare_relation
+    test rax,rax; jz .gepbe_bad
+    mov rdi,rax; mov esi,ecx; mov edx,dword ptr [rsp+20]
+    call g_emit_phys_cmp_result_rax
+    jmp .gepbe_done
 
 .gepbe_bad:
     mov eax,1
@@ -5186,78 +6020,114 @@ g_emit_phys_bool_expr_to_rax:
     pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
 
-# rdi=select expr, esi=destination XMM, edx=result FP type -> eax type/0.
+# Select is one typed continuation producer. Carrier primitives are its inputs;
+# floating and integer consumers do not retain duplicate control emitters.
 g_emit_phys_fp_select_to:
-    push rbx; push r12; push r13; push r14; push r15
-    sub rsp,24
-    mov r12,rdi; mov r13d,esi; mov r14d,edx
-    mov rdi,r12; lea rsi,[rip+gk_args]; mov edx,gk_args_end-gk_args; call obj_get
-    test rax,rax; jz .gepfst_bad
-    mov rbx,[rax+24]; test rbx,rbx; jz .gepfst_bad
-    mov r15,[rbx+32]; test r15,r15; jz .gepfst_bad
-    mov rax,[r15+32]; test rax,rax; jz .gepfst_bad
-    cmp qword ptr [rax+32],0; jne .gepfst_bad
-    mov [rsp],r15
-    mov [rsp+8],rax
-    mov rdi,rbx; call g_infer_expr; cmp eax,GTYPE_BOOL; jne .gepfst_bad
-    mov rdi,[rsp]; call g_infer_expr; mov ebx,eax
-    mov rdi,[rsp+8]; call g_infer_expr; mov edx,eax
-    mov eax,ebx; call g_low_type; cmp eax,r14d; jne .gepfst_bad
-
-    mov rdi,r12; lea rsi,[rip+gk_args]; mov edx,gk_args_end-gk_args; call obj_get
-    mov rbx,[rax+24]
-    mov rdi,rbx; call g_emit_phys_bool_jz_patch
-    test rax,rax; jz .gepfst_bad
-    mov [rsp+16],rax
-    mov rdi,[rsp]; mov esi,r13d; mov edx,r14d; call g_emit_phys_fp_value_to
-    cmp eax,r14d; jne .gepfst_bad
-    call g_emit_jmp_patch; mov r15,rax
-    mov rsi,[rip+g_emit_ptr]; mov rdi,[rsp+16]; call g_patch_rel32
-    mov rdi,[rsp+8]; mov esi,r13d; mov edx,r14d; call g_emit_phys_fp_value_to
-    cmp eax,r14d; jne .gepfst_bad
-    mov rsi,[rip+g_emit_ptr]; mov rdi,r15; call g_patch_rel32
-    mov eax,r14d; jmp .gepfst_done
-.gepfst_bad:
-    xor eax,eax
-.gepfst_done:
-    add rsp,24
-    pop r15; pop r14; pop r13; pop r12; pop rbx; ret
-
-# rdi=select expr, esi=destination GPR, edx=result integer type -> eax type/0.
+    lea r8,[rip+g_emit_phys_fp_value_to]
+    lea r9,[rip+g_phys_fp_direct_source]
+    jmp g_emit_phys_select_to
 g_emit_phys_int_select_to:
+    lea r8,[rip+g_emit_phys_int_expr_to]
+    lea r9,[rip+g_phys_int_direct_source]
+g_emit_phys_select_to:
     push rbx; push r12; push r13; push r14; push r15
-    sub rsp,24
+    sub rsp,56
     mov r12,rdi; mov r13d,esi; mov r14d,edx
+    mov [rsp+32],r8; mov [rsp+40],r9
+    mov dword ptr [rsp+24],0
     mov rdi,r12; lea rsi,[rip+gk_args]; mov edx,gk_args_end-gk_args; call obj_get
-    test rax,rax; jz .gepist_bad
-    mov rbx,[rax+24]; test rbx,rbx; jz .gepist_bad
-    mov r15,[rbx+32]; test r15,r15; jz .gepist_bad
-    mov rax,[r15+32]; test rax,rax; jz .gepist_bad
-    cmp qword ptr [rax+32],0; jne .gepist_bad
-    mov [rsp],r15
-    mov [rsp+8],rax
-    mov rdi,rbx; call g_infer_expr; cmp eax,GTYPE_BOOL; jne .gepist_bad
-    mov rdi,[rsp]; call g_infer_expr; cmp eax,r14d; jne .gepist_bad
-    mov rdi,[rsp+8]; call g_infer_expr; cmp eax,r14d; jne .gepist_bad
-
-    mov rdi,r12; lea rsi,[rip+gk_args]; mov edx,gk_args_end-gk_args; call obj_get
-    mov rbx,[rax+24]
+    test rax,rax; jz .gepst_bad
+    mov rbx,[rax+24]; test rbx,rbx; jz .gepst_bad
+    mov r15,[rbx+32]; test r15,r15; jz .gepst_bad
+    mov rax,[r15+32]; test rax,rax; jz .gepst_bad
+    cmp qword ptr [rax+32],0; jne .gepst_bad
+    mov [rsp],r15; mov [rsp+8],rax
+    mov rdi,rbx; call g_infer_expr; cmp eax,GTYPE_BOOL; jne .gepst_bad
+    mov rdi,[rsp]; call g_infer_expr; mov [rsp+48],eax
+    mov rdi,[rsp+8]; call g_infer_expr
+    cmp r14d,GTYPE_F32; jb .gepst_integral_types
+    cmp r14d,GTYPE_F64; ja .gepst_integral_types
+    mov edx,eax; mov eax,[rsp+48]; call g_low_type
+    cmp eax,r14d; jne .gepst_bad
+    jmp .gepst_transport_proof
+.gepst_integral_types:
+    cmp eax,r14d; jne .gepst_bad
+    cmp [rsp+48],r14d; jne .gepst_bad
+.gepst_transport_proof:
+    # A resident false arm owns only register transport. If both emitted arms
+    # begin with that exact transport, it may precede a single compare edge.
+    # No arithmetic, load, trap or unselected expression is speculated.
+    mov rdi,[rsp+8]; mov esi,r14d; call qword ptr [rsp+40]
+    test eax,eax; jz .gepst_predicate
+    mov rdi,rbx; lea rsi,[rip+gk_op]; mov edx,gk_op_end-gk_op; call obj_get
+    test rax,rax; jz .gepst_predicate
+    mov rdi,[rax+8]; mov rsi,[rax+16]; call g_is_compare_op
+    mov [rsp+24],eax
+.gepst_predicate:
+    mov rax,[rip+g_phys_control_edge_serial]; mov [rsp+48],rax
     mov rdi,rbx; call g_emit_phys_bool_jz_patch
-    test rax,rax; jz .gepist_bad
+    test rax,rax; jz .gepst_bad
     mov [rsp+16],rax
-    mov rdi,[rsp]; mov esi,r13d; mov edx,r14d; call g_emit_phys_int_expr_to
-    cmp eax,r14d; jne .gepist_bad
+    # All generated continuation edges participate, including an IEEE parity
+    # edge already patched inside a leaf. One unresolved edge alone is not proof.
+    mov rcx,[rip+g_phys_control_edge_serial]; sub rcx,[rsp+48]
+    cmp rcx,1; jne .gepst_no_meet
+    lea rcx,[rax+4]; call g_phys_window_barrier; cmp rcx,[rip+g_emit_ptr]; jne .gepst_no_meet
+    cmp dword ptr [rax],0; je .gepst_true
+.gepst_no_meet:
+    mov dword ptr [rsp+24],0
+.gepst_true:
+    inc dword ptr [rip+g_packet_fact_scope]
+    mov rdi,[rsp]; mov esi,r13d; mov edx,r14d; call qword ptr [rsp+32]
+    dec dword ptr [rip+g_packet_fact_scope]
+    cmp eax,r14d; jne .gepst_bad
     call g_emit_jmp_patch; mov r15,rax
-    mov rsi,[rip+g_emit_ptr]; mov rdi,[rsp+16]; call g_patch_rel32
-    mov rdi,[rsp+8]; mov esi,r13d; mov edx,r14d; call g_emit_phys_int_expr_to
-    cmp eax,r14d; jne .gepist_bad
-    mov rsi,[rip+g_emit_ptr]; mov rdi,r15; call g_patch_rel32
-    mov eax,r14d; jmp .gepist_done
-.gepist_bad:
-    xor eax,eax
-.gepist_done:
-    add rsp,24
+    G_EMIT_POSITION rsi; mov rdi,[rsp+16]; call g_phys_patch_chain
+    inc dword ptr [rip+g_packet_fact_scope]
+    mov rdi,[rsp+8]; mov esi,r13d; mov edx,r14d; call qword ptr [rsp+32]
+    dec dword ptr [rip+g_packet_fact_scope]
+    cmp eax,r14d; jne .gepst_bad
+    G_EMIT_POSITION rsi; mov rdi,r15; call g_patch_rel32
+    cmp dword ptr [rsp+24],0; je .gepst_result
+    mov rdi,[rsp+16]; mov rsi,r15; G_EMIT_POSITION rdx
+    call g_phys_meet_select_transport
+.gepst_result:
+    mov eax,r14d; jmp .gepst_done
+.gepst_bad: xor eax,eax
+.gepst_done:
+    add rsp,56
     pop r15; pop r14; pop r13; pop r12; pop rbx; ret
+
+# rdi=single false-edge rel32, rsi=arm-end JMP rel32, rdx=emission end.
+# The caller proves a numeric compare and a register-only false producer.
+# Identical transport prefixes meet after FLAGS and before the compare branch.
+# Existing true-arm interior addresses stay fixed; no machine-code decoder,
+# branch relocation pass, source pattern or second semantic emitter is created.
+g_phys_meet_select_transport:
+    push rbx; push r12; push r13; push r14
+    sub rsp,8
+    lea r12,[rdi+4]
+    lea r13,[rsi+4]
+    lea r14,[rsi-1]
+    mov rbx,rdx; sub rbx,r13
+    test rbx,rbx; jz .gpmst_done
+    mov rax,r14; sub rax,r12
+    cmp rbx,rax; ja .gpmst_done
+    mov rdi,r12; mov rsi,r13; mov rcx,rbx
+    repe cmpsb
+    jne .gpmst_done
+    # Preserve the one near Jcc, then rotate the shared transport before it.
+    mov eax,[r12-6]; mov [rsp],eax
+    mov ax,[r12-2]; mov [rsp+4],ax
+    lea rdi,[r12-6]; mov rsi,r13; mov rcx,rbx
+    rep movsb
+    mov eax,[rsp]; mov [rdi],eax
+    mov ax,[rsp+4]; mov [rdi+4],ax
+    mov rax,r14; lea rcx,[rdi+6]; sub rax,rcx
+    mov [rdi+2],eax
+    mov [rip+g_emit_ptr],r14
+.gpmst_done:
+    add rsp,8; pop r14; pop r13; pop r12; pop rbx; ret
 
 # rdi=expr, esi=caller-owned XMM destination, edx=consumer FP type.
 # Realize the subtree at its own inferred precision first, then perform exactly
@@ -5291,6 +6161,34 @@ g_emit_phys_fp_value_to:
 .gepfv_done:
     pop r14; pop r13; pop r12; pop rbx; ret
 
+# rdi=expr, esi=expected FP type -> eax=1 and rdx=canonical scalar bits
+# when expr is an exact literal of that type; eax=0 otherwise.  This is a
+# semantic query only and emits no code.
+g_phys_fp_literal_bits:
+    push rbx; push r12; push r13
+    mov r12,rdi; mov r13d,esi
+    xor eax,eax
+    cmp qword ptr [r12],J_OBJECT; jne .gpfplb_done
+    mov rdi,r12; lea rsi,[rip+gk_literal]; mov edx,gk_literal_end-gk_literal; call obj_get
+    test rax,rax; jz .gpfplb_no
+    mov rbx,rax
+    mov rdi,r12; lea rsi,[rip+gk_type]; mov edx,gk_type_end-gk_type; call obj_get
+    test rax,rax; jz .gpfplb_no
+    mov rdi,rax; call g_type_from_node
+    cmp eax,r13d; jne .gpfplb_no
+    cmp r13d,GTYPE_F64; je .gpfplb_f64
+    cmp r13d,GTYPE_F32; jne .gpfplb_no
+    mov rax,rbx; call node_parse_f32_bits; test edx,edx; jnz .gpfplb_no
+    mov edx,eax
+    mov eax,1; jmp .gpfplb_done
+.gpfplb_f64:
+    mov rax,rbx; call node_parse_f64_bits; test edx,edx; jnz .gpfplb_no
+    mov rdx,rax; mov eax,1; jmp .gpfplb_done
+.gpfplb_no:
+    xor eax,eax
+.gpfplb_done:
+    pop r13; pop r12; pop rbx; ret
+
 # rdi=expr, esi=expected FP type -> eax=1 and edx=resident XMM source,
 # or eax=0 when the expression requires realization. No code is emitted.
 g_phys_fp_direct_source:
@@ -5312,6 +6210,7 @@ g_phys_fp_direct_source:
     cmp edx,0; jl .gpfpds_no
     mov eax,1; jmp .gpfpds_done
 .gpfpds_literal:
+    cmp dword ptr [rip+g_phys_cse_memory_carrier],0; jne .gpfpds_literal_real
     # Whole-episode shared ValueFacts are ordinary direct physical sources.
     # The first speculative profile has ready_count=0, so collection never
     # changes proof semantics.
@@ -5332,8 +6231,8 @@ g_phys_fp_direct_source:
     mov rdi,rax; call g_type_from_node; cmp eax,r13d; jne .gpfpds_no
     cmp r13d,GTYPE_F64; je .gpfpds_f64
     cmp r13d,GTYPE_F32; jne .gpfpds_no
-    mov rax,r14; call node_parse_f64_bits; test edx,edx; jnz .gpfpds_no
-    movq xmm0,rax; cvtsd2ss xmm0,xmm0; movd edi,xmm0
+    mov rax,r14; call node_parse_f32_bits; test edx,edx; jnz .gpfpds_no
+    mov edi,eax
     mov esi,GTYPE_F32; call g_phys_const_find_resident
     cmp eax,0; jl .gpfpds_no
     mov rcx,qword ptr [rip+g_phys_const_resident_reg_ptr]; mov edx,dword ptr [rcx+rax*4]; mov eax,1; jmp .gpfpds_done
@@ -5360,6 +6259,15 @@ g_emit_phys_fp_expr_to:
     cmp r13d,dword ptr [rip+g_phys_fp_carrier_count]; jae .gpfpe_bad
     cmp qword ptr [r12],J_OBJECT; jne .gpfpe_bad
 
+    cmp dword ptr [rip+g_phys_cse_memory_carrier],0; je .gpfpe_register_source
+    mov rdi,r12; mov esi,r14d; call g_phys_cse_find_resident
+    cmp eax,0; jl .gpfpe_register_source
+    mov edi,eax; mov esi,r14d; call g_emit_packet_resident_rax
+    mov edi,r13d; mov esi,r14d; call g_emit_phys_xmm_from_rax
+    test eax,eax; jnz .gpfpe_bad
+    mov eax,r14d; jmp .gpfpe_done
+.gpfpe_register_source:
+    mov rdi,r12; mov esi,r14d; call g_phys_cse_demand_resident
     # If the ValueFact already owns a carrier, consume it without rebuilding it.
     mov rdi,r12; mov esi,r14d; call g_phys_fp_direct_source
     test eax,eax; jz .gpfpe_literal
@@ -5375,30 +6283,54 @@ g_emit_phys_fp_expr_to:
     test rax,rax; jz .gpfpe_bad
     mov rdi,rax; call g_type_from_node; cmp eax,r14d; jne .gpfpe_bad
     cmp r14d,GTYPE_F64; je .gpfpe_literal_f64
-    # f32 literal: canonical parser is f64, then one exact host conversion as in
-    # the mature 1.3.13 front-end.
-    mov rax,r15; call node_parse_f64_bits; test edx,edx; jnz .gpfpe_bad
-    movq xmm0,rax; cvtsd2ss xmm0,xmm0; movd r15d,xmm0
+    # Decimal f32 rounds directly at its target precision.
+    mov rax,r15; call node_parse_f32_bits; test edx,edx; jnz .gpfpe_bad
+    mov r15d,eax
+    cmp dword ptr [rip+g_packet_ready],0; je 840f
+    mov edi,r15d; call g_emit_mov_rax_imm64
+    mov edi,r13d; mov esi,GTYPE_F32; call g_emit_phys_xmm_from_rax
+    mov eax,GTYPE_F32; jmp .gpfpe_done
+840:
     cmp dword ptr [rip+g_phys_const_collect],1; jne 1f
     mov edi,r15d; mov esi,GTYPE_F32; call g_phys_const_note
-1:  mov edi,r15d; call g_emit_mov_eax_imm
-    mov edi,r13d; mov esi,GTYPE_F32; call g_emit_phys_xmm_from_rax
+1:  mov edi,r15d; mov esi,GTYPE_F32; call g_phys_const_find_candidate
+    cmp eax,0; jl .gpfpe_bad
+    mov rdx,[rip+g_phys_const_candidate_pool_ptr]; mov rdx,[rdx+rax*8]
+    cmp dword ptr [rip+g_phys_const_pool_ready],1; jne 11f
+    test rdx,rdx; jz .gpfpe_bad
+11: mov edi,r13d; mov esi,GTYPE_F32; call g_emit_phys_xmm_from_const_mem
     test eax,eax; jnz .gpfpe_bad
     mov eax,GTYPE_F32; jmp .gpfpe_done
 .gpfpe_literal_f64:
     mov rax,r15; call node_parse_f64_bits; test edx,edx; jnz .gpfpe_bad
     mov r15,rax
+    cmp dword ptr [rip+g_packet_ready],0; je 841f
+    mov rdi,r15; call g_emit_mov_rax_imm64
+    mov edi,r13d; mov esi,GTYPE_F64; call g_emit_phys_xmm_from_rax
+    mov eax,GTYPE_F64; jmp .gpfpe_done
+841:
     cmp dword ptr [rip+g_phys_const_collect],1; jne 2f
     mov rdi,r15; mov esi,GTYPE_F64; call g_phys_const_note
-2:  mov rdi,r15; call g_emit_mov_rax_imm64
-    mov edi,r13d; mov esi,GTYPE_F64; call g_emit_phys_xmm_from_rax
+2:  mov rdi,r15; mov esi,GTYPE_F64; call g_phys_const_find_candidate
+    cmp eax,0; jl .gpfpe_bad
+    mov rdx,[rip+g_phys_const_candidate_pool_ptr]; mov rdx,[rdx+rax*8]
+    cmp dword ptr [rip+g_phys_const_pool_ready],1; jne 22f
+    test rdx,rdx; jz .gpfpe_bad
+22: mov edi,r13d; mov esi,GTYPE_F64; call g_emit_phys_xmm_from_const_mem
     test eax,eax; jnz .gpfpe_bad
     mov eax,GTYPE_F64; jmp .gpfpe_done
 
 .gpfpe_var:
+    mov rdi,r12; call g_phys_episode_load_source
+    test rax,rax; jz .gpfpe_var_leaf
+    mov rdi,rax; mov esi,r13d; mov edx,r14d; call g_emit_phys_fp_expr_to
+    jmp .gpfpe_done
+.gpfpe_var_leaf:
     mov rdi,r12; lea rsi,[rip+gk_var]; mov edx,gk_var_end-gk_var; call obj_get
     test rax,rax; jz .gpfpe_state_invalid_or_op
     mov rdi,[rax+8]; mov rsi,[rax+16]; call g_find_symbol
+    test rax,rax; jz .gpfpe_bad
+    mov rdi,rax; call g_semantic_resolve_symbol
     test rax,rax; jz .gpfpe_bad
     mov r15,rax
     cmp dword ptr [r15+20],r14d; jne .gpfpe_bad
@@ -5424,8 +6356,8 @@ g_emit_phys_fp_expr_to:
     cmp dword ptr [rax+16],r14d; jne .gpfpe_bad
     mov ecx,dword ptr [rax+24]
     mov rdx,[rip+g_reg_iter_old_reg_ptr]; cmp dword ptr [rdx+rcx*4],0; jge .gpfpe_bad
-    mov eax,ecx; call g_state_slot_addr; mov rdi,rax; call g_emit_load_rax_abs
-    mov edi,r13d; mov esi,r14d; call g_emit_phys_xmm_from_rax
+    mov eax,ecx; call g_state_slot_addr; mov rdx,rax
+    mov edi,r13d; mov esi,r14d; call g_emit_phys_xmm_from_state_mem
     test eax,eax; jnz .gpfpe_bad
     mov eax,r14d; jmp .gpfpe_done
 .gpfpe_op_probe:
@@ -5446,7 +6378,27 @@ g_emit_phys_fp_expr_to:
     cmp qword ptr [rbx+32],0; jne .gpfpe_bad
     mov rdi,rbx; call g_infer_expr; mov dword ptr [rsp+4],eax
     cmp eax,GTYPE_F32; je 440f
-    cmp eax,GTYPE_F64; jne .gpfpe_bad
+    cmp eax,GTYPE_F64; je 440f
+    cmp eax,GTYPE_U64; je .gpfpe_cast_integer
+    cmp eax,GTYPE_I64; jne .gpfpe_bad
+.gpfpe_cast_integer:
+    call g_phys_int_temp_alloc
+    cmp eax,0; jl .gpfpe_bad
+    mov dword ptr [rsp],eax
+    mov esi,eax; mov rdi,rbx; mov edx,dword ptr [rsp+4]; call g_emit_phys_int_expr_to
+    cmp eax,dword ptr [rsp+4]; jne .gpfpe_cast_integer_fail
+    xor edi,edi; mov esi,dword ptr [rsp]; call g_emit_phys_gpr_move
+    mov edi,dword ptr [rsp]; call g_phys_int_temp_free
+    cmp dword ptr [rsp+4],GTYPE_U64; jne .gpfpe_cast_range_ready
+    mov rdi,rbx; call g_u64_expr_fits_signed
+    test eax,eax; jz .gpfpe_cast_range_ready
+    mov dword ptr [rsp+4],GTYPE_I64
+.gpfpe_cast_range_ready:
+    mov edi,dword ptr [rsp+4]; mov esi,r14d; mov edx,r13d; call g_emit_phys_int_fp_value
+    mov eax,r14d; jmp .gpfpe_done
+.gpfpe_cast_integer_fail:
+    mov edi,dword ptr [rsp]; call g_phys_int_temp_free
+    jmp .gpfpe_bad
 440:mov rdi,rbx; mov esi,r13d; mov edx,dword ptr [rsp+4]; call g_emit_phys_fp_expr_to
     cmp eax,dword ptr [rsp+4]; jne .gpfpe_bad
     cmp eax,r14d; je 441f
@@ -5466,6 +6418,28 @@ g_emit_phys_fp_expr_to:
     test eax,eax; jnz .gpfpe_square
     mov rdi,[r15+8]; mov rsi,[r15+16]; lea rdx,[rip+gv_trunc]; mov ecx,gv_trunc_end-gv_trunc; call span_eq
     test eax,eax; jnz .gpfpe_trunc
+    # Native elementary relations consume a local memory operand on x87.
+    # The same old ISA primitive rounds once at this node; every other live
+    # XMM/GPR authority survives, including nested ordinary arithmetic.
+    mov rdi,[r15+8]; mov rsi,[r15+16]; mov edx,r14d; call g_native_fp_math_fragment
+    test rax,rax; jz .gpfpe_binary_probe
+    mov r15,rax; mov dword ptr [rsp+8],ecx
+    mov rdi,r12; lea rsi,[rip+gk_args]; mov edx,gk_args_end-gk_args; call obj_get
+    test rax,rax; jz .gpfpe_bad
+    mov rbx,[rax+24]; test rbx,rbx; jz .gpfpe_bad
+    cmp qword ptr [rbx+32],0; jne .gpfpe_bad
+    mov rdi,rbx; mov esi,r13d; mov edx,r14d; call g_emit_phys_fp_expr_to
+    cmp eax,r14d; jne .gpfpe_bad
+    mov edi,r13d; mov esi,r14d; call g_emit_phys_xmm_to_rax
+    test eax,eax; jnz .gpfpe_bad
+    mov edi,0x50; call g_emit_u8
+    mov rdi,r15; mov esi,dword ptr [rsp+8]; call g_emit_bytes
+    test eax,eax; jnz .gpfpe_bad
+    call g_emit_pop_rax
+    mov edi,r13d; mov esi,r14d; call g_emit_phys_xmm_from_rax
+    test eax,eax; jnz .gpfpe_bad
+    mov eax,r14d; jmp .gpfpe_done
+.gpfpe_binary_probe:
     # Classify the exact binary operation before recursive emission. Strict
     # ordering is preserved: add/sub/mul only, no reassociation/FMA contraction.
     mov rdi,[r15+8]; mov rsi,[r15+16]; lea rdx,[rip+gv_add]; mov ecx,gv_add_end-gv_add; call span_eq
@@ -5561,6 +6535,20 @@ g_emit_phys_fp_expr_to:
     cmp dword ptr [rsp+4],r14d; jne .gpfpe_mixed_op
     cmp dword ptr [rsp+12],r14d; jne .gpfpe_mixed_op
 
+    mov rdi,rbx; mov rsi,r15; call g_phys_expr_equal
+    test eax,eax; jz .gpfpe_distinct_children
+    mov rdi,rbx; mov esi,r14d; call g_phys_fp_direct_source
+    test eax,eax; jnz .gpfpe_shared_child_ready
+    mov rdi,rbx; mov esi,r13d; mov edx,r14d; call g_emit_phys_fp_expr_to
+    cmp eax,r14d; jne .gpfpe_bad
+    mov edx,r13d
+.gpfpe_shared_child_ready:
+    mov ecx,edx
+    mov edi,dword ptr [rsp+8]; mov esi,r13d; mov r8d,r14d
+    call g_emit_phys_vex_scalar3
+    test eax,eax; jnz .gpfpe_bad
+    mov eax,r14d; jmp .gpfpe_done
+.gpfpe_distinct_children:
     # Left input: retain resident ValueFacts by identity, otherwise realize the
     # subtree directly into the final destination.
     mov rdi,rbx; mov esi,r14d; call g_phys_fp_direct_source
@@ -5568,6 +6556,57 @@ g_emit_phys_fp_expr_to:
     mov ebx,edx
     jmp .gpfpe_lhs_ready
 .gpfpe_lhs_complex:
+    # x86 scalar arithmetic exposes only src2 as r/m.  A nonresident finite
+    # literal on the source-left of exact add/mul therefore needs no synthetic
+    # carrier: evaluating the other pure ValueFact into src1 and placing the
+    # literal AddressFact in src2 preserves the same single IEEE operation and
+    # rounding point.  Finite is required so operand placement cannot choose
+    # between two NaN payloads; nonfinite literals retain source-position
+    # materialization.  The AST, CSE identity and semantic operand order remain
+    # untouched.
+    mov eax,dword ptr [rsp+8]
+    cmp eax,0x58; je .gpfpe_lhs_const_mem_probe
+    cmp eax,0x59; jne .gpfpe_lhs_materialize
+.gpfpe_lhs_const_mem_probe:
+    mov rdi,rbx; mov esi,r14d; call g_phys_fp_literal_bits
+    test eax,eax; jz .gpfpe_lhs_materialize
+    mov r12,rdx
+    cmp r14d,GTYPE_F64; jne .gpfpe_lhs_const_f32_finite
+    mov rax,r12; shr rax,52; and eax,0x7ff; cmp eax,0x7ff; je .gpfpe_lhs_materialize
+    jmp .gpfpe_lhs_const_finite
+.gpfpe_lhs_const_f32_finite:
+    mov eax,r12d; shr eax,23; and eax,0xff; cmp eax,0xff; je .gpfpe_lhs_materialize
+.gpfpe_lhs_const_finite:
+    cmp dword ptr [rip+g_phys_const_collect],1; jne .gpfpe_lhs_const_noted
+    mov rdi,r12; mov esi,r14d; call g_phys_const_note
+.gpfpe_lhs_const_noted:
+    mov rdi,r12; mov esi,r14d; call g_phys_const_find_candidate
+    cmp eax,0; jl .gpfpe_lhs_materialize
+    mov rdx,[rip+g_phys_const_candidate_pool_ptr]
+    mov rcx,[rdx+rax*8]
+    cmp dword ptr [rip+g_phys_const_pool_ready],1; jne .gpfpe_lhs_const_addr_ready
+    test rcx,rcx; jz .gpfpe_bad
+.gpfpe_lhs_const_addr_ready:
+    mov [rsp],rcx
+    # Preserve an existing RHS carrier by identity; otherwise let the RHS be
+    # born directly in the final destination.  No anonymous carrier is created
+    # for the constant or for an operand swap.
+    mov rdi,r15; mov esi,r14d; call g_phys_fp_direct_source
+    test eax,eax; jz .gpfpe_lhs_const_rhs_complex
+    mov ebx,edx
+    jmp .gpfpe_lhs_const_emit
+.gpfpe_lhs_const_rhs_complex:
+    mov rdi,r15; mov esi,r13d; mov edx,r14d; call g_emit_phys_fp_expr_to
+    cmp eax,r14d; jne .gpfpe_bad
+    mov ebx,r13d
+.gpfpe_lhs_const_emit:
+    mov rcx,[rsp]
+    mov edi,dword ptr [rsp+8]; mov esi,r13d; mov edx,ebx; mov r8d,r14d
+    call g_emit_phys_vex_scalar3_mem
+    test eax,eax; jnz .gpfpe_bad
+    mov eax,r14d; jmp .gpfpe_done
+
+.gpfpe_lhs_materialize:
     mov rdi,rbx; mov esi,r13d; mov edx,r14d; call g_emit_phys_fp_expr_to
     cmp eax,r14d; jne .gpfpe_bad
     mov ebx,r13d
@@ -5582,6 +6621,28 @@ g_emit_phys_fp_expr_to:
     mov eax,r14d; jmp .gpfpe_done
 
 .gpfpe_rhs_complex:
+    # An exact nonresident literal already owns an immutable address form.  Let
+    # the arithmetic consumer read that ConstantFact directly instead of
+    # manufacturing a synthetic XMM lifetime.  Proof emissions use a dummy
+    # displacement until the preheader publishes the pool address.
+    mov rdi,r15; mov esi,r14d; call g_phys_fp_literal_bits
+    test eax,eax; jz .gpfpe_rhs_nonliteral
+    mov r12,rdx
+    cmp dword ptr [rip+g_phys_const_collect],1; jne .gpfpe_rhs_literal_noted
+    mov rdi,r12; mov esi,r14d; call g_phys_const_note
+.gpfpe_rhs_literal_noted:
+    mov rdi,r12; mov esi,r14d; call g_phys_const_find_candidate
+    cmp eax,0; jl .gpfpe_rhs_nonliteral
+    mov rdx,[rip+g_phys_const_candidate_pool_ptr]
+    mov rcx,[rdx+rax*8]
+    cmp dword ptr [rip+g_phys_const_pool_ready],1; jne .gpfpe_rhs_literal_emit
+    test rcx,rcx; jz .gpfpe_bad
+.gpfpe_rhs_literal_emit:
+    mov edi,dword ptr [rsp+8]; mov esi,r13d; mov edx,ebx; mov r8d,r14d
+    call g_emit_phys_vex_scalar3_mem
+    test eax,eax; jnz .gpfpe_bad
+    mov eax,r14d; jmp .gpfpe_done
+.gpfpe_rhs_nonliteral:
     cmp ebx,r13d; je .gpfpe_rhs_temp
     # LHS is resident elsewhere, so RHS may be born directly in destination.
     mov rdi,r15; mov esi,r13d; mov edx,r14d; call g_emit_phys_fp_expr_to
@@ -5676,10 +6737,10 @@ g_emit_phys_fp_expr_to:
 .equ G_PHYS_INT_TEMP_MASK_INIT,0x00007800   # R11..R14; R15 owns execution-local StateFact frame
 
 g_phys_int_temp_reset:
+    mov dword ptr [rip+g_phys_int_temp_live],0
     mov eax,G_PHYS_INT_TEMP_MASK_INIT
     mov ecx,dword ptr [rip+g_phys_int_reserved_mask]
-    not ecx
-    and eax,ecx
+    not ecx; and eax,ecx
     mov dword ptr [rip+g_phys_int_temp_mask],eax
     ret
 
@@ -5689,6 +6750,11 @@ g_phys_int_temp_alloc:
     bsf ecx,eax
     btr eax,ecx
     mov dword ptr [rip+g_phys_int_temp_mask],eax
+    inc dword ptr [rip+g_phys_int_temp_live]
+    mov edx,dword ptr [rip+g_phys_int_temp_live]
+    cmp edx,dword ptr [rip+g_phys_int_temp_peak]; jbe .gpit_have
+    mov dword ptr [rip+g_phys_int_temp_peak],edx
+.gpit_have:
     mov eax,ecx
     ret
 .gpit_fail:
@@ -5699,8 +6765,9 @@ g_phys_int_temp_alloc:
 g_phys_int_temp_free:
     cmp edi,11; jb .gpitf_done
     cmp edi,14; ja .gpitf_done
-.gpitf_yes:
     bts dword ptr [rip+g_phys_int_temp_mask],edi
+    cmp dword ptr [rip+g_phys_int_temp_live],0; je .gpitf_done
+    dec dword ptr [rip+g_phys_int_temp_live]
 .gpitf_done:
     ret
 
@@ -5783,7 +6850,7 @@ g_emit_phys_i64_abs_wrap_inplace:
     mov edi,0xF8; call g_emit_u8; test eax,eax; jnz .gepiaw_bad
     mov edi,63; call g_emit_u8; test eax,eax; jnz .gepiaw_bad
     # xor dst,rax then sub dst,rax
-    mov edi,5; mov esi,ebx; xor edx,edx; call g_emit_phys_gpr_bin2
+    mov edi,7; mov esi,ebx; xor edx,edx; call g_emit_phys_gpr_bin2
     test eax,eax; jnz .gepiaw_bad
     mov edi,2; mov esi,ebx; xor edx,edx; call g_emit_phys_gpr_bin2
     test eax,eax; jnz .gepiaw_bad
@@ -5835,21 +6902,8 @@ g_emit_phys_gpr_bin2:
     xor eax,eax; jmp .gepgb_done
 .gepgb_minmax:
     cmp ebx,11; ja .gepgb_bad
-    # cmp dst,src
-    mov eax,0x48
-    mov ecx,r13d; shr ecx,3; and ecx,1; shl ecx,2; or eax,ecx
-    mov ecx,r12d; shr ecx,3; and ecx,1; or eax,ecx
-    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepgb_bad
-    mov edi,0x39; call g_emit_u8; test eax,eax; jnz .gepgb_bad
-    mov eax,r13d; and eax,7; shl eax,3
-    mov ecx,r12d; and ecx,7; or eax,ecx; or eax,0xC0
-    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepgb_bad
-    # cmovcc dst,src
-    mov eax,0x48
-    mov ecx,r12d; shr ecx,3; and ecx,1; shl ecx,2; or eax,ecx
-    mov ecx,r13d; shr ecx,3; and ecx,1; or eax,ecx
-    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepgb_bad
-    mov edi,0x0F; call g_emit_u8; test eax,eax; jnz .gepgb_bad
+    mov edi,r12d; mov esi,r13d; call g_emit_phys_gpr_cmp
+    test eax,eax; jnz .gepgb_bad
     mov edi,0x47                         # umin: cmova
     cmp ebx,8; je 781f
     mov edi,0x42                         # umax: cmovb
@@ -5857,29 +6911,57 @@ g_emit_phys_gpr_bin2:
     mov edi,0x4F                         # imin: cmovg
     cmp ebx,10; je 781f
     mov edi,0x4C                         # imax: cmovl
-781:call g_emit_u8; test eax,eax; jnz .gepgb_bad
-    mov eax,r12d; and eax,7; shl eax,3
-    mov ecx,r13d; and ecx,7; or eax,ecx; or eax,0xC0
-    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepgb_bad
-    xor eax,eax; jmp .gepgb_done
+781:mov esi,r12d; mov edx,r13d; call g_emit_phys_gpr_cmov
+    jmp .gepgb_done
 .gepgb_bad:
     mov eax,1
 .gepgb_done:
     pop r13; pop r12; pop rbx; ret
 
+# edi=condition opcode 0x40..0x4f, esi=destination, edx=source.
+# Min/max and reciprocal correction consume the same completed flags edge.
+g_emit_phys_gpr_cmov:
+    push rbx; push r12; push r13
+    mov ebx,edi; mov r12d,esi; mov r13d,edx
+    mov eax,0x48
+    mov ecx,r12d; shr ecx,3; and ecx,1; shl ecx,2; or eax,ecx
+    mov ecx,r13d; shr ecx,3; and ecx,1; or eax,ecx
+    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepgcm_done
+    mov edi,0x0F; call g_emit_u8; test eax,eax; jnz .gepgcm_done
+    mov edi,ebx; call g_emit_u8; test eax,eax; jnz .gepgcm_done
+    mov eax,r12d; and eax,7; shl eax,3
+    mov ecx,r13d; and ecx,7; or eax,ecx; or eax,0xC0
+    mov edi,eax; call g_emit_u8
+.gepgcm_done: pop r13; pop r12; pop rbx; ret
+
 # Immediate integer relation over an existing destination carrier. The literal
 # is already proven to be exactly representable by the architectural sign-
 # extended imm32 operand, so no temporary ValueFact carrier exists at runtime.
-# edi=kind (1 add,2 sub,5 and,6 or,7 xor), esi=dst GPR, edx=imm32 bits.
+# Arithmetic and bit relations share this one ISA-operand authority; multiplication
+# is the ordinary three-operand IMUL realization with src=dst, not a second backend.
+# edi=kind (1 add,2 sub,3 mul,5 and,6 or,7 xor), esi=dst GPR, edx=imm32 bits.
 g_emit_phys_gpr_imm32_bin2:
     push rbx; push r12; push r13
     mov ebx,edi; mov r12d,esi; mov r13d,edx
+    cmp ebx,3; je .gepgi_mul
     cmp ebx,1; je .gepgi_add
     cmp ebx,2; je .gepgi_sub
     cmp ebx,5; je .gepgi_and
     cmp ebx,6; je .gepgi_or
     cmp ebx,7; je .gepgi_xor
     jmp .gepgi_bad
+.gepgi_mul:
+    # imul dst,dst,imm32 : 69 /r id. Both ModRM operands are the same carrier.
+    mov eax,0x48
+    mov ecx,r12d; shr ecx,3; and ecx,1
+    mov edx,ecx; shl ecx,2; or eax,ecx; or eax,edx
+    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepgi_bad
+    mov edi,0x69; call g_emit_u8; test eax,eax; jnz .gepgi_bad
+    mov eax,r12d; and eax,7
+    mov ecx,eax; shl ecx,3; or eax,ecx; or eax,0xC0
+    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepgi_bad
+    mov edi,r13d; call g_emit_u32; test eax,eax; jnz .gepgi_bad
+    xor eax,eax; jmp .gepgi_done
 .gepgi_add: mov ebx,0; jmp .gepgi_emit
 .gepgi_or:  mov ebx,1; jmp .gepgi_emit
 .gepgi_and: mov ebx,4; jmp .gepgi_emit
@@ -5936,14 +7018,53 @@ g_emit_phys_int_overflow_guard:
     mov edi,0x71                         # jno +6 for signed add/sub
 .gepiog_emit:
     call g_emit_u8; test eax,eax; jnz .gepiog_bad
-    mov edi,6; call g_emit_u8; test eax,eax; jnz .gepiog_bad
-    mov edi,0xB8; call g_emit_u8; test eax,eax; jnz .gepiog_bad
-    mov edi,1; call g_emit_u32; test eax,eax; jnz .gepiog_bad
-    mov edi,0xC3; call g_emit_u8; test eax,eax; jnz .gepiog_bad
+    mov edi,7; call g_emit_u8; test eax,eax; jnz .gepiog_bad
+    lea rdi,[rip+gc_effect_reject]; mov esi,gc_effect_reject_end-gc_effect_reject; call g_emit_bytes
+    test eax,eax; jnz .gepiog_bad
 .gepiog_ok:
     xor eax,eax; ret
 .gepiog_bad:
     mov eax,1; ret
+
+# Same typed carrier relation for integer FLAGS and demanded BOOL values.
+# rdi=left, rsi=right, edx=exact integer type -> eax=0 success.
+# Resident operands are borrowed; only absent values allocate transient GPRs.
+g_emit_phys_int_compare_flags:
+    push rbx; push r12; push r13; push r14; push r15
+    sub rsp,16
+    mov r12,rdi; mov r13,rsi; mov ebx,edx
+    mov dword ptr [rsp],0; mov dword ptr [rsp+4],0
+    mov rdi,r12; mov esi,ebx; call g_phys_int_direct_source
+    test eax,eax; jz .gepicf_left_temp
+    mov r14d,edx; jmp .gepicf_right
+.gepicf_left_temp:
+    call g_phys_int_temp_alloc; cmp eax,0; jl .gepicf_fail
+    mov r14d,eax; mov dword ptr [rsp],1
+    mov rdi,r12; mov esi,r14d; mov edx,ebx; call g_emit_phys_int_expr_to
+    cmp eax,ebx; jne .gepicf_fail
+.gepicf_right:
+    mov rdi,r13; mov esi,ebx; call g_phys_int_direct_source
+    test eax,eax; jz .gepicf_right_temp
+    mov r15d,edx; jmp .gepicf_compare
+.gepicf_right_temp:
+    call g_phys_int_temp_alloc; cmp eax,0; jl .gepicf_fail
+    mov r15d,eax; mov dword ptr [rsp+4],1
+    mov rdi,r13; mov esi,r15d; mov edx,ebx; call g_emit_phys_int_expr_to
+    cmp eax,ebx; jne .gepicf_fail
+.gepicf_compare:
+    mov edi,r14d; mov esi,r15d; call g_emit_phys_gpr_cmp
+    jmp .gepicf_release
+.gepicf_fail: mov eax,1
+.gepicf_release:
+    mov [rsp+8],eax
+    cmp dword ptr [rsp+4],0; je .gepicf_release_left
+    mov edi,r15d; call g_phys_int_temp_free
+.gepicf_release_left:
+    cmp dword ptr [rsp],0; je .gepicf_return
+    mov edi,r14d; call g_phys_int_temp_free
+.gepicf_return:
+    mov eax,[rsp+8]
+    add rsp,16; pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
 # Generic register compare. edi=lhs, esi=rhs emits `cmp lhs,rhs`.
 # This is a physical primitive, not a semantic branch.
@@ -5964,24 +7085,6 @@ g_emit_phys_gpr_cmp:
 .gepgc_done:
     pop r12; pop rbx; ret
 
-# edi=dst, esi=src emits `cmovae dst,src` using flags from the preceding compare.
-g_emit_phys_gpr_cmovae:
-    push rbx; push r12
-    mov ebx,edi; mov r12d,esi
-    mov eax,0x48
-    mov ecx,ebx; shr ecx,3; and ecx,1; shl ecx,2; or eax,ecx
-    mov ecx,r12d; shr ecx,3; and ecx,1; or eax,ecx
-    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepgca_bad
-    mov edi,0x0F; call g_emit_u8; test eax,eax; jnz .gepgca_bad
-    mov edi,0x43; call g_emit_u8; test eax,eax; jnz .gepgca_bad
-    mov eax,ebx; and eax,7; shl eax,3
-    mov ecx,r12d; and ecx,7; or eax,ecx; or eax,0xC0
-    mov edi,eax; call g_emit_u8; test eax,eax; jnz .gepgca_bad
-    xor eax,eax; jmp .gepgca_done
-.gepgca_bad:
-    mov eax,1
-.gepgca_done:
-    pop r12; pop rbx; ret
 
 # edi=src emits unsigned `mul src`: RDX:RAX = RAX * src.
 # RAX/RDX are deliberately scratch in the register-native integer episode.
@@ -6000,60 +7103,163 @@ g_emit_phys_mul_rax_gpr:
 .gepma_done:
     pop rbx; ret
 
-# Exact unified u64 modulo by a nonzero compile-time ConstantFact.
-# For d>1, m=floor(2^64/d), q0=high(n*m). Then q0 is either floor(n/d)
-# or one less, so r=n-q0*d lies in [0,2d). One branchless correction gives
-# the exact remainder for every d, including powers of two. There is no
-# power-of-two mask path, divisor table, workload matcher, or runtime selector.
-# edi=dst GPR, rsi=d, rdx=m -> eax=0 success / 1 fail.
-g_emit_phys_u64_const_mod:
-    push rbx; push r12; push r13; push r14
-    mov ebx,edi; mov r12,rsi; mov r13,rdx
-    cmp r12,1; jne .gepucm_general
+# One exact quotient/remainder entity over a nonzero U64 ConstantFact.
+# edi=dst GPR, rsi=d, ecx=0 remainder /1 quotient. The shared reciprocal fact
+# owns demanded precision. Only implicit MUL conflicts require another carrier.
+g_emit_phys_u64_const_divmod:
+    push rbx; push r12; push r13; push r14; push r15
+    sub rsp,16
+    mov ebx,edi; mov r12,rsi; mov r15d,ecx
+    mov dword ptr [rsp+8],-1; mov [rsp+12],edi
+    cmp r12,1; jne .gepucm_nonzero_bits
+    test r15d,r15d; jnz .gepucm_ok
     xor edi,edi; call g_emit_mov_rax_imm64
-    test eax,eax; jnz .gepucm_bad
     mov edi,ebx; xor esi,esi; call g_emit_phys_gpr_move
-    test eax,eax; jnz .gepucm_bad
-    xor eax,eax; jmp .gepucm_done
-.gepucm_general:
-    call g_phys_int_temp_alloc
-    cmp eax,0; jl .gepucm_bad
+    jmp .gepucm_done
+.gepucm_nonzero_bits:
+    mov rdi,r12; call physical_u64_lowbits_mask
+    test edx,edx; jz .gepucm_normalized
+    test r15d,r15d; jz .gepucm_lowbits
+    bsf rdx,r12
+    mov edi,13; mov esi,ebx; call g_emit_phys_gpr_shift_imm
+    jmp .gepucm_done
+.gepucm_lowbits:
+    mov r13,rax
+    movsxd rdx,eax; cmp rdx,rax; jne .gepucm_lowbits_reg
+    mov edi,5; mov esi,ebx; mov edx,eax; call g_emit_phys_gpr_imm32_bin2
+    jmp .gepucm_done
+.gepucm_lowbits_reg:
+    call g_phys_int_temp_alloc; cmp eax,0; jl .gepucm_bad
     mov r14d,eax
-    # temp <- reciprocal m
-    mov rdi,r13; call g_emit_mov_rax_imm64
+    mov edi,r14d; mov rsi,r13; call g_emit_phys_gpr_literal
     test eax,eax; jnz .gepucm_temp_bad
-    mov edi,r14d; xor esi,esi; call g_emit_phys_gpr_move
+    mov edi,5; mov esi,ebx; mov edx,r14d; call g_emit_phys_gpr_bin2
     test eax,eax; jnz .gepucm_temp_bad
-    # RAX <- n; RDX <- high(n*m) = q0
+    jmp .gepucm_release
+.gepucm_normalized:
+    # RAX/RDX are architectural MUL outputs. Preserve a caller-owned value in
+    # either only while it is live, using the same anonymous carrier allocator.
+    cmp ebx,0; je .gepucm_preserve_mul
+    cmp ebx,2; jne .gepucm_fact
+.gepucm_preserve_mul:
+    call g_phys_int_temp_alloc; cmp eax,0; jl .gepucm_bad
+    mov [rsp+8],eax
+    mov edi,eax; mov esi,ebx; call g_emit_phys_gpr_move
+    test eax,eax; jnz .gepucm_bad
+    mov ebx,[rsp+8]
+.gepucm_fact:
+    mov rdi,r12; mov esi,r15d; call physical_u64_division_fact
+    mov r13,rax; mov [rsp],edx; mov [rsp+4],ecx
+    call g_phys_int_temp_alloc; cmp eax,0; jl .gepucm_bad
+    mov r14d,eax
+    mov edi,r14d; mov rsi,r13; call g_emit_phys_gpr_literal
+    test eax,eax; jnz .gepucm_temp_bad
     xor edi,edi; mov esi,ebx; call g_emit_phys_gpr_move
     test eax,eax; jnz .gepucm_temp_bad
     mov edi,r14d; call g_emit_phys_mul_rax_gpr
     test eax,eax; jnz .gepucm_temp_bad
-    # temp <- d; RDX <- q0*d; dst <- n-q0*d
-    mov rdi,r12; call g_emit_mov_rax_imm64
+    cmp dword ptr [rsp+4],0; je .gepucm_shift
+    xor edi,edi; mov esi,ebx; call g_emit_phys_gpr_move
     test eax,eax; jnz .gepucm_temp_bad
-    mov edi,r14d; xor esi,esi; call g_emit_phys_gpr_move
+    mov edi,2; xor esi,esi; mov edx,2; call g_emit_phys_gpr_bin2
+    test eax,eax; jnz .gepucm_temp_bad
+    mov edi,13; xor esi,esi; mov edx,1; call g_emit_phys_gpr_shift_imm
+    test eax,eax; jnz .gepucm_temp_bad
+    mov edi,1; mov esi,2; xor edx,edx; call g_emit_phys_gpr_bin2
+    test eax,eax; jnz .gepucm_temp_bad
+.gepucm_shift:
+    cmp dword ptr [rsp],0; je .gepucm_projection
+    mov edi,13; mov esi,2; mov edx,[rsp]; call g_emit_phys_gpr_shift_imm
+    test eax,eax; jnz .gepucm_temp_bad
+.gepucm_projection:
+    test r15d,r15d; jz .gepucm_remainder
+    mov edi,ebx; mov esi,2; call g_emit_phys_gpr_move
+    test eax,eax; jnz .gepucm_temp_bad
+    jmp .gepucm_release
+.gepucm_remainder:
+    mov edi,r14d; mov rsi,r12; call g_emit_phys_gpr_literal
     test eax,eax; jnz .gepucm_temp_bad
     mov edi,3; mov esi,2; mov edx,r14d; call g_emit_phys_gpr_bin2
     test eax,eax; jnz .gepucm_temp_bad
     mov edi,2; mov esi,ebx; mov edx,2; call g_emit_phys_gpr_bin2
     test eax,eax; jnz .gepucm_temp_bad
-    # candidate=rem-d in RAX; if rem>=d, commit candidate without a branch.
+    # The bounded quotient is exact or one below it. One branch-free correction
+    # realizes exact remainder for the entire U64 domain, for every d>1.
     xor edi,edi; mov esi,ebx; call g_emit_phys_gpr_move
     test eax,eax; jnz .gepucm_temp_bad
     mov edi,2; xor esi,esi; mov edx,r14d; call g_emit_phys_gpr_bin2
     test eax,eax; jnz .gepucm_temp_bad
     mov edi,ebx; mov esi,r14d; call g_emit_phys_gpr_cmp
     test eax,eax; jnz .gepucm_temp_bad
-    mov edi,ebx; xor esi,esi; call g_emit_phys_gpr_cmovae
+    mov edi,0x43; mov esi,ebx; xor edx,edx; call g_emit_phys_gpr_cmov
     test eax,eax; jnz .gepucm_temp_bad
+.gepucm_release:
     mov edi,r14d; call g_phys_int_temp_free
+.gepucm_ok:
     xor eax,eax; jmp .gepucm_done
 .gepucm_temp_bad:
     mov edi,r14d; call g_phys_int_temp_free
 .gepucm_bad:
     mov eax,1
 .gepucm_done:
+    cmp dword ptr [rsp+8],-1; je .gepucm_return
+    push rax
+    cmp eax,0; jne .gepucm_preserved_free
+    mov edi,[rsp+20]; mov esi,ebx; call g_emit_phys_gpr_move
+    mov [rsp],rax
+.gepucm_preserved_free:
+    mov edi,[rsp+16]; call g_phys_int_temp_free
+    pop rax
+.gepucm_return:
+    add rsp,16; pop r15; pop r14; pop r13; pop r12; pop rbx; ret
+
+# Immediate SHL/SHR is the ConstantFact form of the same checked shift.
+# edi=12/13, esi=dst, edx=proved count in [0,63].
+g_emit_phys_gpr_shift_imm:
+    push rbx; push r12; push r13
+    mov ebx,edi; mov r12d,esi; mov r13d,edx
+    test edx,edx; jz .gepsi_ok
+    mov eax,r12d; shr eax,3; and eax,1; or eax,0x48
+    mov edi,eax; call g_emit_u8
+    mov edi,0xC1; call g_emit_u8
+    mov eax,r12d; and eax,7; or eax,0xE0
+    cmp ebx,12; je .gepsi_modrm
+    or eax,8
+.gepsi_modrm:
+    mov edi,eax; call g_emit_u8
+    mov edi,r13d; call g_emit_u8
+.gepsi_ok:
+    xor eax,eax
+    pop r13; pop r12; pop rbx; ret
+
+# edi=integer relation, esi=dst, edx=rhs GPR, ecx=type.
+# RCX is also a next-StateFact carrier. Preserve it around the architectural
+# CL/DIV operand; RAX/RDX are the established implicit scratch domain.
+g_emit_phys_int_binary_relation:
+    cmp edi,12; jae .gepibr_checked
+    jmp g_emit_phys_gpr_bin2
+.gepibr_checked:
+    push rbx; push r12; push r13; push r14
+    mov ebx,edi; mov r12d,esi; mov r13d,edx; mov r14d,ecx
+    mov edi,0x51; call g_emit_u8                  # preserve next RCX
+    xor edi,edi; mov esi,r12d; call g_emit_phys_gpr_move
+    mov edi,1; mov esi,r13d; call g_emit_phys_gpr_move
+    cmp ebx,13; jbe .gepibr_shift
+    mov edi,r14d; call g_emit_int_divmod_core
+    cmp ebx,15; jne .gepibr_result
+    mov edi,0xD08948; call g_emit_u24       # mov rax,rdx
+    jmp .gepibr_result
+.gepibr_shift:
+    lea rdi,[rip+gc_check_shift_rcx]; mov esi,gc_check_shift_rcx_end-gc_check_shift_rcx; call g_emit_bytes
+    mov edi,0xD348; call g_emit_u16
+    mov edi,0xE0; cmp ebx,12; je .gepibr_shift_opcode
+    mov edi,0xE8
+.gepibr_shift_opcode:
+    call g_emit_u8
+.gepibr_result:
+    mov edi,0x59; call g_emit_u8                  # restore next RCX
+    mov edi,r12d; xor esi,esi; call g_emit_phys_gpr_move
+    xor eax,eax
     pop r14; pop r13; pop r12; pop rbx; ret
 
 # rdi=expr, esi=expected integer type -> eax=1, edx=resident GPR; else eax=0.
@@ -6063,7 +7269,7 @@ g_phys_int_direct_source:
     xor eax,eax
     cmp qword ptr [r12],J_OBJECT; jne .gpids_done
     mov rdi,r12; lea rsi,[rip+gk_state]; mov edx,gk_state_end-gk_state; call obj_get
-    test rax,rax; jz .gpids_no
+    test rax,rax; jz .gpids_cse
     mov rdi,[rax+8]; mov rsi,[rax+16]; call g_find_state
     test rax,rax; jz .gpids_no
     cmp dword ptr [rax+16],r13d; jne .gpids_no
@@ -6079,10 +7285,23 @@ g_phys_int_direct_source:
 .gpids_counter:
     mov edx,3                              # RBX
     mov eax,1; jmp .gpids_done
+.gpids_cse:
 .gpids_no:
     xor eax,eax
 .gpids_done:
     pop r13; pop r12; pop rbx; ret
+
+# The native word carrier accepts semantic predicates without another state ABI.
+g_emit_phys_gpr_value_to:
+    cmp edx,GTYPE_BOOL; jne g_emit_phys_int_expr_to
+    push rbx
+    mov ebx,esi
+    call g_emit_phys_bool_expr_to_rax
+    test eax,eax; jnz .gepgv_bad
+    mov edi,ebx; xor esi,esi; call g_emit_phys_gpr_move
+    test eax,eax; jnz .gepgv_bad
+    mov eax,GTYPE_BOOL; pop rbx; ret
+.gepgv_bad: xor eax,eax; pop rbx; ret
 
 # rdi=expr, esi=destination GPR code, edx=GTYPE_U64/I64 -> eax type/0.
 g_emit_phys_int_expr_to:
@@ -6092,6 +7311,24 @@ g_emit_phys_int_expr_to:
     cmp r14d,GTYPE_U64; je .gpie_type_ok
     cmp r14d,GTYPE_I64; jne .gpie_bad
 .gpie_type_ok:
+    cmp dword ptr [rip+g_phys_cse_memory_carrier],0; je .gpie_register_source
+    mov rdi,r12; mov esi,r14d; call g_phys_cse_find_resident
+    cmp eax,0; jl .gpie_register_source
+    mov edi,eax; mov esi,r14d; call g_emit_packet_resident_rax
+    mov edi,r13d; xor esi,esi; call g_emit_phys_gpr_move
+    test eax,eax; jnz .gpie_bad
+    mov eax,r14d; jmp .gpie_done
+.gpie_register_source:
+    cmp dword ptr [rip+g_phys_cse_memory_carrier],0; jne .gpie_real_source
+    mov rdi,r12; mov esi,r14d; call g_phys_cse_find_resident
+    cmp eax,0; jl .gpie_real_source
+    mov rcx,[rip+g_phys_cse_resident_reg_ptr]; mov edi,[rcx+rax*4]
+    mov esi,GTYPE_F64; call g_emit_phys_xmm_to_rax
+    test eax,eax; jnz .gpie_bad
+    mov edi,r13d; xor esi,esi; call g_emit_phys_gpr_move
+    test eax,eax; jnz .gpie_bad
+    mov eax,r14d; jmp .gpie_done
+.gpie_real_source:
     cmp r13d,15; ja .gpie_bad
     cmp qword ptr [r12],J_OBJECT; jne .gpie_bad
 
@@ -6121,9 +7358,22 @@ g_emit_phys_int_expr_to:
     mov eax,r14d; jmp .gpie_done
 
 .gpie_var:
+    mov rdi,r12; call g_phys_episode_load_source
+    test rax,rax; jz .gpie_axis
+    mov rdi,rax; mov esi,r13d; mov edx,r14d; call g_emit_phys_int_expr_to
+    jmp .gpie_done
+.gpie_axis:
+    cmp dword ptr [rip+g_phys_stack_episode],0; je .gpie_var_leaf
+    mov rdi,r12; lea rsi,[rip+gk_axis]; mov edx,gk_axis_end-gk_axis; call obj_get
+    test rax,rax; jz .gpie_var_leaf
+    mov edi,r13d; mov esi,10; call g_emit_phys_gpr_move
+    mov eax,r14d; jmp .gpie_done
+.gpie_var_leaf:
     mov rdi,r12; lea rsi,[rip+gk_var]; mov edx,gk_var_end-gk_var; call obj_get
     test rax,rax; jz .gpie_state_invalid_or_op
     mov rdi,[rax+8]; mov rsi,[rax+16]; call g_find_symbol
+    test rax,rax; jz .gpie_bad
+    mov rdi,rax; call g_semantic_resolve_symbol
     test rax,rax; jz .gpie_bad
     mov r15,rax
     cmp dword ptr [r15+20],r14d; jne .gpie_bad
@@ -6170,7 +7420,26 @@ g_emit_phys_int_expr_to:
     cmp qword ptr [rbx+32],0; jne .gpie_bad
     mov rdi,rbx; call g_infer_expr; mov dword ptr [rsp+16],eax
     cmp eax,GTYPE_I64; je 782f
-    cmp eax,GTYPE_U64; jne .gpie_bad
+    cmp eax,GTYPE_U64; je 782f
+    cmp eax,GTYPE_F32; je .gpie_cast_native_fp
+    cmp eax,GTYPE_F64; jne .gpie_bad
+.gpie_cast_native_fp:
+    call g_phys_fp_temp_alloc; cmp eax,0; jl .gpie_bad
+    mov dword ptr [rsp+20],eax
+    mov rdi,rbx; mov esi,eax; mov edx,dword ptr [rsp+16]; call g_emit_phys_fp_value_to
+    cmp eax,dword ptr [rsp+16]; jne .gpie_cast_fp_bad
+    mov edi,r13d; mov esi,dword ptr [rsp+20]; mov edx,dword ptr [rsp+16]
+    cmp r14d,GTYPE_U64; jne .gpie_cast_signed
+    call g_emit_phys_cvt_fp_u64; jmp .gpie_cast_converted
+.gpie_cast_signed:
+    call g_emit_phys_cvt_fp_i64
+.gpie_cast_converted:
+    test eax,eax; jnz .gpie_cast_fp_bad
+    mov edi,dword ptr [rsp+20]; call g_phys_fp_temp_free
+    mov eax,r14d; jmp .gpie_done
+.gpie_cast_fp_bad:
+    mov edi,dword ptr [rsp+20]; call g_phys_fp_temp_free
+    jmp .gpie_bad
 782:mov rdi,rbx; mov esi,r13d; mov edx,dword ptr [rsp+16]; call g_emit_phys_int_expr_to
     cmp eax,dword ptr [rsp+16]; jne .gpie_bad
     mov eax,r14d; jmp .gpie_done
@@ -6210,15 +7479,27 @@ g_emit_phys_int_expr_to:
     test eax,eax; jz 35f
     mov eax,9; cmp r14d,GTYPE_I64; jne 341f; mov eax,11
 341:mov dword ptr [rsp+8],eax; jmp .gpie_op_ready
-35: mov rdi,[r15+8]; mov rsi,[r15+16]; lea rdx,[rip+gv_mod]; mov ecx,gv_mod_end-gv_mod; call span_eq
+35: mov rdi,[r15+8]; mov rsi,[r15+16]; lea rdx,[rip+gv_shl]; mov ecx,gv_shl_end-gv_shl; call span_eq
+    test eax,eax; jz .gpie_probe_shr
+    mov dword ptr [rsp+8],12; jmp .gpie_op_ready
+.gpie_probe_shr:
+    mov rdi,[r15+8]; mov rsi,[r15+16]; lea rdx,[rip+gv_shr]; mov ecx,gv_shr_end-gv_shr; call span_eq
+    test eax,eax; jz .gpie_probe_div
+    mov dword ptr [rsp+8],13; jmp .gpie_op_ready
+.gpie_probe_div:
+    mov rdi,[r15+8]; mov rsi,[r15+16]; lea rdx,[rip+gv_div]; mov ecx,gv_div_end-gv_div; call span_eq
+    test eax,eax; jz .gpie_probe_mod
+    mov dword ptr [rsp+8],14; jmp .gpie_op_ready
+.gpie_probe_mod:
+    mov rdi,[r15+8]; mov rsi,[r15+16]; lea rdx,[rip+gv_mod]; mov ecx,gv_mod_end-gv_mod; call span_eq
     test eax,eax; jz .gpie_bad
     cmp r14d,GTYPE_U64; jne .gpie_bad
-    mov dword ptr [rsp+8],4
+    mov dword ptr [rsp+8],15
+    jmp .gpie_op_ready
 .gpie_bit_not:
     mov dword ptr [rsp+8],0
     jmp .gpie_unary_emit
 .gpie_neg:
-    cmp r14d,GTYPE_I64; jne .gpie_bad
     cmp dword ptr [rip+g_overflow_wrap],1; jne .gpie_bad
     mov dword ptr [rsp+8],1
     jmp .gpie_unary_emit
@@ -6255,28 +7536,17 @@ g_emit_phys_int_expr_to:
     mov r15,[rbx+32]; test r15,r15; jz .gpie_bad
     cmp qword ptr [r15+32],0; jne .gpie_bad
 
-    # `mod` is admitted into the same register-native DAG only when its divisor
-    # is an exact nonzero u64 ConstantFact. Every such divisor uses one reciprocal
-    # relation, so powers of two own no compatibility/specialization branch.
-    cmp dword ptr [rsp+8],4; jne .gpie_args_ready
-    mov rdi,r15; lea rsi,[rip+gk_literal]; mov edx,gk_literal_end-gk_literal; call obj_get
-    test rax,rax; jz .gpie_bad
-    mov [rsp],rax
-    mov rdi,r15; lea rsi,[rip+gk_type]; mov edx,gk_type_end-gk_type; call obj_get
-    test rax,rax; jz .gpie_bad
-    mov rdi,rax; call g_type_from_node; cmp eax,GTYPE_U64; jne .gpie_bad
-    mov rax,[rsp]; call node_parse_u64; test edx,edx; jnz .gpie_bad
-    test rax,rax; jz .gpie_bad
+    # A nonzero unsigned ConstantFact projects to the existing exact reciprocal
+    # authority. Dynamic/signed divisors retain the checked ISA divmod relation.
+    mov eax,[rsp+8]; cmp eax,14; jb .gpie_args_ready
+    cmp eax,15; ja .gpie_args_ready
+    cmp r14d,GTYPE_U64; jne .gpie_args_ready
+    mov rdi,r15; call g_expr_u64_literal; test edx,edx; jnz .gpie_args_ready
+    test rax,rax; jz .gpie_args_ready
+    mov ecx,[rsp+8]; sub ecx,14; xor ecx,1; mov [rsp+12],ecx
+    mov dword ptr [rsp+8],4
     mov [rsp+16],rax
-    cmp rax,1; je .gpie_mod_magic_ready
-    mov rcx,rax
-    xor eax,eax
-    mov edx,1
-    div rcx                              # floor(2^64 / d), d>1 so quotient fits
-    mov [rsp+24],rax
     jmp .gpie_args_ready
-.gpie_mod_magic_ready:
-    mov qword ptr [rsp+24],0
 .gpie_args_ready:
 
     # Preserve the left-to-right AST relation. A resident LHS is copied once
@@ -6291,18 +7561,31 @@ g_emit_phys_int_expr_to:
     cmp eax,r14d; jne .gpie_bad
 .gpie_lhs_ready:
     cmp dword ptr [rsp+8],4; jne .gpie_rhs_literal_probe
-    mov edi,r13d; mov rsi,[rsp+16]; mov rdx,[rsp+24]
-    call g_emit_phys_u64_const_mod
+    mov edi,r13d; mov rsi,[rsp+16]
+    mov ecx,[rsp+12]; call g_emit_phys_u64_const_divmod
     test eax,eax; jnz .gpie_bad
     mov eax,r14d; jmp .gpie_done
 
 .gpie_rhs_literal_probe:
+    mov eax,dword ptr [rsp+8]
+    cmp eax,12; je .gpie_shift_literal_probe
+    cmp eax,13; jne .gpie_rhs_arithmetic_literal
+.gpie_shift_literal_probe:
+    mov rdi,r15; call g_expr_u64_literal; test edx,edx; jnz .gpie_rhs_normal
+    cmp rax,64; jae .gpie_rhs_normal
+    test rax,rax; jz .gpie_rhs_literal_done
+    mov edx,eax; mov esi,r13d; mov edi,dword ptr [rsp+8]
+    call g_emit_phys_gpr_shift_imm
+    test eax,eax; jnz .gpie_bad
+    mov eax,r14d; jmp .gpie_done
+.gpie_rhs_arithmetic_literal:
     # A literal is an ISA operand form, not automatically a runtime ValueFact.
     # When its exact bits fit the architectural sign-extended imm32 field,
-    # add/sub/bitwise consume it in place and no transient GPR is born.
+    # add/sub/mul/bitwise consume it in place and no transient GPR is born.
     mov eax,dword ptr [rsp+8]
     cmp eax,1; je .gpie_rhs_literal_type
     cmp eax,2; je .gpie_rhs_literal_type
+    cmp eax,3; je .gpie_rhs_literal_type
     cmp eax,5; je .gpie_rhs_literal_type
     cmp eax,6; je .gpie_rhs_literal_type
     cmp eax,7; jne .gpie_rhs_normal
@@ -6319,6 +7602,19 @@ g_emit_phys_int_expr_to:
 .gpie_rhs_literal_u64:
     mov rax,[rsp+16]; call node_parse_u64; test edx,edx; jnz .gpie_rhs_normal
 .gpie_rhs_literal_exact:
+    mov ecx,[rsp+8]
+    test rax,rax; jnz .gpie_nonzero_literal
+    cmp ecx,1; je .gpie_rhs_literal_done
+    cmp ecx,2; je .gpie_rhs_literal_done
+    cmp ecx,6; je .gpie_rhs_literal_done
+    cmp ecx,7; je .gpie_rhs_literal_done
+.gpie_nonzero_literal:
+    cmp ecx,3; jne .gpie_identity_and
+    cmp rax,1; je .gpie_rhs_literal_done
+.gpie_identity_and:
+    cmp ecx,5; jne .gpie_imm32_projection
+    cmp rax,-1; je .gpie_rhs_literal_done
+.gpie_imm32_projection:
     movsxd rcx,eax
     cmp rcx,rax; jne .gpie_rhs_normal
     mov edx,eax
@@ -6334,9 +7630,8 @@ g_emit_phys_int_expr_to:
 .gpie_rhs_normal:
     mov rdi,r15; mov esi,r14d; call g_phys_int_direct_source
     test eax,eax; jz .gpie_rhs_complex
-    mov edx,edx
     mov edi,dword ptr [rsp+8]; mov esi,r13d
-    call g_emit_phys_gpr_bin2
+    mov ecx,r14d; call g_emit_phys_int_binary_relation
     test eax,eax; jnz .gpie_bad
     cmp dword ptr [rsp+8],3; ja .gpie_direct_no_guard
     mov edi,dword ptr [rsp+8]; mov esi,r14d; call g_emit_phys_int_overflow_guard
@@ -6351,7 +7646,7 @@ g_emit_phys_int_expr_to:
     mov rdi,r15; mov esi,eax; mov edx,r14d; call g_emit_phys_int_expr_to
     cmp eax,r14d; jne .gpie_rhs_temp_fail
     mov edx,dword ptr [rsp]
-    mov edi,dword ptr [rsp+8]; mov esi,r13d; call g_emit_phys_gpr_bin2
+    mov edi,dword ptr [rsp+8]; mov esi,r13d; mov ecx,r14d; call g_emit_phys_int_binary_relation
     test eax,eax; jnz .gpie_rhs_temp_fail
     cmp dword ptr [rsp+8],3; ja .gpie_temp_no_guard
     mov edi,dword ptr [rsp+8]; mov esi,r14d; call g_emit_phys_int_overflow_guard
@@ -6364,78 +7659,14 @@ g_emit_phys_int_expr_to:
 .gpie_bad:
     xor eax,eax
 .gpie_done:
+    test eax,eax; jz .gpie_return
+    push rax
+    mov rdi,r12; mov esi,r14d; mov edx,r13d; call g_phys_cse_retain_integer
+    pop rax
+.gpie_return:
     add rsp,32
     pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
-# Commit complete next-version carriers into persistent state carriers.
-g_emit_phys_commit_output:
-    cmp esi,GTYPE_F64; je .gepco_f64
-    cmp esi,GTYPE_F32; je .gepco_f32
-    cmp edi,0; je .gepco_i0
-    cmp edi,1; je .gepco_i1
-    cmp edi,2; je .gepco_i2
-    mov eax,1; ret
-.gepco_i0: lea rdi,[rip+gc_phys_mov_r8_rsi]; mov esi,gc_phys_mov_r8_rsi_end-gc_phys_mov_r8_rsi; call g_emit_bytes; ret
-.gepco_i1: lea rdi,[rip+gc_phys_mov_r9_rdi]; mov esi,gc_phys_mov_r9_rdi_end-gc_phys_mov_r9_rdi; call g_emit_bytes; ret
-.gepco_i2: lea rdi,[rip+gc_phys_mov_r10_rcx]; mov esi,gc_phys_mov_r10_rcx_end-gc_phys_mov_r10_rcx; call g_emit_bytes; ret
-.gepco_f64:
-    cmp edi,0; je .gepco_d0
-    cmp edi,1; je .gepco_d1
-    cmp edi,2; je .gepco_d2
-    mov eax,1; ret
-.gepco_d0: lea rdi,[rip+gc_phys_movsd_xmm8_xmm5]; mov esi,gc_phys_movsd_xmm8_xmm5_end-gc_phys_movsd_xmm8_xmm5; call g_emit_bytes; ret
-.gepco_d1: lea rdi,[rip+gc_phys_movsd_xmm9_xmm6]; mov esi,gc_phys_movsd_xmm9_xmm6_end-gc_phys_movsd_xmm9_xmm6; call g_emit_bytes; ret
-.gepco_d2: lea rdi,[rip+gc_phys_movsd_xmm10_xmm7]; mov esi,gc_phys_movsd_xmm10_xmm7_end-gc_phys_movsd_xmm10_xmm7; call g_emit_bytes; ret
-.gepco_f32:
-    cmp edi,0; je .gepco_s0
-    cmp edi,1; je .gepco_s1
-    cmp edi,2; je .gepco_s2
-    mov eax,1; ret
-.gepco_s0: lea rdi,[rip+gc_phys_movss_xmm8_xmm5]; mov esi,gc_phys_movss_xmm8_xmm5_end-gc_phys_movss_xmm8_xmm5; call g_emit_bytes; ret
-.gepco_s1: lea rdi,[rip+gc_phys_movss_xmm9_xmm6]; mov esi,gc_phys_movss_xmm9_xmm6_end-gc_phys_movss_xmm9_xmm6; call g_emit_bytes; ret
-.gepco_s2: lea rdi,[rip+gc_phys_movss_xmm10_xmm7]; mov esi,gc_phys_movss_xmm10_xmm7_end-gc_phys_movss_xmm10_xmm7; call g_emit_bytes; ret
-
-# Initialize a floating persistent state from the historical init value bits
-# already in runtime RAX. edi=role, esi=type.
-g_emit_phys_init_float:
-    cmp esi,GTYPE_F64; je .gepif_d
-    cmp esi,GTYPE_F32; jne .gepif_bad
-    cmp edi,0; je .gepif_s0
-    cmp edi,1; je .gepif_s1
-    cmp edi,2; je .gepif_s2
-    jmp .gepif_bad
-.gepif_d:
-    cmp edi,0; je .gepif_d0
-    cmp edi,1; je .gepif_d1
-    cmp edi,2; je .gepif_d2
-.gepif_bad: mov eax,1; ret
-.gepif_d0: lea rdi,[rip+gc_phys_movq_xmm8_rax]; mov esi,gc_phys_movq_xmm8_rax_end-gc_phys_movq_xmm8_rax; call g_emit_bytes; ret
-.gepif_d1: lea rdi,[rip+gc_phys_movq_xmm9_rax]; mov esi,gc_phys_movq_xmm9_rax_end-gc_phys_movq_xmm9_rax; call g_emit_bytes; ret
-.gepif_d2: lea rdi,[rip+gc_phys_movq_xmm10_rax]; mov esi,gc_phys_movq_xmm10_rax_end-gc_phys_movq_xmm10_rax; call g_emit_bytes; ret
-.gepif_s0: lea rdi,[rip+gc_phys_movd_xmm8_eax]; mov esi,gc_phys_movd_xmm8_eax_end-gc_phys_movd_xmm8_eax; call g_emit_bytes; ret
-.gepif_s1: lea rdi,[rip+gc_phys_movd_xmm9_eax]; mov esi,gc_phys_movd_xmm9_eax_end-gc_phys_movd_xmm9_eax; call g_emit_bytes; ret
-.gepif_s2: lea rdi,[rip+gc_phys_movd_xmm10_eax]; mov esi,gc_phys_movd_xmm10_eax_end-gc_phys_movd_xmm10_eax; call g_emit_bytes; ret
-
-# Extract final floating resident state to runtime RAX bits for the unchanged
-# general publication ABI. edi=role, esi=type.
-g_emit_phys_extract_float:
-    cmp esi,GTYPE_F64; je .gepef_d
-    cmp esi,GTYPE_F32; jne .gepef_bad
-    cmp edi,0; je .gepef_s0
-    cmp edi,1; je .gepef_s1
-    cmp edi,2; je .gepef_s2
-    jmp .gepef_bad
-.gepef_d:
-    cmp edi,0; je .gepef_d0
-    cmp edi,1; je .gepef_d1
-    cmp edi,2; je .gepef_d2
-.gepef_bad: mov eax,1; ret
-.gepef_d0: lea rdi,[rip+gc_phys_movq_rax_xmm8]; mov esi,gc_phys_movq_rax_xmm8_end-gc_phys_movq_rax_xmm8; call g_emit_bytes; ret
-.gepef_d1: lea rdi,[rip+gc_phys_movq_rax_xmm9]; mov esi,gc_phys_movq_rax_xmm9_end-gc_phys_movq_rax_xmm9; call g_emit_bytes; ret
-.gepef_d2: lea rdi,[rip+gc_phys_movq_rax_xmm10]; mov esi,gc_phys_movq_rax_xmm10_end-gc_phys_movq_rax_xmm10; call g_emit_bytes; ret
-.gepef_s0: lea rdi,[rip+gc_phys_movd_eax_xmm8]; mov esi,gc_phys_movd_eax_xmm8_end-gc_phys_movd_eax_xmm8; call g_emit_bytes; ret
-.gepef_s1: lea rdi,[rip+gc_phys_movd_eax_xmm9]; mov esi,gc_phys_movd_eax_xmm9_end-gc_phys_movd_eax_xmm9; call g_emit_bytes; ret
-.gepef_s2: lea rdi,[rip+gc_phys_movd_eax_xmm10]; mov esi,gc_phys_movd_eax_xmm10_end-gc_phys_movd_eax_xmm10; call g_emit_bytes; ret
 
 
 # ---------------- machine-code operation emitters ----------------
@@ -6459,22 +7690,22 @@ g_emit_cast_top:
     cmp edx,GTYPE_F32; je .gec_u_f32
     cmp edx,GTYPE_I64; je .gec_ok
     mov eax,1; ret
-.gec_u_f64: lea rdi,[rip+gc_cast_u64_f64]; mov esi,gc_cast_u64_f64_end-gc_cast_u64_f64; call g_emit_bytes; xor eax,eax; ret
-.gec_u_f32: lea rdi,[rip+gc_cast_u64_f32]; mov esi,gc_cast_u64_f32_end-gc_cast_u64_f32; call g_emit_bytes; xor eax,eax; ret
+.gec_u_f64: mov edi,GTYPE_U64; mov esi,GTYPE_F64; jmp g_emit_int_fp_stack
+.gec_u_f32: mov edi,GTYPE_U64; mov esi,GTYPE_F32; jmp g_emit_int_fp_stack
 .gec_from_i:
     cmp edx,GTYPE_F64; je .gec_i_f64
     cmp edx,GTYPE_F32; je .gec_i_f32
     cmp edx,GTYPE_U64; je .gec_ok
     mov eax,1; ret
-.gec_i_f64: lea rdi,[rip+gc_cast_i64_f64]; mov esi,gc_cast_i64_f64_end-gc_cast_i64_f64; call g_emit_bytes; xor eax,eax; ret
-.gec_i_f32: lea rdi,[rip+gc_cast_i64_f32]; mov esi,gc_cast_i64_f32_end-gc_cast_i64_f32; call g_emit_bytes; xor eax,eax; ret
+.gec_i_f64: mov edi,GTYPE_I64; mov esi,GTYPE_F64; jmp g_emit_int_fp_stack
+.gec_i_f32: mov edi,GTYPE_I64; mov esi,GTYPE_F32; jmp g_emit_int_fp_stack
 .gec_from_f32:
     cmp edx,GTYPE_F64; je .gec_f32_f64
     cmp edx,GTYPE_U64; je .gec_f32_u64
     cmp edx,GTYPE_I64; je .gec_f32_i64
     mov eax,1; ret
 .gec_f32_f64: lea rdi,[rip+gc_cast_f32_f64]; mov esi,gc_cast_f32_f64_end-gc_cast_f32_f64; call g_emit_bytes; xor eax,eax; ret
-.gec_f32_u64: lea rdi,[rip+gc_cast_f32_u64]; mov esi,gc_cast_f32_u64_end-gc_cast_f32_u64; call g_emit_bytes; xor eax,eax; ret
+.gec_f32_u64: mov edi,GTYPE_F32; jmp g_emit_fp_u64_stack
 .gec_f32_i64: lea rdi,[rip+gc_cast_f32_i64]; mov esi,gc_cast_f32_i64_end-gc_cast_f32_i64; call g_emit_bytes; xor eax,eax; ret
 .gec_from_f64:
     cmp edx,GTYPE_F32; je .gec_f64_f32
@@ -6482,7 +7713,7 @@ g_emit_cast_top:
     cmp edx,GTYPE_I64; je .gec_f64_i64
     mov eax,1; ret
 .gec_f64_f32: lea rdi,[rip+gc_cast_f64_f32]; mov esi,gc_cast_f64_f32_end-gc_cast_f64_f32; call g_emit_bytes; xor eax,eax; ret
-.gec_f64_u64: lea rdi,[rip+gc_cast_f64_u64]; mov esi,gc_cast_f64_u64_end-gc_cast_f64_u64; call g_emit_bytes; xor eax,eax; ret
+.gec_f64_u64: mov edi,GTYPE_F64; jmp g_emit_fp_u64_stack
 .gec_f64_i64: lea rdi,[rip+gc_cast_f64_i64]; mov esi,gc_cast_f64_i64_end-gc_cast_f64_i64; call g_emit_bytes; xor eax,eax; ret
 .gec_wide:
     mov edi,eax; mov esi,edx; jmp g_emit_rankn_fp_cast_top
@@ -6543,14 +7774,14 @@ g_convert_stack_top:
     cmp esi,GTYPE_F64; je .gcst_u64_f64
     cmp esi,GTYPE_F32; je .gcst_u64_f32
     jmp .gcst_bad
-.gcst_u64_f64: lea rdi,[rip+gc_cast_u64_f64]; mov esi,gc_cast_u64_f64_end-gc_cast_u64_f64; call g_emit_bytes; ret
-.gcst_u64_f32: lea rdi,[rip+gc_cast_u64_f32]; mov esi,gc_cast_u64_f32_end-gc_cast_u64_f32; call g_emit_bytes; ret
+.gcst_u64_f64: jmp g_emit_int_fp_stack
+.gcst_u64_f32: jmp g_emit_int_fp_stack
 .gcst_from_i64:
     cmp esi,GTYPE_F64; je .gcst_i64_f64
     cmp esi,GTYPE_F32; je .gcst_i64_f32
     jmp .gcst_bad
-.gcst_i64_f64: lea rdi,[rip+gc_cast_i64_f64]; mov esi,gc_cast_i64_f64_end-gc_cast_i64_f64; call g_emit_bytes; ret
-.gcst_i64_f32: lea rdi,[rip+gc_cast_i64_f32]; mov esi,gc_cast_i64_f32_end-gc_cast_i64_f32; call g_emit_bytes; ret
+.gcst_i64_f64: jmp g_emit_int_fp_stack
+.gcst_i64_f32: jmp g_emit_int_fp_stack
 .gcst_rankn: jmp g_emit_rankn_fp_cast_top
 .gcst_ok: xor eax,eax; ret
 .gcst_bad: mov eax,1; ret
@@ -6590,34 +7821,34 @@ g_convert_stack_second:
 .gcss_bad: mov eax,1; ret
 
 g_emit_float64_op:
-    push r12; push r13; mov r12,rdi; mov r13,rsi
-    lea rdx,[rip+gv_add]; mov ecx,gv_add_end-gv_add; call span_eq; test eax,eax; jnz .gef64_add
-    mov rdi,r12; mov rsi,r13; lea rdx,[rip+gv_sub]; mov ecx,gv_sub_end-gv_sub; call span_eq; test eax,eax; jnz .gef64_sub
-    mov rdi,r12; mov rsi,r13; lea rdx,[rip+gv_mul]; mov ecx,gv_mul_end-gv_mul; call span_eq; test eax,eax; jnz .gef64_mul
-    mov rdi,r12; mov rsi,r13; lea rdx,[rip+gv_div]; mov ecx,gv_div_end-gv_div; call span_eq; test eax,eax; jnz .gef64_div
-    mov rdi,r12; mov rsi,r13; lea rdx,[rip+gv_min]; mov ecx,gv_min_end-gv_min; call span_eq; test eax,eax; jnz .gef64_min
-    mov rdi,r12; mov rsi,r13; lea rdx,[rip+gv_max]; mov ecx,gv_max_end-gv_max; call span_eq; test eax,eax; jnz .gef64_max
-    mov eax,1; jmp .gef64_done
-.gef64_add: lea rdi,[rip+gc_f64_add]; mov esi,gc_f64_add_end-gc_f64_add; call g_emit_bytes; jmp .gef64_done
-.gef64_sub: lea rdi,[rip+gc_f64_sub]; mov esi,gc_f64_sub_end-gc_f64_sub; call g_emit_bytes; jmp .gef64_done
-.gef64_mul: lea rdi,[rip+gc_f64_mul]; mov esi,gc_f64_mul_end-gc_f64_mul; call g_emit_bytes; jmp .gef64_done
-.gef64_div: lea rdi,[rip+gc_f64_div_checked]; mov esi,gc_f64_div_checked_end-gc_f64_div_checked; call g_emit_bytes; jmp .gef64_done
-.gef64_min: lea rdi,[rip+gc_f64_min]; mov esi,gc_f64_min_end-gc_f64_min; call g_emit_bytes; jmp .gef64_done
-.gef64_max: lea rdi,[rip+gc_f64_max]; mov esi,gc_f64_max_end-gc_f64_max; call g_emit_bytes
-.gef64_done: pop r13; pop r12; ret
-
+    mov edx,GTYPE_F64; jmp g_emit_native_fp_op
 g_emit_float32_op:
-    push r12; push r13; mov r12,rdi; mov r13,rsi
-    lea rdx,[rip+gv_add]; mov ecx,gv_add_end-gv_add; call span_eq; test eax,eax; jnz .gef32_add
-    mov rdi,r12; mov rsi,r13; lea rdx,[rip+gv_sub]; mov ecx,gv_sub_end-gv_sub; call span_eq; test eax,eax; jnz .gef32_sub
-    mov rdi,r12; mov rsi,r13; lea rdx,[rip+gv_mul]; mov ecx,gv_mul_end-gv_mul; call span_eq; test eax,eax; jnz .gef32_mul
-    mov rdi,r12; mov rsi,r13; lea rdx,[rip+gv_div]; mov ecx,gv_div_end-gv_div; call span_eq; test eax,eax; jnz .gef32_div
-    mov eax,1; jmp .gef32_done
-.gef32_add: lea rdi,[rip+gc_f32_add]; mov esi,gc_f32_add_end-gc_f32_add; call g_emit_bytes; jmp .gef32_done
-.gef32_sub: lea rdi,[rip+gc_f32_sub]; mov esi,gc_f32_sub_end-gc_f32_sub; call g_emit_bytes; jmp .gef32_done
-.gef32_mul: lea rdi,[rip+gc_f32_mul]; mov esi,gc_f32_mul_end-gc_f32_mul; call g_emit_bytes; jmp .gef32_done
-.gef32_div: lea rdi,[rip+gc_f32_div_checked]; mov esi,gc_f32_div_checked_end-gc_f32_div_checked; call g_emit_bytes
-.gef32_done: pop r13; pop r12; ret
+    mov edx,GTYPE_F32
+# Operator table is the one authority for both native FP widths.
+g_emit_native_fp_op:
+    push rbx; push r12; push r13; push r14
+    mov r12,rdi; mov r13,rsi; mov r14d,edx; lea rbx,[rip+g_native_fp_op_table]
+.genfo_find:
+    cmp qword ptr [rbx],0; je .genfo_bad
+    mov rdi,r12; mov rsi,r13; mov rdx,[rbx]; mov ecx,dword ptr [rbx+8]; call span_eq
+    test eax,eax; jnz .genfo_found
+    add rbx,48; jmp .genfo_find
+.genfo_found:
+    cmp r14d,GTYPE_F64; je 1f
+    add rbx,16
+1:  mov rdi,[rbx+16]; mov esi,dword ptr [rbx+24]; call g_emit_bytes
+    jmp .genfo_done
+.genfo_bad: mov eax,1
+.genfo_done: pop r14; pop r13; pop r12; pop rbx; ret
+
+# rdi=operator span,rsi=length,edx=natural FP type -> rax=old ISA fragment,
+# ecx=bytes, or zero. This is the local primitive relation, not a solver route.
+g_native_fp_math_fragment:
+    cmp edx,GTYPE_F64; je 1f
+    cmp edx,GTYPE_F32; jne 2f
+    mov edx,32; jmp physical_math_fragment
+1:  mov edx,64; jmp physical_math_fragment
+2:  xor eax,eax; xor ecx,ecx; ret
 
 # integer op including trap/wrap. rdi op ptr,rsi len,edx type
 g_emit_int_op:
@@ -6649,12 +7880,10 @@ g_emit_int_op:
 .gei_mul_signed: lea rdi,[rip+gc_imul_trap]; mov esi,gc_imul_trap_end-gc_imul_trap; call g_emit_bytes; jmp .gei_done
 .gei_mul_wrap: lea rdi,[rip+gc_mul_wrap]; mov esi,gc_mul_wrap_end-gc_mul_wrap; call g_emit_bytes; jmp .gei_done
 .gei_div:
-    cmp r14d,GTYPE_I64; je .gei_idiv
-    lea rdi,[rip+gc_udiv_checked]; mov esi,gc_udiv_checked_end-gc_udiv_checked; call g_emit_bytes; jmp .gei_done
-.gei_idiv:
-    cmp dword ptr [rip+g_overflow_wrap],1; je .gei_idiv_wrap
-    lea rdi,[rip+gc_idiv_checked]; mov esi,gc_idiv_checked_end-gc_idiv_checked; call g_emit_bytes; jmp .gei_done
-.gei_idiv_wrap: lea rdi,[rip+gc_idiv_wrap_checked]; mov esi,gc_idiv_wrap_checked_end-gc_idiv_wrap_checked; call g_emit_bytes; jmp .gei_done
+    mov edi,0x5859; call g_emit_u16
+    mov edi,r14d; call g_emit_int_divmod_core
+    mov edi,0x50; call g_emit_u8
+    jmp .gei_done
 .gei_min:
     cmp r14d,GTYPE_I64; je .gei_min_i
     lea rdi,[rip+gc_umin]; mov esi,gc_umin_end-gc_umin; call g_emit_bytes; jmp .gei_done
@@ -6799,19 +8028,170 @@ g_emit_shift_top2:
 .gesh_r: lea rdi,[rip+gc_shr_checked]; mov esi,gc_shr_checked_end-gc_shr_checked; call g_emit_bytes
 .gesh_done: pop r13; pop r12; ret
 
+# Runtime operands RAX/RCX; outputs quotient RAX, remainder RDX.
+g_emit_int_divmod_core:
+    cmp edi,GTYPE_I64; je .gedc_signed
+    lea rdi,[rip+gc_udivmod_core]; mov esi,gc_udivmod_core_end-gc_udivmod_core
+    jmp g_emit_bytes
+.gedc_signed:
+    cmp dword ptr [rip+g_overflow_wrap],1; je .gedc_wrap
+    lea rdi,[rip+gc_idivmod_trap_core]; mov esi,gc_idivmod_trap_core_end-gc_idivmod_trap_core
+    jmp g_emit_bytes
+.gedc_wrap:
+    lea rdi,[rip+gc_idivmod_wrap_core]; mov esi,gc_idivmod_wrap_core_end-gc_idivmod_wrap_core
+    jmp g_emit_bytes
+
 g_emit_mod_top2:
-    cmp edi,GTYPE_I64; je .gemod_i
-    lea rdi,[rip+gc_umod_checked]; mov esi,gc_umod_checked_end-gc_umod_checked; call g_emit_bytes; ret
-.gemod_i:
-    cmp dword ptr [rip+g_overflow_wrap],1; je .gemod_i_wrap
-    lea rdi,[rip+gc_imod_checked]; mov esi,gc_imod_checked_end-gc_imod_checked; call g_emit_bytes; ret
-.gemod_i_wrap: lea rdi,[rip+gc_imod_wrap_checked]; mov esi,gc_imod_wrap_checked_end-gc_imod_wrap_checked; call g_emit_bytes; ret
+    push rbx; mov ebx,edi
+    mov edi,0x5859; call g_emit_u16
+    mov edi,ebx; call g_emit_int_divmod_core
+    mov edi,0x52; call g_emit_u8
+    pop rbx; ret
 
 # ---------------- binding emitters ----------------
+# rdi=scalar graph -> eax=1 when all scalar effects are unconditional and
+# every map pullback preserves the current AxisFact. This proof determines
+# lifetime, never a workload/type-name route.
+g_phys_identity_axis_episode:
+    push rbx; push r12; push r13
+    mov r12,rdi
+    mov rdi,r12; call g_infer_expr
+    cmp eax,GTYPE_BOOL; je .gpiae_load
+    cmp eax,GTYPE_U64; je .gpiae_load
+    cmp eax,GTYPE_I64; je .gpiae_load
+    cmp eax,GTYPE_F32; je .gpiae_load
+    cmp eax,GTYPE_F64; jne .gpiae_no
+.gpiae_load:
+    mov rdi,r12; lea rsi,[rip+gk_load]; mov edx,gk_load_end-gk_load; call obj_get
+    test rax,rax; jz .gpiae_op
+    mov rdi,r12; call g_phys_identity_load_source
+    test rax,rax; jz .gpiae_no
+    mov rdi,rax; call g_phys_identity_axis_episode
+    jmp .gpiae_done
+.gpiae_op:
+    mov rdi,r12; lea rsi,[rip+gk_op]; mov edx,gk_op_end-gk_op; call obj_get
+    test rax,rax; jz .gpiae_leaf
+    # A lazy edge enters packet lifetime only when its whole subtree is total.
+    mov rdi,[rax+8]; mov rsi,[rax+16]; lea rdx,[rip+gv_select]; mov ecx,gv_select_end-gv_select; call span_eq
+    test eax,eax; jz .gpiae_select_proved
+    mov rdi,r12; call g_semantic_expr_is_total
+    test eax,eax; jz .gpiae_no
+.gpiae_select_proved:
+    mov rdi,r12; lea rsi,[rip+gk_args]; mov edx,gk_args_end-gk_args; call obj_get
+    test rax,rax; jz .gpiae_no
+    mov rbx,[rax+24]
+.gpiae_children:
+    test rbx,rbx; jz .gpiae_yes
+    mov r13,[rbx+32]
+    mov rdi,rbx; call g_phys_identity_axis_episode
+    test eax,eax; jz .gpiae_no
+    mov rbx,r13; jmp .gpiae_children
+.gpiae_leaf:
+    mov rdi,r12; lea rsi,[rip+gk_literal]; mov edx,gk_literal_end-gk_literal; call obj_get
+    test rax,rax; jnz .gpiae_yes
+    mov rdi,r12; lea rsi,[rip+gk_var]; mov edx,gk_var_end-gk_var; call obj_get
+    test rax,rax; jnz .gpiae_yes
+    mov rdi,r12; lea rsi,[rip+gk_axis]; mov edx,gk_axis_end-gk_axis; call obj_get
+    test rax,rax; jz .gpiae_no
+.gpiae_yes: mov eax,1; jmp .gpiae_done
+.gpiae_no: xor eax,eax
+.gpiae_done: pop r13; pop r12; pop rbx; ret
+
+# rdi=scalar expression -> rax=identity-axis map producer or 0. Both numeric
+# carriers, cost and CSE consume this proof without re-producing the index.
+# Local validation also protects extent evaluation within a prepared episode.
+g_phys_episode_load_source:
+    cmp dword ptr [rip+g_phys_stack_episode],0; je .gpels_none
+g_phys_identity_load_source:
+    push rbx; push r12
+    mov r12,rdi
+    lea rsi,[rip+gk_load]; mov edx,gk_load_end-gk_load; call obj_get
+    test rax,rax; jz .gpils_done
+    mov rdi,[rax+8]; mov rsi,[rax+16]; call g_find_symbol
+    test rax,rax; jz .gpils_done
+    cmp dword ptr [rax+16],GK_MAP; jne .gpils_none
+    mov rbx,[rax+32]
+    mov rdi,r12; lea rsi,[rip+gk_indices]; mov edx,gk_indices_end-gk_indices; call obj_get
+    test rax,rax; jz .gpils_done
+    mov rdi,[rax+24]; test rdi,rdi; jz .gpils_none
+    cmp qword ptr [rdi+32],0; jne .gpils_none
+    lea rsi,[rip+gk_axis]; mov edx,gk_axis_end-gk_axis; call obj_get
+    test rax,rax; jz .gpils_done
+    mov rdi,rbx; lea rsi,[rip+gk_expr]; mov edx,gk_expr_end-gk_expr; call obj_get
+    jmp .gpils_done
+.gpils_none: xor eax,eax
+.gpils_done: pop r12; pop rbx; ret
+.gpels_none: xor eax,eax
+    ret
+
+# rdi=reduce scalar root. Reset invocation-local lifetime, then reuse one CSE
+# collection/selection authority with the actual General scratch ABI reserved.
+g_phys_prepare_scalar_episode:
+    push rbx; push r12; push r13
+    mov dword ptr [rip+g_phys_cse_memory_carrier],0
+    mov rbx,rdi
+    mov dword ptr [rip+g_phys_stack_episode],0
+    mov dword ptr [rip+g_phys_cse_candidate_count],0
+    mov dword ptr [rip+g_phys_cse_resident_count],0
+    mov dword ptr [rip+g_phys_cse_ready_count],0
+    mov dword ptr [rip+g_phys_const_resident_count],0
+    mov rdi,rbx; call g_phys_identity_axis_episode
+    test eax,eax; jz .gppse_done
+    call g_phys_fp_geometry_refresh
+    mov dword ptr [rip+g_phys_fp_reserved_mask],15  # XMM0..3 are General scratch
+    mov dword ptr [rip+g_phys_int_reserved_mask],(1<<11) # R11 accumulator
+    mov dword ptr [rip+g_phys_fp_temp_peak],0
+    mov dword ptr [rip+g_phys_int_temp_peak],0
+    mov dword ptr [rip+g_phys_const_candidate_count],0
+    mov dword ptr [rip+g_phys_const_pool_ready],0
+    mov dword ptr [rip+g_phys_const_collect],1
+    mov dword ptr [rip+g_phys_stack_episode],2
+    G_EMIT_POSITION r12
+    call g_phys_temp_reset
+    mov rdi,rbx; call g_infer_expr; mov r13d,eax
+    mov edx,eax; xor esi,esi; mov rdi,rbx
+    cmp r13d,GTYPE_F64; je .gppse_probe_fp
+    cmp r13d,GTYPE_F32; je .gppse_probe_fp
+    mov esi,8; call g_emit_phys_int_expr_to
+    jmp .gppse_probe_done
+.gppse_probe_fp:
+    call g_emit_phys_fp_expr_to
+.gppse_probe_done:
+    mov [rip+g_emit_ptr],r12
+    mov dword ptr [rip+g_phys_const_collect],0
+    cmp eax,r13d; je .gppse_note
+    mov dword ptr [rip+g_phys_stack_episode],1
+    mov dword ptr [rip+g_phys_const_candidate_count],0
+.gppse_note:
+    mov rdi,rbx; call g_infer_expr
+    mov esi,eax; mov rdi,rbx; call g_phys_cse_note_tree
+    call g_phys_cse_finalize
+    call g_phys_cse_order_dependencies
+    cmp dword ptr [rip+g_phys_stack_episode],2; jne .gppse_done
+    call g_phys_const_finalize
+.gppse_done:
+    pop r13; pop r12; pop rbx; ret
+
+.include "compiler/physical_packet_general.inc"
+
 # reduce symbol rdi -> eax 0/1
 g_emit_reduce_binding:
     push rbx; push r12; push r13; push r14; push r15
     mov rbx,rdi; mov r12,[rbx+32]
+    mov rdi,r12; lea rsi,[rip+gk_expr]; mov edx,gk_expr_end-gk_expr; call obj_get
+    test rax,rax; jz .gerb_bad
+    mov r15,rax
+    # Sum exposes independent map nodes. Min/max retains its existing ordered
+    # first-element authority until its packet fold proof is closed.
+    mov dword ptr [rip+g_packet_ready],0
+    mov dword ptr [rip+group_lane_factor],1
+    mov rdi,r12; lea rsi,[rip+gk_kind]; mov edx,gk_kind_end-gk_kind; call obj_get
+    mov rdi,[rax+8]; mov rsi,[rax+16]; lea rdx,[rip+gv_sum]; mov ecx,gv_sum_end-gv_sum; call span_eq
+    test eax,eax; jz 81f
+    mov rdi,r15; call g_prepare_packet_episode
+81: cmp dword ptr [rip+g_packet_ready],0; jne 82f
+    mov rdi,r15; call g_phys_prepare_scalar_episode
+82:
     # extent expression = axes[0].extent
     mov rdi,r12; lea rsi,[rip+gk_axes]; mov edx,gk_axes_end-gk_axes; call obj_get
     mov rax,[rax+24]
@@ -6830,18 +8210,63 @@ g_emit_reduce_binding:
     mov r15d,eax
     lea rdi,[rip+gc_zero_r11]; mov esi,gc_zero_r11_end-gc_zero_r11; call g_emit_bytes
     test r15d,r15d; jz .gerb_loop_start
-    # sum accumulator bits in R11 initialized zero (works integer/fp +0)
+    cmp r14d,GTYPE_RANKN_FP_BASE; jb 83f
+    mov edi,r14d; call g_alloc_rankn_fp_temp; test rax,rax; jz .gerb_bad
+    push rax
+    mov rdi,rax; call g_emit_mov_rdi_imm64
+    xor edi,edi; call g_emit_mov_esi_imm32
+    mov edi,r14d; call g_emit_mov_edx_imm32
+    mov rdi,GENERAL_RANKN_FP_FROM_U64_VA; call g_emit_call_abs
+    mov edi,0; call g_emit_rankn_fp_status_check
+    pop rdi
+    call g_emit_mov_rax_imm64
+    mov edi,0xc38949; call g_emit_u24 # mov r11,rax, persistent wide accumulator
+83:
+    # accumulator retains one canonical value across the ordered fold.
 .gerb_loop_start:
-    mov r15,[rip+g_emit_ptr]
+    cmp dword ptr [rip+g_phys_stack_episode],2; jne .gerb_invariants
+    call g_emit_phys_resident_constants
+    test eax,eax; jnz .gerb_bad
+    call g_emit_phys_constant_pool
+    test eax,eax; jnz .gerb_bad
+.gerb_invariants:
+    call g_emit_phys_episode_invariants
+    test eax,eax; jnz .gerb_bad
+    mov rdi,r12; mov esi,r14d; call g_emit_packet_reduce_prefix
+    test eax,eax; jnz .gerb_bad
+    G_EMIT_LOOP_POSITION r15,.gerb_bad
     lea rdi,[rip+gc_cmp_rbx_rbp]; mov esi,gc_cmp_rbx_rbp_end-gc_cmp_rbx_rbp; call g_emit_bytes
     # jae exit
     lea rdi,[rip+gc_jae_prefix]; mov esi,gc_jae_prefix_end-gc_jae_prefix; call g_emit_bytes
-    mov r13,[rip+g_emit_ptr]; xor edi,edi; call g_emit_u32
+    G_EMIT_POSITION r13; xor edi,edi; call g_emit_u32
     lea rdi,[rip+gc_mov_r10_rbx]; mov esi,gc_mov_r10_rbx_end-gc_mov_r10_rbx; call g_emit_bytes
+    cmp dword ptr [rip+g_phys_stack_episode],0; je .gerb_expr
+    call g_emit_phys_episode_cse
+    test eax,eax; jnz .gerb_bad
+.gerb_expr:
     mov rdi,r12; lea rsi,[rip+gk_expr]; mov edx,gk_expr_end-gk_expr; call obj_get
     test rax,rax; jz .gerb_bad
-    mov rdi,rax; call g_emit_expr; cmp eax,r14d; jne .gerb_bad
+    mov rdi,rax
+    cmp dword ptr [rip+g_phys_stack_episode],2; jne .gerb_stack_expr
+    push rdi
+    call g_phys_temp_reset
+    pop rdi
+    mov edx,r14d
+    cmp r14d,GTYPE_F32; je .gerb_fp_expr
+    cmp r14d,GTYPE_F64; je .gerb_fp_expr
+    mov esi,8; call g_emit_phys_int_expr_to
+    cmp eax,r14d; jne .gerb_bad
+    xor edi,edi; mov esi,8; call g_emit_phys_gpr_move
+    jmp .gerb_candidate_ready
+.gerb_fp_expr:
+    xor esi,esi; call g_emit_phys_fp_expr_to
+    cmp eax,r14d; jne .gerb_bad
+    xor edi,edi; mov esi,r14d; call g_emit_phys_xmm_to_rax
+    jmp .gerb_candidate_ready
+.gerb_stack_expr:
+    call g_emit_expr; cmp eax,r14d; jne .gerb_bad
     call g_emit_pop_rax
+.gerb_candidate_ready:
     # accumulator operation selected by kind
     mov rdi,r12; lea rsi,[rip+gk_kind]; mov edx,gk_kind_end-gk_kind; call obj_get
     mov rdi,[rax+8]; mov rsi,[rax+16]; lea rdx,[rip+gv_sum]; mov ecx,gv_sum_end-gv_sum; call span_eq
@@ -6852,21 +8277,21 @@ g_emit_reduce_binding:
     mov rdi,r12; lea rsi,[rip+gk_kind]; mov edx,gk_kind_end-gk_kind; call obj_get
     mov rdi,[rax+8]; mov rsi,[rax+16]; lea rdx,[rip+gv_max]; mov ecx,gv_max_end-gv_max; call span_eq
     test eax,eax; jz .gerb_bad
-    mov edi,r14d; mov esi,2; call g_emit_reduce_minmax_step; jmp .gerb_step_done
-.gerb_min: mov edi,r14d; mov esi,1; call g_emit_reduce_minmax_step; jmp .gerb_step_done
+    mov edi,r14d; mov esi,2; call g_emit_reduce_minmax_step; test eax,eax; jnz .gerb_bad; jmp .gerb_step_done
+.gerb_min: mov edi,r14d; mov esi,1; call g_emit_reduce_minmax_step; test eax,eax; jnz .gerb_bad; jmp .gerb_step_done
 .gerb_sum:
     mov edi,r14d; call g_emit_reduce_sum_step; test eax,eax; jnz .gerb_bad
 .gerb_step_done:
     lea rdi,[rip+gc_inc_rbx]; mov esi,gc_inc_rbx_end-gc_inc_rbx; call g_emit_bytes
     mov edi,0xE9; call g_emit_u8
-    mov rax,[rip+g_emit_ptr]; lea rcx,[rax+4]; cmp rcx,[rip+g_emit_end]; jbe 91f
+    G_EMIT_POSITION rax; lea rcx,[rax+4]; cmp rcx,[rip+g_emit_end]; jbe 91f
     mov dword ptr [rip+g_code_overflow],1; jmp .gerb_bad
 91:
     mov rdx,r15; sub rdx,rcx; mov [rax],edx; mov [rip+g_emit_ptr],rcx
     # patch exit
-    mov rsi,[rip+g_emit_ptr]; mov rdi,r13; call g_patch_rel32
-    # empty min/max reject
-    test r15d,r15d; jnz .gerb_store
+    G_EMIT_POSITION rsi; mov rdi,r13; call g_patch_rel32
+    # The loop patch address is not the reduction kind. Empty extrema keep
+    # their established rejection semantics; empty sum remains zero.
     # For min/max if RBP == 0 -> runtime reject. identify sum again to skip.
     mov rdi,r12; lea rsi,[rip+gk_kind]; mov edx,gk_kind_end-gk_kind; call obj_get
     mov rdi,[rax+8]; mov rsi,[rax+16]; lea rdx,[rip+gv_sum]; mov ecx,gv_sum_end-gv_sum; call span_eq
@@ -6878,7 +8303,13 @@ g_emit_reduce_binding:
     mov eax,dword ptr [rbx+24]; call g_binding_slot_addr; mov rdi,rax; call g_emit_store_rax_abs
     xor eax,eax; jmp .gerb_done
 .gerb_bad: mov eax,1
-.gerb_done: pop r15; pop r14; pop r13; pop r12; pop rbx; ret
+.gerb_done:
+    mov dword ptr [rip+g_phys_cse_memory_carrier],0
+    mov dword ptr [rip+g_packet_ready],0
+    mov dword ptr [rip+g_phys_stack_episode],0
+    mov dword ptr [rip+g_phys_cse_ready_count],0
+    mov dword ptr [rip+g_phys_cse_resident_count],0
+    pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
 # sum step: edi type, candidate in RAX, accumulator bits R11
 g_emit_reduce_sum_step:
@@ -6886,7 +8317,19 @@ g_emit_reduce_sum_step:
     cmp edi,GTYPE_I64; je .gers_i
     cmp edi,GTYPE_F64; je .gers_f64
     cmp edi,GTYPE_F32; je .gers_f32
+    cmp edi,GTYPE_RANKN_FP_BASE; jae .gers_wide
     mov eax,1; ret
+.gers_wide:
+    push rbx; mov ebx,edi
+    # Candidate and accumulator are canonical fpP objects. The existing add
+    # primitive projects both before writing its destination, permitting alias.
+    mov edi,0xc28948; call g_emit_u24 # mov rdx,rax
+    mov edi,0xde894c; call g_emit_u24 # mov rsi,r11
+    mov edi,0xdf894c; call g_emit_u24 # mov rdi,r11
+    mov edi,ebx; call g_emit_mov_ecx_imm32
+    mov rdi,GENERAL_RANKN_FP_ADD_VA; call g_emit_call_abs
+    mov edi,1; call g_emit_rankn_fp_status_check
+    pop rbx; ret
 .gers_u:
     cmp dword ptr [rip+g_overflow_wrap],1; je .gers_uw
     lea rdi,[rip+gc_red_uadd_trap]; mov esi,gc_red_uadd_trap_end-gc_red_uadd_trap; call g_emit_bytes; ret
@@ -6898,24 +8341,27 @@ g_emit_reduce_sum_step:
 .gers_f64: lea rdi,[rip+gc_red_f64_add]; mov esi,gc_red_f64_add_end-gc_red_f64_add; call g_emit_bytes; ret
 .gers_f32: lea rdi,[rip+gc_red_f32_add]; mov esi,gc_red_f32_add_end-gc_red_f32_add; call g_emit_bytes; ret
 
-# min/max step edi type, esi mode 1 min 2 max. candidate RAX, R11 accumulator, RBX index.
+# min/max step: edi natural type, esi mode 1/2; RAX candidate, R11 prior.
+# Fold the existing ordered binary relation. No private comparison fragments or
+# independent NaN policy is allowed to drift from the common scalar consumer.
 g_emit_reduce_minmax_step:
-    # First item simply becomes accumulator.
+    push rbx; push r12
+    mov ebx,edi; mov r12d,esi
+    cmp edi,GTYPE_I64; jb .germm_bad
+    cmp edi,GTYPE_F64; ja .germm_bad
     lea rdi,[rip+gc_red_first_guard]; mov esi,gc_red_first_guard_end-gc_red_first_guard; call g_emit_bytes
-    # Simpler conservative path: the embedded guard code handles integer only.
-    # Float min/max remains rejected by this general seed until a total-order
-    # NaN policy is explicitly added.
-    cmp edi,GTYPE_U64; jne .germm_i
-    cmp esi,1; je .germm_umin
-    lea rdi,[rip+gc_red_umax]; mov esi,gc_red_umax_end-gc_red_umax; call g_emit_bytes; xor eax,eax; ret
-.germm_umin: lea rdi,[rip+gc_red_umin]; mov esi,gc_red_umin_end-gc_red_umin; call g_emit_bytes; xor eax,eax; ret
-.germm_i:
-    cmp edi,GTYPE_I64; jne .germm_bad
-    cmp esi,1; je .germm_imin
-    lea rdi,[rip+gc_red_imax]; mov esi,gc_red_imax_end-gc_red_imax; call g_emit_bytes; xor eax,eax; ret
-.germm_imin: lea rdi,[rip+gc_red_imin]; mov esi,gc_red_imin_end-gc_red_imin; call g_emit_bytes; xor eax,eax; ret
-.germm_bad: mov eax,1; ret
-
+    mov edi,0x5341; call g_emit_u16 # push r11 = prior value
+    mov edi,0x50; call g_emit_u8   # push rax = current candidate
+    lea rdi,[rip+gv_min]; cmp r12d,1; je .germm_entity
+    lea rdi,[rip+gv_max]
+.germm_entity:
+    mov esi,3; mov edx,ebx; mov ecx,ebx; mov r8d,ebx
+    call g_emit_arithmetic_top2; test eax,eax; jnz .germm_bad
+    call g_emit_pop_rax
+    mov edi,0xc38949; call g_emit_u24 # mov r11,rax
+    xor eax,eax; jmp .germm_done
+.germm_bad: mov eax,1
+.germm_done: pop r12; pop rbx; ret
 
 
 # ---------------- 1.3.16 whole-episode shared Physical-DAG facts ----------------
@@ -6924,148 +8370,156 @@ g_emit_reduce_minmax_step:
 # old-version ValueFacts may receive one XMM carrier for the whole causal
 # episode; the generated program contains no graph walker or runtime cache.
 
-# rdi=expr -> eax=1 when this is an exact binary add/sub/mul node, else 0.
-g_phys_fp_expr_is_shareable_op:
-    push rbx; push r12
+# rdi=ValueFact -> eax=1 exactly for an invocation-immutable scalar InputFact.
+# Existing CSE identity, pressure and carriers serve both episode and invocation
+# lifetimes. Loading an input has no rejection effect and may precede zero-trip.
+g_phys_value_is_input:
+    push rbx
+    mov rbx,rdi
+    cmp qword ptr [rbx],J_OBJECT; jne .gpvii_no
+    mov rdi,rbx; lea rsi,[rip+gk_var]; mov edx,gk_var_end-gk_var; call obj_get
+    test rax,rax; jz .gpvii_no
+    mov rdi,[rax+8]; mov rsi,[rax+16]; call g_find_symbol
+    test rax,rax; jz .gpvii_no
+    mov rdi,rax; call g_semantic_resolve_symbol
+    test rax,rax; jz .gpvii_no
+    cmp dword ptr [rax+16],GK_INPUT; jne .gpvii_no
+    mov ecx,dword ptr [rax+20]
+    cmp ecx,GTYPE_U64; je .gpvii_yes
+    cmp ecx,GTYPE_I64; je .gpvii_yes
+    cmp ecx,GTYPE_F32; je .gpvii_yes
+    cmp ecx,GTYPE_F64; jne .gpvii_no
+.gpvii_yes: mov eax,1; pop rbx; ret
+.gpvii_no: xor eax,eax; pop rbx; ret
+
+# Invocation materialization and timestep refresh are two lifetimes of one
+# selected typed ValueFact producer, with no compatibility producer.
+g_emit_phys_episode_invariants:
+    cmp dword ptr [rip+g_phys_cse_memory_carrier],0; jne .gepei_memory
+    xor edi,edi
+    jmp g_emit_phys_episode_values
+.gepei_memory: xor eax,eax; ret
+
+# rdi=expr -> eax=1 when the typed ValueFact operator is exactly realizable by
+# the existing scalar Physical-DAG emitter and therefore safe to retain across
+# the causal episode. One authority covers floating and integer arithmetic;
+# unsupported semantic relations never enter CSE as speculative compatibility.
+g_phys_value_expr_is_shareable_op:
+    push rbx; push r12; push r13; push r14; push r15
     mov r12,rdi
-    cmp qword ptr [r12],J_OBJECT; jne .gpfiso_no
+    test r12,r12; jz .gpviso_no
+    cmp qword ptr [r12],J_OBJECT; jne .gpviso_no
+    mov rdi,r12; call g_infer_expr; mov r13d,eax
+    mov rdi,r12; call g_phys_value_is_input; test eax,eax; jnz .gpviso_yes
+    mov rdi,r12; call g_phys_episode_load_source
+    test rax,rax; jnz .gpviso_yes
+.gpviso_op:
     mov rdi,r12; lea rsi,[rip+gk_op]; mov edx,gk_op_end-gk_op; call obj_get
-    test rax,rax; jz .gpfiso_no
+    test rax,rax; jz .gpviso_no
     mov rbx,rax
+    cmp r13d,GTYPE_F32; je .gpviso_fp
+    cmp r13d,GTYPE_F64; je .gpviso_fp
+    cmp r13d,GTYPE_U64; je .gpviso_int
+    cmp r13d,GTYPE_I64; jne .gpviso_no
+.gpviso_int:
     mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_add]; mov ecx,gv_add_end-gv_add; call span_eq
-    test eax,eax; jnz .gpfiso_yes
+    test eax,eax; jnz .gpviso_yes
     mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_sub]; mov ecx,gv_sub_end-gv_sub; call span_eq
-    test eax,eax; jnz .gpfiso_yes
+    test eax,eax; jnz .gpviso_yes
     mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_mul]; mov ecx,gv_mul_end-gv_mul; call span_eq
-    test eax,eax; jnz .gpfiso_yes
-    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_div]; mov ecx,gv_div_end-gv_div; call span_eq
-    test eax,eax; jnz .gpfiso_yes
-    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_sqrt]; mov ecx,gv_sqrt_end-gv_sqrt; call span_eq
-    test eax,eax; jnz .gpfiso_yes
-    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_square]; mov ecx,gv_square_end-gv_square; call span_eq
-    test eax,eax; jnz .gpfiso_yes
-    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_trunc]; mov ecx,gv_trunc_end-gv_trunc; call span_eq
-    test eax,eax; jnz .gpfiso_yes
+    test eax,eax; jnz .gpviso_yes
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_bit_and]; mov ecx,gv_bit_and_end-gv_bit_and; call span_eq
+    test eax,eax; jnz .gpviso_yes
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_bit_or]; mov ecx,gv_bit_or_end-gv_bit_or; call span_eq
+    test eax,eax; jnz .gpviso_yes
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_bit_xor]; mov ecx,gv_bit_xor_end-gv_bit_xor; call span_eq
+    test eax,eax; jnz .gpviso_yes
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_bit_not]; mov ecx,gv_bit_not_end-gv_bit_not; call span_eq
+    test eax,eax; jnz .gpviso_yes
     mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_neg]; mov ecx,gv_neg_end-gv_neg; call span_eq
-    test eax,eax; jnz .gpfiso_yes
+    test eax,eax; jnz .gpviso_yes
     mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_abs]; mov ecx,gv_abs_end-gv_abs; call span_eq
-    test eax,eax; jnz .gpfiso_yes
+    test eax,eax; jnz .gpviso_yes
     mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_min]; mov ecx,gv_min_end-gv_min; call span_eq
-    test eax,eax; jnz .gpfiso_yes
+    test eax,eax; jnz .gpviso_yes
     mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_max]; mov ecx,gv_max_end-gv_max; call span_eq
-    test eax,eax; jnz .gpfiso_yes
-.gpfiso_no:
-    xor eax,eax; jmp .gpfiso_done
-.gpfiso_yes:
+    test eax,eax; jnz .gpviso_yes
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_div]; mov ecx,gv_div_end-gv_div; call span_eq
+    test eax,eax; jnz .gpviso_yes
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_cast]; mov ecx,gv_cast_end-gv_cast; call span_eq
+    test eax,eax; jnz .gpviso_yes
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_shl]; mov ecx,gv_shl_end-gv_shl; call span_eq
+    test eax,eax; jnz .gpviso_yes
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_shr]; mov ecx,gv_shr_end-gv_shr; call span_eq
+    test eax,eax; jnz .gpviso_yes
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_mod]; mov ecx,gv_mod_end-gv_mod; call span_eq
+    test eax,eax; jz .gpviso_no
+    cmp r13d,GTYPE_U64; je .gpviso_yes
+    jmp .gpviso_no
+.gpviso_fp:
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_cast]; mov ecx,gv_cast_end-gv_cast; call span_eq
+    test eax,eax; jnz .gpviso_yes
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_add]; mov ecx,gv_add_end-gv_add; call span_eq
+    test eax,eax; jnz .gpviso_yes
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_sub]; mov ecx,gv_sub_end-gv_sub; call span_eq
+    test eax,eax; jnz .gpviso_yes
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_mul]; mov ecx,gv_mul_end-gv_mul; call span_eq
+    test eax,eax; jnz .gpviso_yes
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_div]; mov ecx,gv_div_end-gv_div; call span_eq
+    test eax,eax; jnz .gpviso_yes
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_sqrt]; mov ecx,gv_sqrt_end-gv_sqrt; call span_eq
+    test eax,eax; jnz .gpviso_yes
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_square]; mov ecx,gv_square_end-gv_square; call span_eq
+    test eax,eax; jnz .gpviso_yes
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_trunc]; mov ecx,gv_trunc_end-gv_trunc; call span_eq
+    test eax,eax; jnz .gpviso_yes
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_neg]; mov ecx,gv_neg_end-gv_neg; call span_eq
+    test eax,eax; jnz .gpviso_yes
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_abs]; mov ecx,gv_abs_end-gv_abs; call span_eq
+    test eax,eax; jnz .gpviso_yes
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_min]; mov ecx,gv_min_end-gv_min; call span_eq
+    test eax,eax; jnz .gpviso_yes
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_max]; mov ecx,gv_max_end-gv_max; call span_eq
+    test eax,eax; jnz .gpviso_yes
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_exp]; mov ecx,gv_exp_end-gv_exp; call span_eq
+    test eax,eax; jnz .gpviso_yes
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_log]; mov ecx,gv_log_end-gv_log; call span_eq
+    test eax,eax; jnz .gpviso_yes
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_sin]; mov ecx,gv_sin_end-gv_sin; call span_eq
+    test eax,eax; jnz .gpviso_yes
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_cos]; mov ecx,gv_cos_end-gv_cos; call span_eq
+    test eax,eax; jnz .gpviso_yes
+.gpviso_no:
+    xor eax,eax; jmp .gpviso_done
+.gpviso_yes:
     mov eax,1
-.gpfiso_done:
-    pop r12; pop rbx; ret
+.gpviso_done:
+    pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
 # rdi=exprA, rsi=exprB -> eax=1 only for exact structural equality.
 # Operation order is part of identity; no commutative canonicalization occurs.
 g_phys_expr_equal:
-    push rbx; push r12; push r13; push r14; push r15
-    mov r12,rdi; mov r13,rsi
-    cmp r12,r13; je .gpee_yes
-    test r12,r12; jz .gpee_no
-    test r13,r13; jz .gpee_no
-    cmp qword ptr [r12],J_OBJECT; jne .gpee_no
-    cmp qword ptr [r13],J_OBJECT; jne .gpee_no
+    lea rdx,[rip+g_infer_expr]
+    jmp physical_value_expr_equal
 
-    # State leaf identity.
-    mov rdi,r12; lea rsi,[rip+gk_state]; mov edx,gk_state_end-gk_state; call obj_get
-    test rax,rax; jz .gpee_literal
-    mov r14,rax
-    mov rdi,r13; lea rsi,[rip+gk_state]; mov edx,gk_state_end-gk_state; call obj_get
-    test rax,rax; jz .gpee_no
-    mov rdi,[r14+8]; mov rsi,[r14+16]; mov rdx,[rax+8]; mov ecx,dword ptr [rax+16]; call span_eq
-    jmp .gpee_done
-
-.gpee_literal:
-    mov rdi,r12; lea rsi,[rip+gk_literal]; mov edx,gk_literal_end-gk_literal; call obj_get
-    test rax,rax; jz .gpee_var
-    mov r14,rax
-    mov rdi,r13; lea rsi,[rip+gk_literal]; mov edx,gk_literal_end-gk_literal; call obj_get
-    test rax,rax; jz .gpee_no
-    mov r15,rax
-    mov rdi,[r14+8]; mov rsi,[r14+16]; mov rdx,[r15+8]; mov ecx,dword ptr [r15+16]; call span_eq
-    test eax,eax; jz .gpee_no
-    # Type is part of literal identity.
-    mov rdi,r12; lea rsi,[rip+gk_type]; mov edx,gk_type_end-gk_type; call obj_get
-    test rax,rax; jz .gpee_no
-    mov r14,rax
-    mov rdi,r13; lea rsi,[rip+gk_type]; mov edx,gk_type_end-gk_type; call obj_get
-    test rax,rax; jz .gpee_no
-    mov rdi,r14; call g_type_from_node; mov r15d,eax
-    mov rdi,rax                             # overwritten below; retain symmetry via second parse
-    mov rdi,r13; lea rsi,[rip+gk_type]; mov edx,gk_type_end-gk_type; call obj_get
-    mov rdi,rax; call g_type_from_node
-    cmp eax,r15d; sete al; movzx eax,al
-    jmp .gpee_done
-
-.gpee_var:
-    mov rdi,r12; lea rsi,[rip+gk_var]; mov edx,gk_var_end-gk_var; call obj_get
-    test rax,rax; jz .gpee_op
-    mov r14,rax
-    mov rdi,r13; lea rsi,[rip+gk_var]; mov edx,gk_var_end-gk_var; call obj_get
-    test rax,rax; jz .gpee_no
-    mov rdi,[r14+8]; mov rsi,[r14+16]; mov rdx,[rax+8]; mov ecx,dword ptr [rax+16]; call span_eq
-    jmp .gpee_done
-
-.gpee_op:
-    mov rdi,r12; call g_phys_fp_expr_is_shareable_op
-    test eax,eax; jz .gpee_no
-    mov rdi,r13; call g_phys_fp_expr_is_shareable_op
-    test eax,eax; jz .gpee_no
-    mov rdi,r12; lea rsi,[rip+gk_op]; mov edx,gk_op_end-gk_op; call obj_get
-    mov r14,rax
-    mov rdi,r13; lea rsi,[rip+gk_op]; mov edx,gk_op_end-gk_op; call obj_get
-    mov r15,rax
-    mov rdi,[r14+8]; mov rsi,[r14+16]; mov rdx,[r15+8]; mov ecx,dword ptr [r15+16]; call span_eq
-    test eax,eax; jz .gpee_no
-    mov rdi,r12; lea rsi,[rip+gk_args]; mov edx,gk_args_end-gk_args; call obj_get
-    test rax,rax; jz .gpee_no
-    mov r14,[rax+24]; test r14,r14; jz .gpee_no
-    mov rbx,[r14+32]
-    test rbx,rbx; jz .gpee_a_arity_ready
-    cmp qword ptr [rbx+32],0; jne .gpee_no
-.gpee_a_arity_ready:
-    mov rdi,r13; lea rsi,[rip+gk_args]; mov edx,gk_args_end-gk_args; call obj_get
-    test rax,rax; jz .gpee_no
-    mov r15,[rax+24]; test r15,r15; jz .gpee_no
-    mov r13,[r15+32]
-    test r13,r13; jz .gpee_b_arity_ready
-    cmp qword ptr [r13+32],0; jne .gpee_no
-.gpee_b_arity_ready:
-    mov rdi,r14; mov rsi,r15; call g_phys_expr_equal
-    test eax,eax; jz .gpee_no
-    test rbx,rbx; jz .gpee_unary_tail
-    test r13,r13; jz .gpee_no
-    mov rdi,rbx; mov rsi,r13; call g_phys_expr_equal
-    jmp .gpee_done
-.gpee_unary_tail:
-    test r13,r13; setz al; movzx eax,al
-    jmp .gpee_done
-.gpee_yes:
-    mov eax,1; jmp .gpee_done
-.gpee_no:
-    xor eax,eax
-.gpee_done:
-    pop r15; pop r14; pop r13; pop r12; pop rbx; ret
-
-# rdi=expr -> eax arithmetic operation count for shareable strict FP subtree.
-g_phys_fp_expr_cost:
+# rdi=expr -> eax represented operation count for a shareable numeric ValueFact subtree.
+g_phys_value_expr_cost:
     push rbx; push r12; push r13
     mov r12,rdi
-    mov rdi,r12; call g_phys_fp_expr_is_shareable_op
+    mov rdi,r12; call g_phys_value_expr_is_shareable_op
     test eax,eax; jz .gpfec_leaf
+    mov rdi,r12; call g_phys_episode_load_source
+    test rax,rax; jz .gpfec_args
+    mov rdi,rax; call g_phys_value_expr_cost
+    inc eax; jmp .gpfec_done
+.gpfec_args:
     mov rdi,r12; lea rsi,[rip+gk_args]; mov edx,gk_args_end-gk_args; call obj_get
     test rax,rax; jz .gpfec_leaf
     mov r12,[rax+24]; test r12,r12; jz .gpfec_leaf
     mov r13,[r12+32]
-    mov rdi,r12; call g_phys_fp_expr_cost; mov ebx,eax
+    mov rdi,r12; call g_phys_value_expr_cost; mov ebx,eax
     test r13,r13; jz .gpfec_unary
-    mov rdi,r13; call g_phys_fp_expr_cost
+    mov rdi,r13; call g_phys_value_expr_cost
     add eax,ebx; inc eax; jmp .gpfec_done
 .gpfec_unary:
     mov eax,ebx; inc eax; jmp .gpfec_done
@@ -7094,10 +8548,12 @@ g_phys_predicate_cost:
     mov r13,[r14+32]
     mov rdi,r14; call g_infer_expr
     cmp eax,GTYPE_BOOL; je .gppc_child_bool
-    cmp eax,GTYPE_F32; je .gppc_child_fp
-    cmp eax,GTYPE_F64; jne .gppc_child_next
-.gppc_child_fp:
-    mov rdi,r14; call g_phys_fp_expr_cost
+    cmp eax,GTYPE_F32; je .gppc_child_numeric
+    cmp eax,GTYPE_F64; je .gppc_child_numeric
+    cmp eax,GTYPE_U64; je .gppc_child_numeric
+    cmp eax,GTYPE_I64; jne .gppc_child_next
+.gppc_child_numeric:
+    mov rdi,r14; call g_phys_value_expr_cost
     add ebx,eax
     jmp .gppc_child_next
 .gppc_child_bool:
@@ -7114,17 +8570,120 @@ g_phys_predicate_cost:
 .gppc_done:
     pop r14; pop r13; pop r12; pop rbx; ret
 
+# rdi=parent -> eax bit 0: borrowed children; bit 1: one equal-child evaluation.
+# No mathematical rewrite, runtime metadata or alternative emitter is created.
+g_phys_children_are_borrowed:
+    push rbx; push r12; push r13; push r14; push r15
+    mov r12,rdi
+    call g_infer_expr; mov r13d,eax
+    mov rdi,r12; lea rsi,[rip+gk_args]; mov edx,gk_args_end-gk_args; call obj_get
+    test rax,rax; jz .gpcab_no
+    mov r14,[rax+24]; test r14,r14; jz .gpcab_no
+    mov r15,[r14+32]; test r15,r15; jz .gpcab_no
+    cmp qword ptr [r15+32],0; jne .gpcab_no
+    mov rdi,r14; call g_infer_expr; mov ebx,eax
+    mov rdi,r15; call g_infer_expr; cmp eax,ebx; jne .gpcab_no
+    cmp r13d,GTYPE_BOOL; je .gpcab_compare
+    cmp ebx,r13d; jne .gpcab_no
+    cmp ebx,GTYPE_F32; je .gpcab_numeric
+    cmp ebx,GTYPE_F64; jne .gpcab_no
+.gpcab_numeric:
+    mov rdi,r12; call g_phys_value_expr_is_shareable_op
+    test eax,eax; jz .gpcab_done
+    cmp dword ptr [rip+g_phys_cse_memory_carrier],0; jne .gpcab_done
+    mov rdi,r14; mov rsi,r15; call g_phys_expr_equal
+    shl eax,1; or eax,1; jmp .gpcab_done
+.gpcab_compare:
+    cmp ebx,GTYPE_I64; jb .gpcab_no
+    cmp ebx,GTYPE_F64; ja .gpcab_no
+    mov rdi,r12; lea rsi,[rip+gk_op]; mov edx,gk_op_end-gk_op; call obj_get
+    test rax,rax; jz .gpcab_no
+    mov rdi,[rax+8]; mov rsi,[rax+16]; call g_is_compare_op; jmp .gpcab_done
+.gpcab_no: xor eax,eax
+.gpcab_done: pop r15; pop r14; pop r13; pop r12; pop rbx; ret
+
+# Shared top-level select guards already have one Physical-Region consumer.
+# Count only members with current disjoint next carriers; no syntax is rewritten.
+g_phys_predicate_guard_uses:
+    push rbx; push r12; push r13; push r14; push r15
+    mov r12,rdi; xor r13d,r13d; xor ebx,ebx
+    cmp dword ptr [rip+g_phys_cse_memory_carrier],0; jne .gppgu_done
+    cmp dword ptr [rip+g_phys_stack_episode],0; jne .gppgu_done
+.gppgu_loop:
+    cmp ebx,[rip+g_reg_iter_total]; jae .gppgu_done
+    # Repeated guard consumers are a logical relation. Carrier closure has
+    # not run yet; querying next-register assignment here made this benefit
+    # disappear merely because state residency now starts in the frame.
+    # g_phys_build_guard_regions proves the completed physical map separately.
+    mov eax,ebx; shl rax,5; mov r14,[rip+g_states_ptr]; add r14,rax
+    cmp dword ptr [r14+28],-1; je .gppgu_next
+    mov rdi,[rip+g_reg_iter_update_obj]; mov rsi,[r14]; mov edx,[r14+8]; call obj_get
+    test rax,rax; jz .gppgu_next
+    mov r15,rax
+    mov rdi,r15; lea rsi,[rip+gk_op]; mov edx,gk_op_end-gk_op; call obj_get
+    test rax,rax; jz .gppgu_next
+    mov rdi,[rax+8]; mov rsi,[rax+16]; lea rdx,[rip+gv_select]; mov ecx,gv_select_end-gv_select; call span_eq
+    test eax,eax; jz .gppgu_next
+    mov rdi,r15; lea rsi,[rip+gk_args]; mov edx,gk_args_end-gk_args; call obj_get
+    test rax,rax; jz .gppgu_next
+    mov rdi,[rax+24]; mov rsi,r12; call g_phys_predicate_equal
+    add r13d,eax
+.gppgu_next: inc ebx; jmp .gppgu_loop
+.gppgu_done: mov eax,r13d; pop r15; pop r14; pop r13; pop r12; pop rbx; ret
+
 # rdi=expression, esi=expected type. Walk once and count exact repeated
 # operator ValueFacts across every next-state expression.
 g_phys_cse_note_tree:
+    mov edx,1
+g_phys_cse_note_operand:
     push rbx; push r12; push r13; push r14; push r15
+    sub rsp,16
+    mov eax,[rip+g_phys_cse_conditional_visit]; mov [rsp],eax
+    mov [rsp+4],edx
     mov r12,rdi; mov r13d,esi
     test r12,r12; jz .gpcnt_done
     cmp qword ptr [r12],J_OBJECT; jne .gpcnt_done
 
+    mov rdi,r12; call g_phys_episode_load_source
+    test rax,rax; jz .gpcnt_args
+    mov rdi,rax; mov esi,r13d; call g_phys_cse_note_tree
+.gpcnt_args:
+    # An episode-wide carrier cannot cross a lazy control edge. Only the
+    # unconditional condition/left operand introduces facts into this lifetime.
+    # Conditional children may consume those dominating facts, never introduce
+    # an arm-local fact into unconditional residency. This admission fact is
+    # shared by register and packet memory carriers.
+    mov rdi,r12; lea rsi,[rip+gk_op]; mov edx,gk_op_end-gk_op; call obj_get
+    test rax,rax; jz .gpcnt_eager_args
+    mov r14,rax
+    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_select]; mov ecx,gv_select_end-gv_select; call span_eq
+    test eax,eax; jnz .gpcnt_control
+    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_and]; mov ecx,gv_and_end-gv_and; call span_eq
+    test eax,eax; jnz .gpcnt_control
+    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_or]; mov ecx,gv_or_end-gv_or; call span_eq
+    test eax,eax; jz .gpcnt_eager_args
+.gpcnt_control:
+    mov rdi,r12; lea rsi,[rip+gk_args]; mov edx,gk_args_end-gk_args; call obj_get
+    test rax,rax; jz .gpcnt_done
+    mov rdi,[rax+24]; test rdi,rdi; jz .gpcnt_done
+    mov r14,rdi; call g_infer_expr; mov esi,eax; mov rdi,r14; call g_phys_cse_note_tree
+    mov r14,[r14+32]
+    or dword ptr [rip+g_phys_cse_conditional_visit],1
+.gpcnt_control_uses:
+    test r14,r14; jz .gpcnt_control_self
+    mov r15,[r14+32]
+    mov rdi,r14; call g_infer_expr; mov esi,eax; mov rdi,r14; call g_phys_cse_note_tree
+    mov r14,r15; jmp .gpcnt_control_uses
+.gpcnt_control_self:
+    mov eax,[rsp]; mov [rip+g_phys_cse_conditional_visit],eax
+    jmp .gpcnt_note_self
+.gpcnt_eager_args:
+    mov rdi,r12; call g_phys_children_are_borrowed
+    mov edx,eax; and eax,1; xor eax,1; mov [rsp+8],eax
+    shr edx,1; mov [rsp+12],edx
     # Graph traversal and residency eligibility are separate facts. Every
-    # operator edge is visited. Strict FP arithmetic and BOOL predicates are
-    # both ordinary episode-scoped ValueFacts; select itself remains a control
+    # operator edge is visited. Numeric arithmetic and BOOL predicates are
+    # ordinary episode-scoped ValueFacts; select itself remains a control
     # consumer rather than a cacheable value.
     mov rdi,r12; lea rsi,[rip+gk_args]; mov edx,gk_args_end-gk_args; call obj_get
     test rax,rax; jz .gpcnt_note_self
@@ -7134,19 +8693,23 @@ g_phys_cse_note_tree:
     mov r15,[r14+32]
     mov rdi,r14; call g_infer_expr; mov ebx,eax
     test ebx,ebx; jz .gpcnt_child_next
-    mov rdi,r14; mov esi,ebx; call g_phys_cse_note_tree
+    mov rdi,r14; mov esi,ebx; mov edx,[rsp+8]; call g_phys_cse_note_operand
 .gpcnt_child_next:
+    cmp dword ptr [rsp+12],0; jne .gpcnt_note_self
     mov r14,r15; jmp .gpcnt_child_loop
 
 .gpcnt_note_self:
     cmp r13d,GTYPE_BOOL; je .gpcnt_self_bool
-    cmp r13d,GTYPE_F32; je .gpcnt_self_fp
-    cmp r13d,GTYPE_F64; jne .gpcnt_done
-.gpcnt_self_fp:
-    mov rdi,r12; call g_phys_fp_expr_is_shareable_op
+    cmp r13d,GTYPE_F32; je .gpcnt_self_numeric
+    cmp r13d,GTYPE_F64; je .gpcnt_self_numeric
+    cmp r13d,GTYPE_U64; je .gpcnt_self_numeric
+    cmp r13d,GTYPE_I64; jne .gpcnt_done
+.gpcnt_self_numeric:
+    mov rdi,r12; call g_phys_value_expr_is_shareable_op
     test eax,eax; jz .gpcnt_done
     jmp .gpcnt_scan_start
 .gpcnt_self_bool:
+    cmp dword ptr [rip+g_phys_cse_memory_carrier],0; jne .gpcnt_done
     # Only predicate-producing BOOL expressions are cacheable; literals and
     # arbitrary BOOL leaves remain direct operands.
     mov rdi,r12; lea rsi,[rip+gk_op]; mov edx,gk_op_end-gk_op; call obj_get
@@ -7172,38 +8735,62 @@ g_phys_cse_note_tree:
     call g_phys_predicate_equal
 .gpcnt_equal_done:
     test eax,eax; jz .gpcnt_next
+    # The condition can borrow only producers refreshed at its own frontier.
+    test dword ptr [rip+g_phys_cse_conditional_visit],2; jz .gpcnt_use_admitted
+    mov rdi,r12; call g_phys_plan_control
+    test eax,eax; jz .gpcnt_done
+.gpcnt_use_admitted:
     mov rax,qword ptr [rip+g_phys_cse_candidate_uses_ptr]; inc dword ptr [rax+rbx*4]
+    mov rax,[rip+g_phys_cse_candidate_moves_ptr]; mov edx,[rsp+4]; add [rax+rbx*4],edx
     jmp .gpcnt_done
 .gpcnt_next:
     inc ebx; jmp .gpcnt_scan
 .gpcnt_new:
+    cmp dword ptr [rip+g_phys_cse_memory_carrier],0; jne 992f
+    cmp dword ptr [rip+g_phys_cse_conditional_visit],0; je 992f
+    mov rdi,r12; call g_phys_value_is_input
+    test eax,eax; jnz 992f
+    test dword ptr [rip+g_phys_cse_conditional_visit],2; jz .gpcnt_done
+    mov rdi,r12; call g_phys_plan_control
+    test eax,eax; jz .gpcnt_done
+992:
     cmp ebx,dword ptr [rip+g_phys_fact_capacity]; jae .gpcnt_done
     mov rax,qword ptr [rip+g_phys_cse_candidate_expr_ptr]; mov [rax+rbx*8],r12
     mov rax,qword ptr [rip+g_phys_cse_candidate_type_ptr]; mov dword ptr [rax+rbx*4],r13d
     mov rax,qword ptr [rip+g_phys_cse_candidate_uses_ptr]; mov dword ptr [rax+rbx*4],1
+    mov rax,[rip+g_phys_cse_candidate_moves_ptr]; mov edx,[rsp+4]; mov [rax+rbx*4],edx
     mov rdi,r12
     cmp r13d,GTYPE_BOOL; je .gpcnt_cost_bool
-    call g_phys_fp_expr_cost
+    call g_phys_value_expr_cost
     jmp .gpcnt_cost_done
 .gpcnt_cost_bool:
     call g_phys_predicate_cost
 .gpcnt_cost_done:
+    test eax,eax; jnz .gpcnt_cost_ready
+    mov rdi,r12; call g_phys_value_is_input
+.gpcnt_cost_ready:
     mov rdx,qword ptr [rip+g_phys_cse_candidate_cost_ptr]; mov dword ptr [rdx+rbx*4],eax
     inc dword ptr [rip+g_phys_cse_candidate_count]
 .gpcnt_done:
+    mov eax,[rsp]; mov [rip+g_phys_cse_conditional_visit],eax
+    add rsp,16
     pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
-# Shared XMM authority for persistent CSE and immutable constants.  State
-# carriers, already retained shared facts, and the proven peak anonymous
-# pressure all compete in one compile-time physical pool.
+# Shared XMM authority for persistent scalar payloads, immutable constants,
+# old-StateFacts and retained next-StateFacts. State carriers, already retained same-domain
+# facts, and the measured anonymous peak compete in one compile-time physical
+# pool. No fact class receives guessed pressure credit.
 g_phys_shared_xmm_alloc:
     push rbx; push r12; push r13
     mov ebx,dword ptr [rip+g_phys_fp_reserved_mask]
+    or ebx,edi                         # caller recipe role exclusions
     xor r12d,r12d
 .gpsxa_cse:
     cmp r12d,dword ptr [rip+g_phys_cse_resident_count]; jae .gpsxa_const_start
     mov rax,qword ptr [rip+g_phys_cse_resident_reg_ptr]; mov ecx,dword ptr [rax+r12*4]
+    test ecx,ecx; js .gpsxa_cse_next
     mov eax,1; shl eax,cl; or ebx,eax
+.gpsxa_cse_next:
     inc r12d; jmp .gpsxa_cse
 .gpsxa_const_start:
     xor r12d,r12d
@@ -7228,94 +8815,671 @@ g_phys_shared_xmm_alloc:
 .gpsxa_done:
     pop r13; pop r12; pop rbx; ret
 
-# Select repeated ValueFacts by saved arithmetic work. CSE wins carrier
-# competition before constants because recomputing a multi-op fact consumes
-# both execution ports and transient carrier pressure.
+# Compile-time Physical DAG residency. Search owns no new semantic IR.
 g_phys_cse_finalize:
     push rbx; push r12; push r13; push r14; push r15
+    sub rsp,32
     mov dword ptr [rip+g_phys_cse_resident_count],0
-.gpcsef_pick:
-    mov ebx,-1
-    xor r12d,r12d                         # best score
+    mov edi,[rip+g_phys_cse_candidate_count]
+    mov [rsp+8],edi
+    test edi,edi; jz .gpa_done
+    call physical_plan_alloc
+    test rax,rax; jz .gpa_done
+    mov r12,rax
     xor r13d,r13d
-.gpcsef_scan:
-    cmp r13d,dword ptr [rip+g_phys_cse_candidate_count]; jae .gpcsef_scan_done
-    mov rax,qword ptr [rip+g_phys_cse_candidate_uses_ptr]; mov r14d,dword ptr [rax+r13*4]
-    cmp r14d,2; jb .gpcsef_next
-    mov rax,qword ptr [rip+g_phys_cse_candidate_cost_ptr]; mov r15d,dword ptr [rax+r13*4]
-    test r15d,r15d; jz .gpcsef_next
-    # Parent and child ValueFacts may both remain resident when each has future
-    # consumers.  Real carrier pressure, not an antichain convention, decides
-    # whether retaining both is profitable/possible.
-    shl r14d,8
-    add r14d,r15d
-    cmp r14d,r12d; jle .gpcsef_next
-    mov r12d,r14d; mov ebx,r13d
-.gpcsef_next:
-    inc r13d; jmp .gpcsef_scan
-.gpcsef_scan_done:
-    cmp ebx,0; jl .gpcsef_done
+    xor ebx,ebx
+.gpa_build:
+    cmp ebx,[rip+g_phys_cse_candidate_count]; jae .gpa_search
+    mov rax,[rip+g_phys_cse_candidate_cost_ptr]
+    cmp dword ptr [rax+rbx*4],0; je .gpa_next
+    mov rax,[rip+g_phys_cse_candidate_type_ptr]
+    mov r14d,[rax+rbx*4]
+    cmp dword ptr [rip+g_phys_cse_memory_carrier],0; je .gpa_type_ok
+    cmp r14d,GTYPE_I64; jb .gpa_next
+    cmp r14d,GTYPE_F64; ja .gpa_next
+.gpa_type_ok:
+    mov rax,[rip+g_phys_cse_candidate_uses_ptr]
+    mov r15d,[rax+rbx*4]
+    mov rax,[rip+g_phys_cse_candidate_expr_ptr]
+    mov rdi,[rax+rbx*8]
+    call g_phys_plan_invariant
+    mov [rsp],eax
+    test eax,eax; jnz .gpa_admit
+    cmp r15d,2; jb .gpa_next
+.gpa_admit:
+    mov rax,[rip+g_phys_cse_candidate_expr_ptr]
+    mov rdi,[rax+rbx*8]
+    call g_phys_plan_expr_ticks
+    imul rdx,r13,PPR_SIZE
+    lea rdx,[r12+rdx]
+    mov [rdx+32],rax
+    mov [rdx+24],ebx
+    mov [rdx+28],r14d
+    mov ecx,[rsp]
+    mov [rdx+PPR_INVARIANT],ecx
+    mov dword ptr [rdx+8],1
+    mov dword ptr [rdx+12],0
+    cmp dword ptr [rip+g_phys_cse_memory_carrier],0; jne .gpa_gain
+    mov dword ptr [rdx+12],1
+.gpa_gain:
+    mov ecx,r15d
+    cmp dword ptr [rsp],0; jne .gpa_input_gain
+    dec ecx
+.gpa_input_gain:
+    imul rax,rcx
+    cmp dword ptr [rip+g_phys_cse_memory_carrier],0; je .gpa_move_price
+    mov ecx,r15d
+    cmp dword ptr [rsp],0; jne .gpa_memory_ticks
+    inc ecx
+.gpa_memory_ticks:
+    imul rcx,rcx,PRC_LOAD_AGU_TICKS
+    sub rax,rcx
+    jmp .gpa_gain_ready
+.gpa_move_price:
+    mov ecx,PRC_FP_CONV_TICKS
+    cmp r14d,GTYPE_U64; je .gpa_move_ticks
+    cmp r14d,GTYPE_I64; je .gpa_move_ticks
+    mov ecx,PRC_FP_ADD_TICKS
+.gpa_move_ticks:
+    mov rdi,[rip+g_phys_cse_candidate_moves_ptr]
+    mov edi,[rdi+rbx*4]
+    mov [rdx+56],edi
+    imul rcx,rdi
+    sub rax,rcx
+.gpa_gain_ready:
+    mov dword ptr [rdx+60],0
+    cmp r14d,GTYPE_BOOL; jne .gpa_control_gain_ready
+    push rax; push rdx
+    mov rdi,[rip+g_phys_cse_candidate_expr_ptr]; mov rdi,[rdi+rbx*8]
+    call g_phys_predicate_guard_uses
+    pop rdx
+    mov [rdx+60],eax
+    cmp eax,1; jbe .gpa_control_gain_none
+    dec eax; imul rax,rax,2*PRC_BRANCH_TICKS
+    add [rsp],rax
+.gpa_control_gain_none: pop rax
+.gpa_control_gain_ready:
+    test rax,rax; jle .gpa_next
+    mov [rdx],rax
+    inc r13d
+.gpa_next:
+    inc ebx; jmp .gpa_build
+.gpa_search:
+    mov rdi,r13
+    imul rdi,r13
+    shl rdi,3
+    mov [rsp+24],rdi
+    call physical_plan_bytes_alloc
+    test rax,rax; jz .gpa_free
+    mov [rsp+16],rax
+    mov rdi,r12
+    mov esi,r13d
+    mov rdx,rax
+    call g_phys_plan_relations
+    call g_phys_plan_budgets
+    cmp dword ptr [rip+g_phys_cse_memory_carrier],0; je .gpa_reg_budget
+    mov edx,r13d
+    xor ecx,ecx
+.gpa_reg_budget:
+    mov rdi,r12
+    mov esi,r13d
+    lea r8,[rip+g_phys_plan_score]
+    mov r9,[rsp+16]
+    xor eax,eax
+    cmp dword ptr [rip+g_phys_cse_memory_carrier],0; je .gpa_final_cost_ready
+    lea rax,[rip+g_phys_plan_packet_cost]
+.gpa_final_cost_ready:
+    sub rsp,16
+    mov [rsp],rax
+    call physical_plan_resolve
+    add rsp,16
+    mov rdi,r12
+    mov esi,r13d
+    mov rdx,[rsp+16]
+    call g_phys_plan_score
+    xor ebx,ebx
+.gpa_realize:
+    cmp ebx,r13d; jae .gpa_release_matrix
+    imul r15,rbx,PPR_SIZE
+    add r15,r12
+    cmp dword ptr [r15+16],0; je .gpa_realize_next
+    cmp dword ptr [r15+PPR_INVARIANT],0; je .gpa_fact_live
+    cmp qword ptr [r15+40],0; je .gpa_realize_next
+.gpa_fact_live:
+    # Parent reuse can erase a child's independent consumers. With no scalar
+    # reuse or shared-control benefit, the parent owns its one producer directly.
+    cmp dword ptr [rip+g_phys_cse_memory_carrier],0; jne .gpa_live_resident
+    cmp dword ptr [r15+PPR_INVARIANT],0; jne .gpa_live_resident
+    cmp qword ptr [r15+40],1; ja .gpa_live_resident
+    cmp dword ptr [r15+60],1; jbe .gpa_realize_next
+.gpa_live_resident:
+    mov r14d,[r15+24]
+    cmp dword ptr [rip+g_phys_cse_memory_carrier],0; je .gpa_alloc_reg
+    mov eax,[rip+g_phys_cse_resident_count]
+    jmp .gpa_assign
+.gpa_alloc_reg:
+    xor edi,edi
     call g_phys_shared_xmm_alloc
-    cmp eax,0; jge .gpcsef_have_carrier
-    mov dword ptr [rip+g_phys_shared_pressure_exhausted],1
-    jmp .gpcsef_done
-.gpcsef_have_carrier:
-    mov r14d,dword ptr [rip+g_phys_cse_resident_count]
-    mov rdx,qword ptr [rip+g_phys_cse_resident_reg_ptr]; mov dword ptr [rdx+r14*4],eax
-    mov rdx,qword ptr [rip+g_phys_cse_candidate_expr_ptr]; mov rcx,[rdx+rbx*8]
-    mov rdx,qword ptr [rip+g_phys_cse_resident_expr_ptr]; mov [rdx+r14*8],rcx
-    mov rdx,qword ptr [rip+g_phys_cse_candidate_type_ptr]; mov ecx,dword ptr [rdx+rbx*4]
-    mov rdx,qword ptr [rip+g_phys_cse_resident_type_ptr]; mov dword ptr [rdx+r14*4],ecx
-    mov rdx,qword ptr [rip+g_phys_cse_candidate_uses_ptr]; mov dword ptr [rdx+rbx*4],0
+.gpa_assign:
+    test eax,eax; js .gpa_realize_next
+    mov ecx,[rip+g_phys_cse_resident_count]
+    mov rdx,[rip+g_phys_cse_resident_reg_ptr]; mov [rdx+rcx*4],eax
+    mov rdx,[rip+g_phys_cse_candidate_cost_ptr]; mov eax,[rdx+r14*4]
+    mov rdx,[rip+g_phys_cse_resident_cost_ptr]; mov [rdx+rcx*4],eax
+    mov rdx,[rip+g_phys_cse_candidate_expr_ptr]; mov rax,[rdx+r14*8]
+    mov rdx,[rip+g_phys_cse_resident_expr_ptr]; mov [rdx+rcx*8],rax
+    mov eax,[r15+28]
+    mov rdx,[rip+g_phys_cse_resident_type_ptr]; mov [rdx+rcx*4],eax
+    mov rdx,[rip+g_phys_cse_resident_expr_ptr]; mov rdi,[rdx+rcx*8]
+    push rcx; call g_phys_plan_frontier; pop rcx
+    mov rdx,[rip+g_phys_cse_resident_frontier_ptr]; mov [rdx+rcx*4],eax
     inc dword ptr [rip+g_phys_cse_resident_count]
-    jmp .gpcsef_pick
-.gpcsef_done:
+.gpa_realize_next:
+    inc ebx; jmp .gpa_realize
+.gpa_release_matrix:
+    mov rdi,[rsp+16]
+    mov rsi,[rsp+24]
+    call physical_plan_bytes_free
+.gpa_free:
+    mov rdi,r12
+    mov esi,[rsp+8]
+    call physical_plan_free
+.gpa_done:
+    add rsp,32
     pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
+# Real bank slack, excluding existing semantic state, residents and measured
+# transient peaks. Shared allocators remain the final physical authority.
+g_phys_plan_budgets:
+    mov r8d,G_PHYS_INT_TEMP_MASK_INIT
+    mov eax,[rip+g_phys_int_reserved_mask]
+    not eax; and r8d,eax
+    mov r9d,[rip+g_phys_fp_reserved_mask]
+    not r9d; and r9d,[rip+g_phys_fp_all_mask]
+    xor ecx,ecx
+.gpab_residents:
+    cmp ecx,[rip+g_phys_cse_resident_count]; jae .gpab_const_start
+    mov rax,[rip+g_phys_cse_resident_reg_ptr]
+    mov eax,[rax+rcx*4]
+    test eax,eax; js .gpab_resident_next
+    btr r9d,eax
+.gpab_resident_next:
+    inc ecx; jmp .gpab_residents
+.gpab_const_start:
+    xor ecx,ecx
+.gpab_const:
+    cmp ecx,[rip+g_phys_const_resident_count]; jae .gpab_count
+    mov rax,[rip+g_phys_const_resident_reg_ptr]
+    mov eax,[rax+rcx*4]
+    btr r9d,eax
+    inc ecx; jmp .gpab_const
+.gpab_count:
+    xor edx,edx
+.gpab_count_int:
+    test r8d,r8d; jz .gpab_count_fp_start
+    lea eax,[r8-1]; and r8d,eax
+    inc edx; jmp .gpab_count_int
+.gpab_count_fp_start:
+    xor ecx,ecx
+.gpab_count_fp:
+    test r9d,r9d; jz .gpab_slack
+    lea eax,[r9-1]; and r9d,eax
+    inc ecx; jmp .gpab_count_fp
+.gpab_slack:
+    sub edx,[rip+g_phys_int_temp_peak]
+    jns .gpab_fp_slack
+    xor edx,edx
+.gpab_fp_slack:
+    sub ecx,[rip+g_phys_fp_temp_peak]
+    jns .gpab_done
+    xor ecx,ecx
+.gpab_done: ret
 
-# Order retained episode facts from dependency leaves toward parents. Structural
-# work cost is strictly larger for a represented parent than for any represented
-# child, so ascending cost is a dependency-compatible emission order without a
-# second graph or runtime scheduler. Source operation order is preserved inside
-# each strict ValueFact; only already-proved shared facts change materialization
-# lifetime. Carrier identity travels with the fact.
+# Target resource-tick estimate of the exact ordered subtree. This is a cost
+# estimate, not a latency oracle. Identity loads price their actual source.
+g_phys_plan_expr_ticks:
+    push rbx; push r12; push r13; push r14
+    mov r12,rdi
+    call g_phys_value_is_input
+    test eax,eax; jz .gpaw_op
+    mov eax,PRC_LOAD_AGU_TICKS
+    cmp dword ptr [rip+g_phys_cse_memory_carrier],0; je .gpaw_ret
+    # Packet input production also broadcasts and materializes the uniform
+    # value. Residency erases these actual transports from every hot packet.
+    add eax,PRC_FP_CONV_TICKS+PRC_LOAD_AGU_TICKS
+    jmp .gpaw_ret
+.gpaw_op:
+    mov rdi,r12; lea rsi,[rip+gk_op]; mov edx,gk_op_end-gk_op; call obj_get
+    test rax,rax; jz .gpaw_zero
+    mov r14,rax
+    mov rdi,r12; call g_phys_episode_load_source
+    test rax,rax; jz .gpaw_price
+    mov rdi,rax; call g_phys_plan_expr_ticks; jmp .gpaw_ret
+.gpaw_price:
+    mov rdi,r12; call g_infer_expr
+    mov ebx,PRC_INT_ALU_TICKS
+    cmp eax,GTYPE_F32; je .gpaw_fp
+    cmp eax,GTYPE_F64; jne .gpaw_mul
+.gpaw_fp:
+    mov ebx,PRC_FP_ADD_TICKS
+.gpaw_mul:
+    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_mul]; mov ecx,gv_mul_end-gv_mul; call span_eq
+    test eax,eax; jz .gpaw_div
+    mov ebx,PRC_INT_MUL_TICKS
+    jmp .gpaw_children
+.gpaw_div:
+    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_div]; mov ecx,gv_div_end-gv_div; call span_eq
+    test eax,eax; jnz .gpaw_div_price
+    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_mod]; mov ecx,gv_mod_end-gv_mod; call span_eq
+    test eax,eax; jz .gpaw_math
+.gpaw_div_price:
+    mov rdi,r12; call g_infer_expr
+    mov ebx,PRC_INT_DIV_TICKS
+    cmp eax,GTYPE_F32; je .gpaw_fp_div
+    cmp eax,GTYPE_F64; jne .gpaw_math
+.gpaw_fp_div:
+    mov ebx,PRC_FP_DIV_TICKS
+.gpaw_math:
+    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_sqrt]; mov ecx,gv_sqrt_end-gv_sqrt; call span_eq
+    test eax,eax; jz .gpaw_after_sqrt
+    mov ebx,PRC_FP_DIV_TICKS
+    jmp .gpaw_children
+.gpaw_after_sqrt:
+    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_sin]; mov ecx,gv_sin_end-gv_sin; call span_eq
+    test eax,eax; jz .gpaw_after_sin
+    mov ebx,OFFSET FLAT:gc_sin_f64_size
+    imul ebx,ebx,PRC_FRONTEND_BYTE_TICKS
+    jmp .gpaw_children
+.gpaw_after_sin:
+    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_cos]; mov ecx,gv_cos_end-gv_cos; call span_eq
+    test eax,eax; jz .gpaw_after_cos
+    mov ebx,OFFSET FLAT:gc_cos_f64_size
+    imul ebx,ebx,PRC_FRONTEND_BYTE_TICKS
+    jmp .gpaw_children
+.gpaw_after_cos:
+    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_exp]; mov ecx,gv_exp_end-gv_exp; call span_eq
+    test eax,eax; jz .gpaw_after_exp
+    mov ebx,OFFSET FLAT:gc_exp_f64_size
+    imul ebx,ebx,PRC_FRONTEND_BYTE_TICKS
+    jmp .gpaw_children
+.gpaw_after_exp:
+    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+gv_log]; mov ecx,gv_log_end-gv_log; call span_eq
+    test eax,eax; jz .gpaw_after_log
+    mov ebx,OFFSET FLAT:gc_log_f64_size
+    imul ebx,ebx,PRC_FRONTEND_BYTE_TICKS
+    jmp .gpaw_children
+.gpaw_after_log:
+.gpaw_children:
+    cmp dword ptr [rip+g_phys_cse_memory_carrier],0; je .gpaw_child_edges
+    # The existing packet carrier writes each producer and reads its result.
+    add ebx,2*PRC_LOAD_AGU_TICKS
+.gpaw_child_edges:
+    mov rdi,r12; call g_phys_children_are_borrowed; shr eax,1; mov r14d,eax
+    mov rdi,r12; lea rsi,[rip+gk_args]; mov edx,gk_args_end-gk_args; call obj_get
+    test rax,rax; jz .gpaw_value
+    mov r12,[rax+24]
+.gpaw_child:
+    test r12,r12; jz .gpaw_value
+    mov r13,[r12+32]
+    mov rdi,r12; call g_phys_plan_expr_ticks
+    add rbx,rax
+    test r14d,r14d; jnz .gpaw_value
+    mov r12,r13; jmp .gpaw_child
+.gpaw_value:
+    mov rax,rbx; jmp .gpaw_ret
+.gpaw_zero:
+    xor eax,eax
+.gpaw_ret:
+    pop r14; pop r13; pop r12; pop rbx; ret
+
+# Joint score: parent reuse removes the child occurrences which disappeared
+# with it. Descending source-DAG order prevents counting shared work twice.
+# Each retained input removes its remaining transports. Packet slots charge
+# both materialization and every retained read; no free-memory pressure credit.
+g_phys_plan_score:
+    push rbx; push r12; push r13; push r14; push r15
+    sub rsp,16
+    mov [rsp],rdx
+    mov r12,rdi
+    mov r13d,esi
+    xor ebx,ebx
+.gpas_init:
+    cmp ebx,r13d; jae .gpas_start
+    imul rax,rbx,PPR_SIZE
+    mov ecx,[r12+rax+24]
+    mov rdx,[rip+g_phys_cse_candidate_uses_ptr]
+    mov edx,[rdx+rcx*4]
+    mov [r12+rax+40],rdx
+    inc ebx; jmp .gpas_init
+.gpas_start:
+    xor r15d,r15d
+    mov ebx,r13d
+.gpas_parent:
+    dec ebx; js .gpas_done
+    imul r14,rbx,PPR_SIZE
+    add r14,r12
+    cmp dword ptr [r14+16],0; je .gpas_parent
+    mov eax,[r14+PPR_INVARIANT]
+    mov rcx,[r14+40]
+    test eax,eax; jnz .gpas_saved
+    dec rcx
+.gpas_saved:
+    mov rax,[r14+32]
+    imul rax,rcx
+    cmp dword ptr [rip+g_phys_cse_memory_carrier],0; je .gpas_move_price
+    mov rdx,[r14+40]
+    cmp dword ptr [r14+PPR_INVARIANT],0; jne .gpas_memory_ticks
+    inc rdx
+.gpas_memory_ticks:
+    imul rdx,rdx,PRC_LOAD_AGU_TICKS
+    sub rax,rdx
+    jmp .gpas_add
+.gpas_move_price:
+    mov edx,PRC_INT_ALU_TICKS
+    cmp dword ptr [r14+28],GTYPE_U64; je .gpas_move_ticks
+    cmp dword ptr [r14+28],GTYPE_I64; je .gpas_move_ticks
+    mov edx,PRC_FP_ADD_TICKS
+.gpas_move_ticks:
+    mov ecx,[r14+56]; imul rdx,rcx
+    sub rax,rdx
+    mov ecx,[r14+60]; cmp ecx,1; jbe .gpas_add
+    dec ecx; imul rcx,rcx,2*PRC_BRANCH_TICKS
+    add rax,rcx
+.gpas_add:
+    add r15,rax
+    mov rdx,[r14+40]
+    cmp dword ptr [r14+PPR_INVARIANT],0; jne .gpas_removed
+    dec rdx
+.gpas_removed:
+    test rdx,rdx; jle .gpas_parent
+    mov rax,rbx
+    imul rax,r13
+    mov rsi,[rsp]
+    lea rsi,[rsi+rax*8]
+    xor ecx,ecx
+.gpas_discount:
+    cmp ecx,ebx; jae .gpas_parent
+    mov rax,[rsi+rcx*8]
+    imul rax,rdx
+    imul rdi,rcx,PPR_SIZE
+    mov r8,[r12+rdi+40]
+    sub r8,rax
+    jns .gpas_count_ready
+    xor r8d,r8d
+.gpas_count_ready:
+    mov [r12+rdi+40],r8
+    inc ecx; jmp .gpas_discount
+.gpas_done:
+    mov rax,r15
+    add rsp,16
+    pop r15; pop r14; pop r13; pop r12; pop rbx; ret
+
+# Compile-time incidence projection of the SAME ordered ValueFact DAG. Rows
+# count represented descendants. A proved child imports its completed row;
+# search trials never reparse the source or repeat structural identity proofs.
+g_phys_plan_relations:
+    push rbx; push r12; push r13; push r14; push r15
+    mov r12,rdi
+    mov r13d,esi
+    mov r14,rdx
+    xor ebx,ebx
+.gpar_row:
+    cmp ebx,r13d; jae .gpar_done
+    imul rax,rbx,PPR_SIZE
+    mov eax,[r12+rax+24]
+    mov rdi,[rip+g_phys_cse_candidate_expr_ptr]
+    mov rdi,[rdi+rax*8]
+    mov rsi,r12
+    mov edx,ebx
+    mov rcx,r14
+    mov r8d,r13d
+    call g_phys_plan_relation_children
+    inc ebx; jmp .gpar_row
+.gpar_done:
+    pop r15; pop r14; pop r13; pop r12; pop rbx; ret
+
+# rdi=node, rsi=records, edx=row index, rcx=matrix, r8d=row stride.
+g_phys_plan_relation_children:
+    push rbx; push r12; push r13; push r14; push r15
+    sub rsp,16
+    mov r12,rsi
+    mov r13d,edx
+    mov r14,rcx
+    mov r15,rdi
+    mov [rsp+8],r8d
+    mov dword ptr [rsp+12],0
+    call g_phys_episode_load_source
+    test rax,rax; jz .gpar_args
+    mov rdi,rax
+    xor r15d,r15d
+    jmp .gpar_child
+.gpar_args:
+    # An arm-local cache dies at the control edge. Only the unconditional
+    # predicate edge may discount dominating descendants; no lifetime credit
+    # crosses select/and/or merely because the source subtrees are equal.
+    mov rdi,r15; lea rsi,[rip+gk_op]; mov edx,gk_op_end-gk_op; call obj_get
+    test rax,rax; jz .gpar_args_ready
+    mov rbx,rax
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_select]; mov ecx,gv_select_end-gv_select; call span_eq
+    or [rsp+12],eax
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_and]; mov ecx,gv_and_end-gv_and; call span_eq
+    or [rsp+12],eax
+    mov rdi,[rbx+8]; mov rsi,[rbx+16]; lea rdx,[rip+gv_or]; mov ecx,gv_or_end-gv_or; call span_eq
+    or [rsp+12],eax
+.gpar_args_ready:
+    mov rdi,r15; call g_phys_children_are_borrowed; shr eax,1; or [rsp+12],eax
+    mov rdi,r15; lea rsi,[rip+gk_args]; mov edx,gk_args_end-gk_args; call obj_get
+    test rax,rax; jz .gpar_ret
+    mov r15,[rax+24]
+.gpar_loop:
+    test r15,r15; jz .gpar_ret
+    mov rdi,r15
+.gpar_child:
+    mov [rsp],rdi
+    xor ebx,ebx
+.gpar_match:
+    cmp ebx,r13d; jae .gpar_recurse
+    imul rax,rbx,PPR_SIZE
+    lea rcx,[r12+rax]
+    mov eax,[rcx+24]
+    mov rsi,[rip+g_phys_cse_candidate_expr_ptr]
+    mov rsi,[rsi+rax*8]
+    mov rdi,[rsp]
+    cmp rdi,rsi; je .gpar_import
+    cmp dword ptr [rcx+28],GTYPE_BOOL; je .gpar_bool
+    call g_phys_expr_equal; jmp .gpar_equal
+.gpar_bool:
+    call g_phys_predicate_equal
+.gpar_equal:
+    test eax,eax; jnz .gpar_import
+    inc ebx; jmp .gpar_match
+.gpar_import:
+    mov eax,[rsp+8]
+    imul rax,r13
+    lea rdi,[r14+rax*8]
+    inc qword ptr [rdi+rbx*8]
+    mov eax,[rsp+8]
+    imul rax,rbx
+    lea rsi,[r14+rax*8]
+    xor ecx,ecx
+.gpar_import_row:
+    cmp ecx,ebx; jae .gpar_next
+    mov rax,[rsi+rcx*8]
+    add [rdi+rcx*8],rax
+    inc ecx; jmp .gpar_import_row
+.gpar_recurse:
+    mov rdi,[rsp]
+    mov rsi,r12
+    mov edx,r13d
+    mov rcx,r14
+    mov r8d,[rsp+8]
+    call g_phys_plan_relation_children
+.gpar_next:
+    cmp dword ptr [rsp+12],0; jne .gpar_ret
+    test r15,r15; jz .gpar_ret
+    mov r15,[r15+32]
+    jmp .gpar_loop
+.gpar_ret:
+    add rsp,16
+    pop r15; pop r14; pop r13; pop r12; pop rbx; ret
+
+# Residency lifetime comes from the same proof used by actual materialization.
+# A preheader fact removes ALL its hot computations, not only repeated ones.
+g_phys_plan_invariant:
+    cmp dword ptr [rip+g_phys_cse_memory_carrier],0; jne .gpai_packet
+    push rbx; push r12; push r13
+    mov r12,rdi
+    call g_phys_value_is_input
+    test eax,eax; jnz .gpai_done
+    # The scalar episode has several unconditional roots. Each uses the same
+    # shared proof as a packet root; state leaves never pass immutable purity.
+    mov rdi,[rip+g_reg_iter_cond_expr]; mov rsi,r12
+    call g_phys_fact_is_invariant
+    test eax,eax; jnz .gpai_done
+    xor ebx,ebx
+.gpai_state:
+    cmp ebx,[rip+g_reg_iter_total]; jae .gpai_no
+    mov eax,ebx; shl rax,5; mov r13,[rip+g_states_ptr]; add r13,rax
+    cmp dword ptr [r13+28],-1; je .gpai_next
+    mov rdi,[rip+g_reg_iter_update_obj]; mov rsi,[r13]; mov edx,[r13+8]
+    call obj_get
+    test rax,rax; jz .gpai_next
+    mov rdi,rax; mov rsi,r12; call g_phys_fact_is_invariant
+    test eax,eax; jnz .gpai_done
+.gpai_next:
+    inc ebx; jmp .gpai_state
+.gpai_no: xor eax,eax
+.gpai_done: pop r13; pop r12; pop rbx; ret
+.gpai_packet:
+    mov rsi,rdi
+    mov rdi,[rip+g_phys_plan_root]
+    jmp g_phys_fact_is_invariant
+
+# Invocation, current-condition and current-update consumer frontiers derive
+# from the same generation proof. No current value survives a commit unrefreshed.
+g_phys_plan_frontier:
+    push rbx
+    mov rbx,rdi
+    call g_phys_plan_invariant; test eax,eax; jnz .gppf_invariant
+    mov rdi,rbx; call g_phys_plan_control
+    pop rbx; ret
+.gppf_invariant: mov eax,2; pop rbx; ret
+
+# A total producer on an unconditional condition edge can be shared by the
+# subsequent updates. Mutable reads stay separate from immutable purity.
+g_phys_plan_control:
+    push rbx
+    mov rbx,rdi
+    call g_phys_value_is_input; test eax,eax; jnz .gpctrl_ret
+    cmp dword ptr [rip+g_phys_stack_episode],0; jne .gpctrl_no
+    cmp qword ptr [rip+g_reg_iter_cond_expr],0; je .gpctrl_no
+    mov rdi,rbx; call g_semantic_expr_is_total; test eax,eax; jz .gpctrl_ret
+    mov rdi,[rip+g_reg_iter_cond_expr]; mov rsi,rbx; call g_phys_fact_dominates
+    jmp .gpctrl_ret
+.gpctrl_no: xor eax,eax
+.gpctrl_ret: pop rbx; ret
+
+# Same packet generator, disposable bytes. A static work estimate is admitted
+# only after seed and resolved placement meet actual emitted transport/footprint
+# cost. This is compiler work; neither candidate kernel enters the executable.
+g_phys_plan_packet_cost:
+    push rbx; push r12; push r13; push r14; push r15
+    sub rsp,32
+    mov r12,rdi; mov r13d,esi
+    G_EMIT_POSITION rax; mov [rsp],rax
+    mov rax,[rip+g_runtime_temp_bytes_used]; mov [rsp+8],rax
+    mov dword ptr [rip+g_phys_cse_resident_count],0
+    xor ebx,ebx
+.gpapc_install:
+    cmp ebx,r13d; jae .gpapc_generate
+    imul rax,rbx,PPR_SIZE
+    lea r14,[r12+rax]
+    cmp dword ptr [r14+16],0; je .gpapc_next
+    mov eax,[rip+g_phys_cse_resident_count]
+    mov rdx,[rip+g_phys_cse_resident_reg_ptr]; mov [rdx+rax*4],eax
+    mov ecx,[r14+24]
+    mov rdx,[rip+g_phys_cse_candidate_cost_ptr]; mov edi,[rdx+rcx*4]
+    mov rdx,[rip+g_phys_cse_resident_cost_ptr]; mov [rdx+rax*4],edi
+    mov rdx,[rip+g_phys_cse_candidate_expr_ptr]; mov rcx,[rdx+rcx*8]
+    mov rdx,[rip+g_phys_cse_resident_expr_ptr]; mov [rdx+rax*8],rcx
+    mov ecx,[r14+28]
+    mov rdx,[rip+g_phys_cse_resident_type_ptr]; mov [rdx+rax*4],ecx
+    inc dword ptr [rip+g_phys_cse_resident_count]
+.gpapc_next:
+    inc ebx; jmp .gpapc_install
+.gpapc_generate:
+    call g_phys_cse_order_dependencies
+    mov rdi,[rip+g_packet_fact_scope_ptr]
+    mov ecx,[rip+g_phys_cse_resident_count]; xor eax,eax; rep stosd
+    mov dword ptr [rip+g_phys_cse_ready_count],0
+    mov dword ptr [rip+g_packet_fact_scope],1
+    mov dword ptr [rip+g_packet_register_live],0
+    mov dword ptr [rip+g_packet_register_mask],0xfff0
+    mov qword ptr [rip+g_packet_register_skip_expr],0
+    mov qword ptr [rip+g_packet_last_store_end],0
+    mov rdi,[rip+g_phys_plan_root]
+    call g_packet_emit_invariant_root
+    G_EMIT_POSITION r15              # preheader bytes are not hot work
+    mov rdi,[rip+g_phys_plan_root]
+    call g_emit_packet_root
+    test eax,eax; jz .gpapc_invalid
+    G_EMIT_POSITION rax
+    sub rax,r15
+    imul rax,rax,PRC_FRONTEND_BYTE_TICKS
+    mov edx,[rip+g_phys_cse_resident_count]
+    imul edx,[rip+group_lane_factor]
+    shl edx,3
+    add edx,PRC_TRAFFIC_LINE_BYTES-1
+    shr edx,6
+    imul rdx,rdx,PRC_TRAFFIC_LINE_TICKS
+    add rax,rdx
+    jmp .gpapc_rewind
+.gpapc_invalid:
+    mov rax,0x7fffffffffffffff
+.gpapc_rewind:
+    mov rdx,[rsp]; mov [rip+g_emit_ptr],rdx
+    mov rdx,[rsp+8]; mov [rip+g_runtime_temp_bytes_used],rdx
+    mov dword ptr [rip+g_phys_cse_resident_count],0
+    mov dword ptr [rip+g_phys_cse_ready_count],0
+    mov qword ptr [rip+g_packet_last_store_end],0
+    add rsp,32
+    pop r15; pop r14; pop r13; pop r12; pop rbx; ret
+
+# Stable dependency order uses the already-proved structural work fact. The
+# collector computed it once; sorting never recursively reprices the same DAG.
 g_phys_cse_order_dependencies:
     push rbx; push r12; push r13; push r14; push r15
     xor ebx,ebx
 .gpcod_outer:
-    mov eax,dword ptr [rip+g_phys_cse_resident_count]
-    cmp ebx,eax; jae .gpcod_done
+    cmp ebx,[rip+g_phys_cse_resident_count]; jae .gpcod_done
     lea r12d,[rbx+1]
 .gpcod_inner:
-    cmp r12d,dword ptr [rip+g_phys_cse_resident_count]; jae .gpcod_outer_next
-    # left cost
-    mov rax,qword ptr [rip+g_phys_cse_resident_expr_ptr]; mov rdi,[rax+rbx*8]
-    mov rax,qword ptr [rip+g_phys_cse_resident_type_ptr]; mov esi,dword ptr [rax+rbx*4]
-    cmp esi,GTYPE_BOOL; je .gpcod_left_bool
-    call g_phys_fp_expr_cost; jmp .gpcod_left_ready
-.gpcod_left_bool:
-    call g_phys_predicate_cost
-.gpcod_left_ready:
-    mov r13d,eax
-    # right cost
-    mov rax,qword ptr [rip+g_phys_cse_resident_expr_ptr]; mov rdi,[rax+r12*8]
-    mov rax,qword ptr [rip+g_phys_cse_resident_type_ptr]; mov esi,dword ptr [rax+r12*4]
-    cmp esi,GTYPE_BOOL; je .gpcod_right_bool
-    call g_phys_fp_expr_cost; jmp .gpcod_right_ready
-.gpcod_right_bool:
-    call g_phys_predicate_cost
-.gpcod_right_ready:
-    cmp eax,r13d; jge .gpcod_next
-    # Swap expr/type/carrier as one Physical Fact record.
-    mov rax,qword ptr [rip+g_phys_cse_resident_expr_ptr]
+    cmp r12d,[rip+g_phys_cse_resident_count]; jae .gpcod_outer_next
+    mov rax,[rip+g_phys_cse_resident_cost_ptr]
+    mov r13d,[rax+rbx*4]
+    mov r14d,[rax+r12*4]
+    mov rax,[rip+g_phys_cse_resident_frontier_ptr]
+    mov r15d,[rax+rbx*4]
+    mov eax,[rax+r12*4]
+    cmp eax,r15d; jb .gpcod_next
+    ja .gpcod_swap
+    cmp r14d,r13d; jae .gpcod_next
+.gpcod_swap:
+    mov rax,[rip+g_phys_cse_resident_frontier_ptr]
+    mov edx,[rax+rbx*4]; mov ecx,[rax+r12*4]
+    mov [rax+rbx*4],ecx; mov [rax+r12*4],edx
+    mov rax,[rip+g_phys_cse_resident_cost_ptr]
+    mov [rax+rbx*4],r14d
+    mov [rax+r12*4],r13d
+    mov rax,[rip+g_phys_cse_resident_expr_ptr]
     mov r14,[rax+rbx*8]; mov r15,[rax+r12*8]
     mov [rax+rbx*8],r15; mov [rax+r12*8],r14
-    mov rax,qword ptr [rip+g_phys_cse_resident_type_ptr]
-    mov r14d,dword ptr [rax+rbx*4]; mov r15d,dword ptr [rax+r12*4]
-    mov dword ptr [rax+rbx*4],r15d; mov dword ptr [rax+r12*4],r14d
-    mov rax,qword ptr [rip+g_phys_cse_resident_reg_ptr]
-    mov r14d,dword ptr [rax+rbx*4]; mov r15d,dword ptr [rax+r12*4]
-    mov dword ptr [rax+rbx*4],r15d; mov dword ptr [rax+r12*4],r14d
+    mov rax,[rip+g_phys_cse_resident_type_ptr]
+    mov r14d,[rax+rbx*4]; mov r15d,[rax+r12*4]
+    mov [rax+rbx*4],r15d; mov [rax+r12*4],r14d
+    mov rax,[rip+g_phys_cse_resident_reg_ptr]
+    mov r14d,[rax+rbx*4]; mov r15d,[rax+r12*4]
+    mov [rax+rbx*4],r15d; mov [rax+r12*4],r14d
 .gpcod_next:
     inc r12d; jmp .gpcod_inner
 .gpcod_outer_next:
@@ -7330,9 +9494,16 @@ g_phys_cse_find_resident:
     mov r12,rdi; mov r13d,esi
     xor ebx,ebx
     mov r14d,dword ptr [rip+g_phys_cse_ready_count]
+    cmp dword ptr [rip+g_phys_cse_memory_carrier],0; je .gpcser_loop
+    mov r14d,[rip+g_phys_cse_resident_count]
 .gpcser_loop:
     cmp ebx,r14d; jae .gpcser_no
-    mov rax,qword ptr [rip+g_phys_cse_resident_type_ptr]; cmp dword ptr [rax+rbx*4],r13d; jne .gpcser_next
+    # Negative carrier is a proved control demand. It must never be borrowed
+    # as a materialized value, even after its continuation has been emitted.
+    mov rax,[rip+g_phys_cse_resident_reg_ptr]
+    cmp dword ptr [rax+rbx*4],0; jl .gpcser_next
+    mov rax,[rip+g_packet_fact_scope_ptr]; cmp dword ptr [rax+rbx*4],0; jle .gpcser_next
+993: mov rax,qword ptr [rip+g_phys_cse_resident_type_ptr]; cmp dword ptr [rax+rbx*4],r13d; jne .gpcser_next
     mov rax,qword ptr [rip+g_phys_cse_resident_expr_ptr]; mov rsi,[rax+rbx*8]
     mov rdi,r12
     cmp r13d,GTYPE_BOOL; je .gpcser_equal_bool
@@ -7367,6 +9538,8 @@ g_phys_cse_find_resident:
 g_phys_expr_is_selected_cse:
     push rbx; push r12; push r13; push r14
     mov r12,rdi
+    call g_semantic_expr_is_total
+    test eax,eax; jz .gpeisc_no
     mov rdi,r12; call g_infer_expr; mov r14d,eax
     xor ebx,ebx
 .gpeisc_loop:
@@ -7391,8 +9564,8 @@ g_phys_expr_is_selected_cse:
 .gpeisc_done:
     pop r14; pop r13; pop r12; pop rbx; ret
 
-# rdi=FP update expression, esi=update declaration index.
-# Record real old-state consumers after selected CSE subtrees have been replaced
+# rdi=update expression, esi=semantic consumer identity. Record real
+# old-state consumers after selected CSE subtrees have been replaced
 # by their resident ValueFacts.
 g_phys_note_effective_state_uses:
     push rbx; push r12; push r13; push r14
@@ -7409,8 +9582,7 @@ g_phys_note_effective_state_uses:
     test rax,rax; jz .gpnesu_done
     mov ecx,dword ptr [rax+24]
     cmp ecx,dword ptr [rip+g_state_capacity]; jae .gpnesu_done
-    mov rdx,[rip+g_phys_state_last_use_ptr]
-    mov dword ptr [rdx+rcx*4],r13d
+    mov edi,ecx; mov esi,r13d; call g_phys_record_state_consumer
     jmp .gpnesu_done
 
 .gpnesu_op:
@@ -7469,6 +9641,70 @@ g_phys_expr_effectively_uses_state:
 .gpeeus_done:
     pop r14; pop r13; pop r12; pop rbx; ret
 
+# rdi=expression, esi=semantic state index -> eax=1 iff the source graph
+# contains that exact StateFact.  This is raw semantic reachability: unlike
+# last-consumer analysis it deliberately does not erase selected CSE roots,
+# because a counted Axis cannot change representation while any per-episode
+# ValueFact still observes its numeric coordinate.
+g_expr_uses_semantic_state:
+    push rbx; push r12; push r13; push r14
+    mov r12,rdi; mov r13d,esi
+    xor eax,eax
+    test r12,r12; jz .geuss_done
+    cmp qword ptr [r12],J_OBJECT; jne .geuss_done
+    mov rdi,r12; lea rsi,[rip+gk_state]; mov edx,gk_state_end-gk_state; call obj_get
+    test rax,rax; jz .geuss_args
+    mov rdi,[rax+8]; mov rsi,[rax+16]; call g_find_state
+    test rax,rax; jz .geuss_no
+    cmp dword ptr [rax+24],r13d; sete al; movzx eax,al
+    jmp .geuss_done
+.geuss_args:
+    mov rdi,r12; lea rsi,[rip+gk_args]; mov edx,gk_args_end-gk_args; call obj_get
+    test rax,rax; jz .geuss_no
+    mov r14,[rax+24]
+.geuss_arg_loop:
+    test r14,r14; jz .geuss_no
+    mov rbx,[r14+32]
+    mov rdi,r14; mov esi,r13d; call g_expr_uses_semantic_state
+    test eax,eax; jnz .geuss_yes
+    mov r14,rbx; jmp .geuss_arg_loop
+.geuss_yes:
+    mov eax,1; jmp .geuss_done
+.geuss_no:
+    xor eax,eax
+.geuss_done:
+    pop r14; pop r13; pop r12; pop rbx; ret
+
+# -> eax=1 when no transition data consumes the increasing ordinal. The
+# remaining distance then owns the loop coordinate; an exact counted exit
+# publishes the original bound. Final-only consumers do not require an ordinal
+# to be maintained on every transition.
+g_phys_prove_countdown_axis:
+    push rbx; push r12; push r13; push r14
+    xor eax,eax
+    cmp dword ptr [rip+g_reg_iter_counted],1; jne .gppca_done
+    mov r13d,dword ptr [rip+g_reg_iter_counter_index]
+
+    xor ebx,ebx
+.gppca_scan:
+    cmp ebx,dword ptr [rip+g_reg_iter_total]; jae .gppca_yes
+    cmp ebx,r13d; je .gppca_next
+    mov eax,ebx; shl rax,5; mov r11,[rip+g_states_ptr]; add r11,rax
+    cmp dword ptr [r11+28],-1; je .gppca_next
+    mov rdi,[rip+g_reg_iter_update_obj]; mov rsi,[r11]; mov edx,dword ptr [r11+8]
+    call obj_get
+    test rax,rax; jz .gppca_done
+    mov rdi,rax; mov esi,r13d; call g_expr_uses_semantic_state
+    test eax,eax; jnz .gppca_no
+.gppca_next:
+    inc ebx; jmp .gppca_scan
+.gppca_yes:
+    mov eax,1; jmp .gppca_done
+.gppca_no:
+    xor eax,eax
+.gppca_done:
+    pop r14; pop r13; pop r12; pop rbx; ret
+
 # rdi=next-state expression, esi=its semantic state index -> eax=1 only when
 # the current strict emitter can realize the next ValueFact directly in the
 # same old-state carrier without destroying an input that is still needed.
@@ -7482,7 +9718,7 @@ g_phys_fp_can_birth_in_old_authority:
     xor eax,eax
     test r12,r12; jz .gpfcbioa_done
     cmp qword ptr [r12],J_OBJECT; jne .gpfcbioa_done
-    mov rdi,r12; call g_phys_fp_expr_is_shareable_op
+    mov rdi,r12; call g_phys_value_expr_is_shareable_op
     test eax,eax; jz .gpfcbioa_done
     mov rdi,r12; lea rsi,[rip+gk_args]; mov edx,gk_args_end-gk_args; call obj_get
     test rax,rax; jz .gpfcbioa_done
@@ -7508,70 +9744,345 @@ g_phys_fp_can_birth_in_old_authority:
 .gpfcbioa_done:
     pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
-# Prove one fixed-point carrier realization for the complete resident FP state
-# generation. eax=1 means every FP next-state ValueFact can be born in its own
-# old authority after its final effective consumer. The episode then has no
-# physical generation transport at all. A partial mix is deliberately rejected:
-# one FP generation has one authority model, avoiding a second hybrid regime.
-g_phys_prove_inplace_fp_epoch:
+# Finalize FP StateFact carriers from actual episode liveness after shared facts
+# have converged. This is one carrier authority, not an in-place/disjoint mode:
+# each state either keeps its old carrier once that value is dead, retains one
+# genuinely spare next carrier while the old value is still live, or remains a
+# transient next ValueFact when physical pressure leaves no spare carrier.
+#
+# Re-profile anonymous pressure with retained CSE/ConstantFacts already fixed.
+# The speculative bytes are discarded; only g_phys_fp_temp_peak survives.
+g_phys_reprofile_fp_pressure:
     push rbx; push r12; push r13; push r14; push r15
+    G_EMIT_POSITION r15
+    mov dword ptr [rip+g_phys_fp_temp_peak],0
+    mov dword ptr [rip+g_phys_fp_temp_live],0
+    mov dword ptr [rip+g_phys_fp_temp_exhausted],0
+    mov dword ptr [rip+g_phys_cse_ready_count],0
+    mov eax,dword ptr [rip+g_reg_iter_total]
+    mov dword ptr [rip+g_state_count],eax
+
+    # Both current-generation frontiers share this exact pressure probe.
+    call g_emit_phys_episode_control
+    test eax,eax; jnz .gprfpp_fail
+    call g_emit_phys_episode_cse
+    test eax,eax; jnz .gprfpp_fail
+
     xor ebx,ebx
-    xor r14d,r14d
-.gppife_loop:
-    cmp ebx,dword ptr [rip+g_reg_iter_total]; jae .gppife_done_scan
-    cmp dword ptr [rip+g_reg_iter_counted],1; jne .gppife_real
-    cmp ebx,dword ptr [rip+g_reg_iter_counter_index]; je .gppife_next
-.gppife_real:
+.gprfpp_loop:
+    cmp ebx,dword ptr [rip+g_reg_iter_total]; jae .gprfpp_ok
     mov eax,ebx; shl rax,5; mov r11,[rip+g_states_ptr]; add r11,rax
-    mov r12d,dword ptr [r11+16]
-    cmp r12d,GTYPE_F64; je .gppife_fp
-    cmp r12d,GTYPE_F32; jne .gppife_next
-.gppife_fp:
-    inc r14d
-    mov rdx,[rip+g_reg_iter_old_reg_ptr]; cmp dword ptr [rdx+rbx*4],0; jl .gppife_no
-    mov rdx,[rip+g_phys_state_last_use_ptr]; mov eax,dword ptr [rdx+rbx*4]
-    cmp eax,ebx; jg .gppife_no
-    mov rdi,[rip+g_reg_iter_update_obj]; mov rsi,[r11]; mov edx,dword ptr [r11+8]
-    call obj_get
-    test rax,rax; jz .gppife_no
-    mov rdi,rax; mov esi,ebx; call g_phys_fp_can_birth_in_old_authority
-    test eax,eax; jz .gppife_no
-.gppife_next:
-    inc ebx; jmp .gppife_loop
-.gppife_done_scan:
+    cmp dword ptr [r11+28],-1; je .gprfpp_next
+    cmp dword ptr [rip+g_reg_iter_counted],0; je .gprfpp_real
+    cmp ebx,dword ptr [rip+g_reg_iter_counter_index]; je .gprfpp_next
+.gprfpp_real:
+    mov r13d,dword ptr [r11+16]
+    cmp r13d,GTYPE_F64; je .gprfpp_fp
+    cmp r13d,GTYPE_F32; jne .gprfpp_next
+.gprfpp_fp:
+    mov rax,[rip+g_phys_update_expr_ptr]; mov r12,[rax+rbx*8]
+    call g_phys_temp_reset
+    mov rdx,[rip+g_reg_iter_out_reg_ptr]; mov r14d,dword ptr [rdx+rbx*4]
+    cmp r14d,0; jge .gprfpp_have_dest
+    call g_phys_fp_temp_alloc
+    cmp eax,0; jl .gprfpp_fail
+    mov r14d,eax
+    mov rdi,r12; mov esi,r14d; mov edx,r13d; call g_emit_phys_fp_expr_to
+    cmp eax,r13d; jne .gprfpp_fail_free
+    mov edi,r14d; call g_phys_fp_temp_free
+    jmp .gprfpp_next
+.gprfpp_have_dest:
+    mov rdi,r12; mov esi,r14d; mov edx,r13d; call g_emit_phys_fp_expr_to
+    cmp eax,r13d; jne .gprfpp_fail
+.gprfpp_next:
+    inc ebx; jmp .gprfpp_loop
+.gprfpp_fail_free:
+    mov edi,r14d; call g_phys_fp_temp_free
+.gprfpp_fail:
+    mov [rip+g_emit_ptr],r15
+    mov eax,1
+    jmp .gprfpp_done
+.gprfpp_ok:
+    mov [rip+g_emit_ptr],r15
+    mov eax,dword ptr [rip+g_phys_cse_resident_count]
+    mov dword ptr [rip+g_phys_cse_ready_count],eax
     xor eax,eax
-    test r14d,r14d; setne al
-    jmp .gppife_done
-.gppife_no:
-    xor eax,eax
-.gppife_done:
+.gprfpp_done:
     pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
-# Build last-consumer indices for resident FP state authorities.  -1 means that
-# the old ValueFact is not consumed by any post-CSE update expression.
-g_phys_build_state_last_use:
-    push rbx; push r12; push r13; push r14
+# Collapse safe next-StateFacts into their old carriers, then retain disjoint
+# output carriers only from slack beyond the re-profiled anonymous requirement.
+# No state count, equation family, benchmark identity or workload threshold is
+# consulted.
+g_phys_finalize_fp_state_carriers:
+    push rbx; push r12; push r13; push r14; push r15
+    call g_phys_reprofile_fp_pressure
+    test eax,eax; jnz .gpffsc_fail
     xor ebx,ebx
-.gpbslu_clear:
-    cmp ebx,dword ptr [rip+g_reg_iter_total]; jae .gpbslu_scan_start
-    mov rax,[rip+g_phys_state_last_use_ptr]; mov dword ptr [rax+rbx*4],-1
-    inc ebx; jmp .gpbslu_clear
-.gpbslu_scan_start:
+.gpffsc_promote:
+    cmp ebx,dword ptr [rip+g_reg_iter_total]; jae .gpffsc_promoted
+    mov rax,[rip+g_reg_iter_carrier_kind_ptr]
+    cmp dword ptr [rax+rbx*4],G_PHYS_CARRIER_FP; jne .gpffsc_promote_next
+    # Scalar stack recipes used while initializing later states and the bound
+    # really clobber XMM0/1; scalar fold also owns XMM3. These concrete recipe
+    # roles, rather than a fixed half-bank, constrain persistent old values.
+    mov edi,(1<<0)|(1<<1)|(1<<3)
+    call g_phys_shared_xmm_alloc
+    cmp eax,0; jl .gpffsc_promote_next
+    mov rdx,[rip+g_reg_iter_old_reg_ptr]; mov [rdx+rbx*4],eax
+    bts dword ptr [rip+g_phys_fp_reserved_mask],eax
+.gpffsc_promote_next:
+    inc ebx; jmp .gpffsc_promote
+.gpffsc_promoted:
+    # Prove the completed residency once, rather than re-emitting the whole
+    # episode for every admitted owner. Actual exhaustion ages one old owner
+    # back into its established frame authority and repeats the same proof.
+    call g_phys_reprofile_fp_pressure
+    test eax,eax; jz .gpffsc_old_proved
+    cmp dword ptr [rip+g_phys_fp_temp_exhausted],0; je .gpffsc_fail
+    mov ebx,dword ptr [rip+g_reg_iter_total]
+.gpffsc_old_release:
+    dec ebx; js .gpffsc_fail
+    mov rax,[rip+g_reg_iter_carrier_kind_ptr]
+    cmp dword ptr [rax+rbx*4],G_PHYS_CARRIER_FP; jne .gpffsc_old_release
+    mov rdx,[rip+g_reg_iter_old_reg_ptr]; mov eax,[rdx+rbx*4]
+    cmp eax,0; jl .gpffsc_old_release
+    mov dword ptr [rdx+rbx*4],-1
+    btr dword ptr [rip+g_phys_fp_reserved_mask],eax
+    jmp .gpffsc_promoted
+.gpffsc_old_proved:
     xor ebx,ebx
-.gpbslu_scan:
-    cmp ebx,dword ptr [rip+g_reg_iter_total]; jae .gpbslu_done
-    cmp dword ptr [rip+g_reg_iter_counted],1; jne .gpbslu_real
-    cmp ebx,dword ptr [rip+g_reg_iter_counter_index]; je .gpbslu_next
-.gpbslu_real:
+.gpffsc_birth_loop:
+    cmp ebx,dword ptr [rip+g_reg_iter_total]; jae .gpffsc_reprofile
     mov eax,ebx; shl rax,5; mov r11,[rip+g_states_ptr]; add r11,rax
-    mov rdi,[rip+g_reg_iter_update_obj]; mov rsi,[r11]; mov edx,dword ptr [r11+8]
-    call obj_get
-    test rax,rax; jz .gpbslu_next
-    mov rdi,rax; mov esi,ebx; call g_phys_note_effective_state_uses
-.gpbslu_next:
-    inc ebx; jmp .gpbslu_scan
-.gpbslu_done:
-    pop r14; pop r13; pop r12; pop rbx; ret
+    cmp dword ptr [r11+28],-1; je .gpffsc_birth_next
+    cmp dword ptr [rip+g_reg_iter_counted],0; je .gpffsc_birth_real
+    cmp ebx,dword ptr [rip+g_reg_iter_counter_index]; je .gpffsc_birth_next
+.gpffsc_birth_real:
+    mov r13d,dword ptr [r11+16]
+    cmp r13d,GTYPE_F64; je .gpffsc_birth_fp
+    cmp r13d,GTYPE_F32; jne .gpffsc_birth_next
+.gpffsc_birth_fp:
+    mov rdx,[rip+g_reg_iter_old_reg_ptr]; mov r12d,dword ptr [rdx+rbx*4]
+    cmp r12d,0; jl .gpffsc_birth_next
+    mov rdx,[rip+g_phys_state_last_use_ptr]; mov eax,dword ptr [rdx+rbx*4]
+    mov rcx,[rip+g_phys_update_position_ptr]
+    cmp eax,[rcx+rbx*4]; jl .gpffsc_birth_safe
+    jne .gpffsc_birth_next
+    # The update itself is the final consumer. Direct birth is safe only when
+    # the existing structural proof shows the emitter consumes the old value
+    # before overwriting that carrier.
+    mov rax,[rip+g_phys_update_expr_ptr]
+    mov rdi,[rax+rbx*8]; mov esi,ebx; call g_phys_fp_can_birth_in_old_authority
+    test eax,eax; jz .gpffsc_birth_next
+.gpffsc_birth_safe:
+    mov rdx,[rip+g_reg_iter_out_reg_ptr]; mov r14d,dword ptr [rdx+rbx*4]
+    cmp r14d,0; jl .gpffsc_birth_publish
+    cmp r14d,r12d; je .gpffsc_birth_publish
+    btr dword ptr [rip+g_phys_fp_reserved_mask],r14d
+.gpffsc_birth_publish:
+    mov rdx,[rip+g_reg_iter_out_reg_ptr]; mov dword ptr [rdx+rbx*4],r12d
+.gpffsc_birth_next:
+    inc ebx; jmp .gpffsc_birth_loop
+
+.gpffsc_reprofile:
+    call g_phys_reprofile_fp_pressure
+    test eax,eax; jnz .gpffsc_fail
+    xor ebx,ebx
+.gpffsc_retain_loop:
+    cmp ebx,dword ptr [rip+g_reg_iter_total]; jae .gpffsc_verify
+    mov eax,ebx; shl rax,5; mov r11,[rip+g_states_ptr]; add r11,rax
+    cmp dword ptr [r11+28],-1; je .gpffsc_retain_next
+    cmp dword ptr [rip+g_reg_iter_counted],0; je .gpffsc_retain_real
+    cmp ebx,dword ptr [rip+g_reg_iter_counter_index]; je .gpffsc_retain_next
+.gpffsc_retain_real:
+    mov r13d,dword ptr [r11+16]
+    cmp r13d,GTYPE_F64; je .gpffsc_retain_fp
+    cmp r13d,GTYPE_F32; jne .gpffsc_retain_next
+.gpffsc_retain_fp:
+    mov rdx,[rip+g_reg_iter_old_reg_ptr]; cmp dword ptr [rdx+rbx*4],0; jl .gpffsc_retain_next
+    mov rdx,[rip+g_reg_iter_out_reg_ptr]; cmp dword ptr [rdx+rbx*4],0; jge .gpffsc_retain_next
+    # Retention is admitted only from carrier slack beyond the full measured
+    # anonymous peak; no destination-shaped credit is inferred from that scalar.
+    xor edi,edi
+    call g_phys_shared_xmm_alloc
+    cmp eax,0; jl .gpffsc_retain_next
+    mov rdx,[rip+g_reg_iter_out_reg_ptr]; mov dword ptr [rdx+rbx*4],eax
+    bts dword ptr [rip+g_phys_fp_reserved_mask],eax
+.gpffsc_retain_next:
+    inc ebx; jmp .gpffsc_retain_loop
+.gpffsc_verify:
+    # Carrier identity changes operand realization and anonymous lifetimes.
+    # Prove the completed map once. Only actual carrier exhaustion invalidates
+    # residency and requires another realization of this same Physical DAG.
+    call g_phys_reprofile_fp_pressure
+    test eax,eax; jz .gpffsc_ok
+    cmp dword ptr [rip+g_phys_fp_temp_exhausted],0; je .gpffsc_fail
+    mov ebx,dword ptr [rip+g_reg_iter_total]
+.gpffsc_release:
+    dec ebx; js .gpffsc_fail
+    mov eax,ebx; shl rax,5; mov r11,[rip+g_states_ptr]; add r11,rax
+    mov eax,dword ptr [r11+16]
+    cmp eax,GTYPE_F32; je .gpffsc_release_fp
+    cmp eax,GTYPE_F64; jne .gpffsc_release
+.gpffsc_release_fp:
+    mov rdx,[rip+g_reg_iter_out_reg_ptr]; mov eax,dword ptr [rdx+rbx*4]
+    cmp eax,0; jl .gpffsc_release
+    mov rcx,[rip+g_reg_iter_old_reg_ptr]
+    cmp eax,dword ptr [rcx+rbx*4]; je .gpffsc_release
+    # A disjoint next-version carrier competes with anonymous expressions.
+    # Its established transient handoff preserves simultaneous-state semantics.
+    # Each failed proof removes one owner; finite ownership bounds the search.
+    mov dword ptr [rdx+rbx*4],-1
+    btr dword ptr [rip+g_phys_fp_reserved_mask],eax
+    jmp .gpffsc_verify
+.gpffsc_ok:
+    xor eax,eax; jmp .gpffsc_done
+.gpffsc_fail:
+    mov eax,1
+.gpffsc_done:
+    pop r15; pop r14; pop r13; pop r12; pop rbx; ret
+
+# Erase declaration order only inside an already-proved total frontier. The
+# immutable old generation has no update-to-update mathematical edge; its real
+# consumers decide when each physical authority can be reused. The existing
+# growable edge arena stages this incidence temporarily, then resumes its
+# fragment role unchanged. No extra graph, scheduler or search survives AOT.
+g_phys_order_state_updates:
+    push rbp; push rbx; push r12; push r13; push r14; push r15
+    mov ebp,[rip+g_edge_count]
+    mov dword ptr [rip+g_phys_update_order_error],0
+    mov r14d,[rip+g_reg_iter_total]
+    xor ebx,ebx
+.gposu_clear:
+    cmp ebx,r14d; jae .gposu_collect_start
+    mov rax,[rip+g_phys_update_position_ptr]; mov dword ptr [rax+rbx*4],-1
+    mov rax,[rip+g_phys_update_pending_ptr]; mov dword ptr [rax+rbx*4],0
+    mov rax,[rip+g_phys_state_last_use_ptr]; mov dword ptr [rax+rbx*4],-1
+    mov rax,[rip+g_phys_update_total_ptr]; mov dword ptr [rax+rbx*4],0
+    inc ebx; jmp .gposu_clear
+.gposu_collect_start:
+    xor ebx,ebx
+.gposu_collect:
+    cmp ebx,r14d; jae .gposu_order_start
+    mov eax,ebx; shl rax,5; mov r12,[rip+g_states_ptr]; add r12,rax
+    cmp dword ptr [r12+28],-1; je .gposu_collect_next
+    cmp dword ptr [rip+g_reg_iter_counted],0; je .gposu_collect_real
+    cmp ebx,[rip+g_reg_iter_counter_index]; je .gposu_collect_next
+.gposu_collect_real:
+    mov rdi,[rip+g_reg_iter_update_obj]; mov rsi,[r12]; mov edx,[r12+8]; call obj_get
+    test rax,rax; jz .gposu_fail
+    mov r13,rax
+    mov rdx,[rip+g_phys_update_expr_ptr]; mov [rdx+rbx*8],rax
+    mov rdi,r13; call g_semantic_expr_is_total
+    mov rdx,[rip+g_phys_update_total_ptr]; mov [rdx+rbx*4],eax
+    # Already-selected guard Regions emit before this update frontier. Keep
+    # their source frontier fixed rather than invent a second control schedule.
+    mov rdi,r13; call g_phys_top_select_guard_index
+    cmp eax,0; jl .gposu_incidence
+    mov rdx,[rip+g_phys_update_total_ptr]; mov dword ptr [rdx+rbx*4],0
+.gposu_incidence:
+    mov rdi,r13; mov esi,ebx; call g_phys_note_effective_state_uses
+    cmp dword ptr [rip+g_phys_update_order_error],0; jne .gposu_fail
+.gposu_collect_next:
+    inc ebx; jmp .gposu_collect
+.gposu_order_start:
+    xor ebx,ebx
+.gposu_frontier:
+    cmp ebx,r14d; jae .gposu_last_use
+    mov rax,[rip+g_phys_update_total_ptr]
+    cmp dword ptr [rax+rbx*4],0; je .gposu_fixed
+    mov r15d,ebx
+.gposu_end:
+    cmp r15d,r14d; jae .gposu_ready_start
+    cmp dword ptr [rax+r15*4],0; je .gposu_ready_start
+    inc r15d; jmp .gposu_end
+.gposu_ready_start:
+    mov r13d,ebx
+.gposu_ready:
+    cmp r13d,r15d; jae .gposu_next_frontier
+    mov ecx,ebx; mov r10d,-1; mov r12d,-1
+    mov r8,[rip+g_phys_update_position_ptr]
+    mov r9,[rip+g_phys_update_pending_ptr]
+.gposu_choose:
+    cmp ecx,r15d; jae .gposu_publish
+    cmp dword ptr [r8+rcx*4],0; jge .gposu_choose_next
+    mov edx,[r9+rcx*4]
+    cmp edx,r10d; jae .gposu_choose_next
+    mov r10d,edx; mov r12d,ecx
+.gposu_choose_next:
+    inc ecx; jmp .gposu_choose
+.gposu_publish:
+    cmp r12d,0; jl .gposu_fail
+    mov rax,[rip+g_phys_update_order_ptr]; mov [rax+r13*4],r12d
+    mov rax,[rip+g_phys_update_position_ptr]; mov [rax+r12*4],r13d
+    call .gposu_consume
+    inc r13d; jmp .gposu_ready
+.gposu_next_frontier:
+    mov ebx,r15d; jmp .gposu_frontier
+.gposu_fixed:
+    mov rax,[rip+g_phys_update_order_ptr]; mov [rax+rbx*4],ebx
+    mov rax,[rip+g_phys_update_position_ptr]; mov [rax+rbx*4],ebx
+    mov r12d,ebx; call .gposu_consume
+    inc ebx; jmp .gposu_frontier
+.gposu_consume:
+    mov ecx,ebp
+    mov r8,[rip+g_edge_u_ptr]; mov r9,[rip+g_edge_v_ptr]
+    mov r10,[rip+g_phys_update_pending_ptr]
+.gposu_consume_edge:
+    cmp ecx,[rip+g_edge_count]; jae .gposu_consume_done
+    cmp [r9+rcx*4],r12d; jne .gposu_consume_next
+    mov eax,[r8+rcx*4]; cmp eax,r12d; je .gposu_consume_next
+    dec dword ptr [r10+rax*4]
+.gposu_consume_next:
+    inc ecx; jmp .gposu_consume_edge
+.gposu_consume_done:
+    ret
+.gposu_last_use:
+    # Project the completed permutation onto the same incidence once. No
+    # source rewalk, identity reproof or second liveness graph is needed.
+    mov ecx,ebp
+    mov r8,[rip+g_edge_u_ptr]; mov r9,[rip+g_edge_v_ptr]
+    mov r10,[rip+g_phys_update_position_ptr]
+    mov r11,[rip+g_phys_state_last_use_ptr]
+.gposu_last_edge:
+    cmp ecx,[rip+g_edge_count]; jae .gposu_done
+    mov eax,[r8+rcx*4]; mov edx,[r9+rcx*4]; mov edx,[r10+rdx*4]
+    cmp edx,[r11+rax*4]; jle .gposu_last_next
+    mov [r11+rax*4],edx
+.gposu_last_next:
+    inc ecx; jmp .gposu_last_edge
+.gposu_fail:
+    mov dword ptr [rip+g_phys_update_order_error],1
+.gposu_done:
+    mov [rip+g_edge_count],ebp
+    mov eax,[rip+g_phys_update_order_error]
+    pop r15; pop r14; pop r13; pop r12; pop rbx; pop rbp; ret
+
+# edi=old StateFact, esi=consumer. Self use cannot prevent placement of its
+# own expression; the existing native birth proof separately decides aliasing.
+g_phys_record_state_consumer:
+    cmp dword ptr [rip+g_phys_update_order_error],0; jne .gprsc_done
+    push rbx; push r12
+    mov ebx,edi; mov r12d,esi
+    mov eax,[rip+g_edge_count]
+    cmp eax,[rip+g_edge_capacity]; jb .gprsc_room
+    call g_grow_edge_arena
+    test eax,eax; jnz .gprsc_fail
+    mov eax,[rip+g_edge_count]
+.gprsc_room:
+    mov rdx,[rip+g_edge_u_ptr]; mov [rdx+rax*4],ebx
+    mov rdx,[rip+g_edge_v_ptr]; mov [rdx+rax*4],r12d
+    inc dword ptr [rip+g_edge_count]
+    cmp ebx,r12d; je .gprsc_return
+    mov rdx,[rip+g_phys_update_pending_ptr]; inc dword ptr [rdx+rbx*4]
+    jmp .gprsc_return
+.gprsc_fail:
+    mov dword ptr [rip+g_phys_update_order_error],1
+.gprsc_return:
+    pop r12; pop rbx
+.gprsc_done:
+    ret
 
 # rdi=BOOL expression, esi=destination XMM -> eax=0 when a selected binary
 # PredicateFact was realized directly from already-resident children, 1 otherwise.
@@ -7620,40 +10131,107 @@ g_emit_phys_bool_binary_cse_to_xmm:
     pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
 # Emit the selected shared old-version facts once at the top of every causal
-# iteration. Each result remains a normal Physical ValueFact in an XMM carrier.
+# iteration. Numeric demands retain normal Physical ValueFact carriers:
+# XMM for immutable scalar bits, with ordinary GPR integer producers. A proved control-only fact has no
+# numeric producer; its existing continuation is consumed at the guard frontier.
+g_emit_phys_episode_control:
+    mov edi,2
+    jmp g_emit_phys_episode_values
 g_emit_phys_episode_cse:
+    mov edi,1
+g_emit_phys_episode_values:
     push rbx; push r12; push r13; push r14
+    sub rsp,16
+    mov [rsp],edi
+    mov dword ptr [rip+g_packet_fact_scope],1
+    xor ebx,ebx
+.gepec_reset:
+    cmp ebx,[rip+g_phys_cse_resident_count]; jae .gepec_reset_done
+    mov rax,[rip+g_phys_cse_resident_frontier_ptr]; mov eax,[rax+rbx*4]
+    cmp dword ptr [rsp],0; je .gepec_clear
+    cmp eax,2; je .gepec_reset_next
+    cmp dword ptr [rsp],2; je .gepec_clear
+    cmp eax,1; je .gepec_reset_next
+.gepec_clear:
+    mov rax,[rip+g_packet_fact_scope_ptr]; mov dword ptr [rax+rbx*4],0
+.gepec_reset_next:
+    inc ebx; jmp .gepec_reset
+.gepec_reset_done:
     mov dword ptr [rip+g_phys_cse_ready_count],0
     xor ebx,ebx
+    cmp edi,1; jne .gepec_loop
+    cmp dword ptr [rip+g_phys_stack_episode],0; jne .gepec_loop
+    mov ebx,[rip+g_phys_cse_control_ready_count]
+    mov [rip+g_phys_cse_ready_count],ebx
 .gepec_loop:
     cmp ebx,dword ptr [rip+g_phys_cse_resident_count]; jae .gepec_done
     mov rax,qword ptr [rip+g_phys_cse_resident_expr_ptr]; mov r12,[rax+rbx*8]
     mov rax,qword ptr [rip+g_phys_cse_resident_type_ptr]; mov r13d,dword ptr [rax+rbx*4]
     mov rax,qword ptr [rip+g_phys_cse_resident_reg_ptr]; mov r14d,dword ptr [rax+rbx*4]
-    call g_phys_fp_temp_reset
-    call g_phys_int_temp_reset
+    mov rax,[rip+g_phys_cse_resident_frontier_ptr]; mov eax,[rax+rbx*4]
+    cmp dword ptr [rsp],0; je .gepec_preheader
+    cmp eax,2; je .gepec_ready
+    cmp dword ptr [rsp],2; jne .gepec_produce
+    test eax,eax; jz .gepec_done
+    jmp .gepec_produce
+.gepec_preheader:
+    cmp eax,2; jne .gepec_done
+.gepec_produce:
+    test r14d,r14d; js .gepec_ready
+    mov rdi,r12; call g_semantic_expr_is_total
+    test eax,eax; jz .gepec_ready
+    call g_phys_temp_reset
+    cmp dword ptr [rip+g_phys_stack_episode],1; je .gepec_general
+    cmp r13d,GTYPE_U64; je .gepec_int
+    cmp r13d,GTYPE_I64; je .gepec_int
     cmp r13d,GTYPE_BOOL; je .gepec_bool
     mov rdi,r12; mov esi,r14d; mov edx,r13d; call g_emit_phys_fp_value_to
     cmp eax,r13d; jne .gepec_bad
-    jmp .gepec_ready
+    jmp .gepec_materialized
+.gepec_int:
+    call g_phys_int_temp_alloc; test eax,eax; js .gepec_bad
+    mov [rsp+4],eax
+    mov rdi,r12; mov esi,eax; mov edx,r13d; call g_emit_phys_int_expr_to
+    cmp eax,r13d; jne .gepec_bad
+    xor edi,edi; mov esi,[rsp+4]; call g_emit_phys_gpr_move
+    mov edi,[rsp+4]; call g_phys_int_temp_free
+    mov edi,r14d; mov esi,GTYPE_F64; call g_emit_phys_xmm_from_rax
+    test eax,eax; jnz .gepec_bad
+    jmp .gepec_materialized
 .gepec_bool:
     mov rdi,r12; mov esi,r14d; call g_emit_phys_bool_binary_cse_to_xmm
-    test eax,eax; jz .gepec_ready
+    test eax,eax; jz .gepec_materialized
     mov rdi,r12; call g_emit_phys_bool_expr_to_rax
     test eax,eax; jnz .gepec_bad
     mov edi,r14d; mov esi,GTYPE_F64; call g_emit_phys_xmm_from_rax
     test eax,eax; jnz .gepec_bad
+    jmp .gepec_materialized
+.gepec_general:
+    mov rdi,r12; call g_emit_expr
+    cmp eax,r13d; jne .gepec_bad
+    call g_emit_pop_rax
+    cmp r13d,GTYPE_U64; je .gepec_general_int
+    cmp r13d,GTYPE_I64; je .gepec_general_int
+    mov edi,r14d; mov esi,r13d; call g_emit_phys_xmm_from_rax
+    jmp .gepec_materialized
+.gepec_general_int:
+    mov edi,r14d; mov esi,GTYPE_F64; call g_emit_phys_xmm_from_rax
+.gepec_materialized:
+    mov rax,[rip+g_packet_fact_scope_ptr]; mov dword ptr [rax+rbx*4],1
 .gepec_ready:
     inc dword ptr [rip+g_phys_cse_ready_count]
     inc ebx; jmp .gepec_loop
 .gepec_done:
-    # All shared facts are now valid direct sources for the update set.
-    mov eax,dword ptr [rip+g_phys_cse_resident_count]
-    mov dword ptr [rip+g_phys_cse_ready_count],eax
+    cmp dword ptr [rsp],2; jne .gepec_no_control_publish
+    mov eax,[rip+g_phys_cse_ready_count]; mov [rip+g_phys_cse_control_ready_count],eax
+.gepec_no_control_publish:
+    # Only the materialized prefix is visible. A condition emitted before
+    # timestep refresh cannot read any old-generation shared state value.
     xor eax,eax; jmp .gepec_ret
 .gepec_bad:
     mov eax,1
 .gepec_ret:
+    add rsp,16
     pop r14; pop r13; pop r12; pop rbx; ret
 
 # ---------------- unified scalar constant Physical Reality ----------------
@@ -7684,40 +10262,68 @@ g_phys_const_note:
 .gpcn_ok: xor eax,eax
 .gpcn_done: pop r13; pop r12; pop rbx; ret
 
-# ConstantFact residency has no private slot map.  Reuse candidates request
-# carriers directly from the same whole-episode Physical Reality authority.
-# Build residents by descending static reuse until the proven pressure bound.
+# ConstantFacts consume the same shared bank and the same compile-time planner;
+# their static pool and late state-carrier lifetime proofs remain authoritative.
 g_phys_const_finalize:
     push rbx; push r12; push r13; push r14; push r15
     mov dword ptr [rip+g_phys_const_resident_count],0
-    xor r12d,r12d
-.gpcf_slot:
-    mov ebx,-1
+    mov edi,[rip+g_phys_const_candidate_count]
+    mov r15d,edi
+    test edi,edi; jz .gpca_done
+    call physical_plan_alloc
+    test rax,rax; jz .gpca_done
+    mov r12,rax
     xor r13d,r13d
-    xor r14d,r14d
-.gpcf_scan:
-    cmp r14d,dword ptr [rip+g_phys_const_candidate_count]; jae .gpcf_scan_done
-    mov rax,qword ptr [rip+g_phys_const_candidate_uses_ptr]; mov r15d,dword ptr [rax+r14*4]
-    cmp r15d,r13d; jle .gpcf_next
-    mov r13d,r15d; mov ebx,r14d
-.gpcf_next:
-    inc r14d; jmp .gpcf_scan
-.gpcf_scan_done:
-    cmp ebx,0; jl .gpcf_done
-    mov rax,qword ptr [rip+g_phys_const_candidate_bits_ptr]; mov rdx,[rax+rbx*8]
-    mov rax,qword ptr [rip+g_phys_const_resident_bits_ptr]; mov [rax+r12*8],rdx
-    mov rax,qword ptr [rip+g_phys_const_candidate_type_ptr]; mov edx,dword ptr [rax+rbx*4]
-    mov rax,qword ptr [rip+g_phys_const_resident_type_ptr]; mov dword ptr [rax+r12*4],edx
+    xor ebx,ebx
+.gpca_build:
+    cmp ebx,r15d; jae .gpca_search
+    mov rax,[rip+g_phys_const_candidate_uses_ptr]
+    mov eax,[rax+rbx*4]
+    test eax,eax; jz .gpca_next
+    imul rax,rax,PRC_LOAD_AGU_TICKS-PRC_FP_ADD_TICKS
+    imul rdx,r13,PPR_SIZE
+    lea rdx,[r12+rdx]
+    mov [rdx],rax
+    mov [rdx+24],ebx
+    mov dword ptr [rdx+8],1
+    inc r13d
+.gpca_next:
+    inc ebx; jmp .gpca_build
+.gpca_search:
+    call g_phys_plan_budgets
+    mov edx,ecx
+    xor ecx,ecx
+    xor r8d,r8d
+    xor r9d,r9d
+    mov rdi,r12
+    mov esi,r13d
+    sub rsp,16
+    mov qword ptr [rsp],0
+    call physical_plan_resolve
+    add rsp,16
+    xor ebx,ebx
+.gpca_realize:
+    cmp ebx,r13d; jae .gpca_free
+    imul rax,rbx,PPR_SIZE
+    cmp dword ptr [r12+rax+16],0; je .gpca_realize_next
+    mov r14d,[r12+rax+24]
+    xor edi,edi
     call g_phys_shared_xmm_alloc
-    cmp eax,0; jge .gpcf_have_carrier
-    mov dword ptr [rip+g_phys_shared_pressure_exhausted],1
-    jmp .gpcf_done
-.gpcf_have_carrier:
-    mov rdx,qword ptr [rip+g_phys_const_resident_reg_ptr]; mov dword ptr [rdx+r12*4],eax
-    mov rax,qword ptr [rip+g_phys_const_candidate_uses_ptr]; mov dword ptr [rax+rbx*4],0
+    test eax,eax; js .gpca_realize_next
+    mov ecx,[rip+g_phys_const_resident_count]
+    mov rdx,[rip+g_phys_const_resident_reg_ptr]; mov [rdx+rcx*4],eax
+    mov rdx,[rip+g_phys_const_candidate_bits_ptr]; mov rax,[rdx+r14*8]
+    mov rdx,[rip+g_phys_const_resident_bits_ptr]; mov [rdx+rcx*8],rax
+    mov rdx,[rip+g_phys_const_candidate_type_ptr]; mov eax,[rdx+r14*4]
+    mov rdx,[rip+g_phys_const_resident_type_ptr]; mov [rdx+rcx*4],eax
     inc dword ptr [rip+g_phys_const_resident_count]
-    inc r12d; jmp .gpcf_slot
-.gpcf_done:
+.gpca_realize_next:
+    inc ebx; jmp .gpca_realize
+.gpca_free:
+    mov rdi,r12
+    mov esi,r15d
+    call physical_plan_free
+.gpca_done:
     pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
 # rdi=bits, esi=type -> eax resident slot, or -1.
@@ -7731,6 +10337,60 @@ g_phys_const_find_resident:
 .gpcfr_next:
     inc ecx; jmp .gpcfr_loop
 .gpcfr_no: mov eax,-1; ret
+
+# rdi=bits, esi=type -> eax candidate slot, or -1.  Candidate identity is
+# the single immutable ConstantFact identity used by both register residency and
+# static-address realization.
+g_phys_const_find_candidate:
+    xor ecx,ecx
+.gpcfc_loop:
+    cmp ecx,dword ptr [rip+g_phys_const_candidate_count]; jae .gpcfc_no
+    mov rax,qword ptr [rip+g_phys_const_candidate_bits_ptr]; cmp [rax+rcx*8],rdi; jne .gpcfc_next
+    mov rax,qword ptr [rip+g_phys_const_candidate_type_ptr]; cmp dword ptr [rax+rcx*4],esi; jne .gpcfc_next
+    mov eax,ecx; ret
+.gpcfc_next:
+    inc ecx; jmp .gpcfc_loop
+.gpcfc_no:
+    mov eax,-1; ret
+
+# Emit one immutable scalar literal pool into the generated image and jump over
+# it once in the preheader.  Every candidate gets one stable RIP-relative
+# address; resident constants and memory-consumed constants therefore share the
+# same ConstantFact identity rather than separate banks.
+g_emit_phys_constant_pool:
+    push rbx; push r12; push r13; push r14
+    mov dword ptr [rip+g_phys_const_pool_ready],0
+    cmp dword ptr [rip+g_phys_const_candidate_count],0; je .gepcp_empty
+    call g_emit_jmp_patch
+    test rax,rax; jz .gepcp_bad
+    mov r12,rax
+    xor ebx,ebx
+.gepcp_loop:
+    cmp ebx,dword ptr [rip+g_phys_const_candidate_count]; jae .gepcp_finish
+    G_EMIT_POSITION rax
+    mov rdx,[rip+g_phys_const_candidate_pool_ptr]
+    mov [rdx+rbx*8],rax
+    mov rax,[rip+g_phys_const_candidate_type_ptr]
+    mov r13d,dword ptr [rax+rbx*4]
+    mov rax,[rip+g_phys_const_candidate_bits_ptr]
+    mov r14,[rax+rbx*8]
+    cmp r13d,GTYPE_F64; je .gepcp_f64
+    cmp r13d,GTYPE_F32; jne .gepcp_bad
+    mov edi,r14d; call g_emit_u32; test eax,eax; jnz .gepcp_bad
+    jmp .gepcp_next
+.gepcp_f64:
+    mov rdi,r14; call g_emit_u64; test eax,eax; jnz .gepcp_bad
+.gepcp_next:
+    inc ebx; jmp .gepcp_loop
+.gepcp_finish:
+    G_EMIT_POSITION rsi; mov rdi,r12; call g_patch_rel32
+    mov dword ptr [rip+g_phys_const_pool_ready],1
+.gepcp_empty:
+    xor eax,eax; jmp .gepcp_done
+.gepcp_bad:
+    mov eax,1
+.gepcp_done:
+    pop r14; pop r13; pop r12; pop rbx; ret
 
 # Emit one preheader materialization per retained ConstantFact.
 g_emit_phys_resident_constants:
@@ -7783,6 +10443,8 @@ g_phys_top_select_guard_index:
     mov r14,[rbx+32]; test r14,r14; jz .gptsgi_none
     mov rax,[r14+32]; test rax,rax; jz .gptsgi_none
     cmp qword ptr [rax+32],0; jne .gptsgi_none
+    mov rdi,rbx; call g_semantic_expr_is_total
+    test eax,eax; jz .gptsgi_none
     xor r14d,r14d
 .gptsgi_scan_selected:
     cmp r14d,dword ptr [rip+g_phys_cse_resident_count]; jae .gptsgi_none
@@ -7866,10 +10528,16 @@ g_phys_build_guard_regions:
 .gpbgr_state_loop:
     cmp ebx,dword ptr [rip+g_reg_iter_total]; jae .gpbgr_filter_start
     mov rax,[rip+g_phys_state_guard_ptr]; mov dword ptr [rax+rbx*4],-1
-    cmp dword ptr [rip+g_reg_iter_counted],1; jne .gpbgr_not_counter
+    cmp dword ptr [rip+g_reg_iter_counted],0; je .gpbgr_not_counter
     cmp ebx,dword ptr [rip+g_reg_iter_counter_index]; je .gpbgr_state_next
 .gpbgr_not_counter:
     mov rax,[rip+g_reg_iter_out_reg_ptr]; cmp dword ptr [rax+rbx*4],0; jl .gpbgr_state_next
+    # This frontier executes before ordinary updates. Only a disjoint next
+    # authority may enter it; an aged old carrier must wait for its real last
+    # consumer in the common update sequence.
+    mov edx,[rax+rbx*4]
+    mov rax,[rip+g_reg_iter_old_reg_ptr]
+    cmp edx,[rax+rbx*4]; je .gpbgr_state_next
     mov eax,ebx; shl rax,5; mov r11,[rip+g_states_ptr]; add r11,rax
     mov rdi,[rip+g_reg_iter_update_obj]; mov rsi,[r11]; mov edx,dword ptr [r11+8]
     call obj_get
@@ -7916,14 +10584,14 @@ g_emit_phys_guard_arm_state:
     mov r15,rax
     mov rdi,r15; mov esi,ebx; call g_phys_expr_is_exact_state
     test eax,eax; jnz .gepga_identity
-    call g_phys_fp_temp_reset
-    call g_phys_int_temp_reset
+    call g_phys_temp_reset
     cmp r14d,GTYPE_F64; je .gepga_fp
     cmp r14d,GTYPE_F32; je .gepga_fp
+    cmp r14d,GTYPE_BOOL; je .gepga_int
     cmp r14d,GTYPE_U64; je .gepga_int
     cmp r14d,GTYPE_I64; jne .gepga_bad
 .gepga_int:
-    mov rdi,r15; mov esi,r13d; mov edx,r14d; call g_emit_phys_int_expr_to
+    mov rdi,r15; mov esi,r13d; mov edx,r14d; call g_emit_phys_gpr_value_to
     cmp eax,r14d; jne .gepga_bad
     xor eax,eax; jmp .gepga_done
 .gepga_fp:
@@ -7938,55 +10606,238 @@ g_emit_phys_guard_arm_state:
     add rsp,16
     pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
-# Emit every multi-state guard exactly once. Region-use counts are negated after
-# emission as compile-time consumed markers; source state metadata remains the
-# authority for the later common commit.
-g_emit_phys_guard_regions:
+# A complete conditional transition may commit inside its selected arm once
+# every old-value consumer has finished. Otherwise the same phase emitter keeps
+# the common commit frontier. No update count or workload controls this proof.
+# edi=guard -> eax=1 iff all live non-axis updates belong to this guard.
+g_phys_guard_covers_transition:
+    mov r8d,edi
+    xor ecx,ecx
+.gpgct_scan:
+    cmp ecx,[rip+g_reg_iter_total]; jae .gpgct_yes
+    mov eax,ecx; shl rax,5; add rax,[rip+g_states_ptr]
+    cmp dword ptr [rax+28],-1; je .gpgct_next
+    cmp dword ptr [rip+g_reg_iter_counted],0; je .gpgct_member
+    cmp ecx,[rip+g_reg_iter_counter_index]; je .gpgct_next
+.gpgct_member:
+    mov rax,[rip+g_phys_state_guard_ptr]
+    cmp [rax+rcx*4],r8d; jne .gpgct_no
+.gpgct_next: inc ecx; jmp .gpgct_scan
+.gpgct_yes: mov eax,1; ret
+.gpgct_no: xor eax,eax; ret
+
+# edi=guard -> eax=1 when its complete false continuation is an absorbing
+# state relation. The existing Region cover proof is supplied by the caller.
+# Exact counted completion owns the final bound. Every live data state must be
+# its own exact old authority on this edge, and the total predicate must not
+# consume the changing ordinal. No dynamic convergence test or runtime flag is
+# introduced: the existing false continuation simply joins loop completion.
+g_phys_guard_false_is_fixed:
+    push rbx; push r12; push r13
+    mov r12d,edi
+    cmp dword ptr [rip+g_reg_iter_counted],1; jne .gpgfif_no
+    mov rax,[rip+g_phys_cse_resident_expr_ptr]; mov r13,[rax+r12*8]
+    mov rdi,r13; call g_semantic_expr_is_total
+    test eax,eax; jz .gpgfif_no
+    mov rdi,r13; mov esi,[rip+g_reg_iter_counter_index]
+    call g_expr_uses_semantic_state
+    test eax,eax; jnz .gpgfif_no
+    xor ebx,ebx
+.gpgfif_state:
+    cmp ebx,[rip+g_reg_iter_total]; jae .gpgfif_yes
+    cmp ebx,[rip+g_reg_iter_counter_index]; je .gpgfif_next
+    mov eax,ebx; shl rax,5; add rax,[rip+g_states_ptr]
+    cmp dword ptr [rax+28],-1; je .gpgfif_next
+    mov rdi,[rip+g_reg_iter_update_obj]; mov rsi,[rax]; mov edx,[rax+8]
+    call obj_get
+    test rax,rax; jz .gpgfif_no
+    mov rdi,rax; xor esi,esi; call g_phys_select_arm
+    test rax,rax; jz .gpgfif_no
+    mov rdi,rax; mov esi,ebx; call g_phys_expr_is_exact_state
+    test eax,eax; jz .gpgfif_no
+.gpgfif_next: inc ebx; jmp .gpgfif_state
+.gpgfif_yes: mov eax,1; jmp .gpgfif_done
+.gpgfif_no: xor eax,eax
+.gpgfif_done: pop r13; pop r12; pop rbx; ret
+
+# edi=guard, esi=arm, edx/ecx=first/last phase. One parameterized consumer
+# emits all producers before any transfer, preserving simultaneous semantics.
+g_emit_phys_guard_phase_arm:
+    push rbx; push r12; push r13; push r14; push r15
+    mov r12d,edi; mov r13d,esi; mov r14d,edx; mov r15d,ecx
+.gepgpa_phase:
+    xor ebx,ebx
+.gepgpa_state:
+    cmp ebx,[rip+g_reg_iter_total]; jae .gepgpa_next_phase
+    mov rax,[rip+g_phys_state_guard_ptr]
+    cmp [rax+rbx*4],r12d; jne .gepgpa_next_state
+    mov edi,ebx; mov esi,r13d
+    lea rax,[rip+g_phys_guard_phase_emitters]
+    call qword ptr [rax+r14*8]
+    test eax,eax; jnz .gepgpa_bad
+.gepgpa_next_state: inc ebx; jmp .gepgpa_state
+.gepgpa_next_phase:
+    inc r14d; cmp r14d,r15d; jbe .gepgpa_phase
+    xor eax,eax; jmp .gepgpa_done
+.gepgpa_bad: mov eax,1
+.gepgpa_done: pop r15; pop r14; pop r13; pop r12; pop rbx; ret
+.pushsection .rodata
+.p2align 3
+g_phys_guard_phase_emitters:
+    .quad g_emit_phys_guard_arm_state,g_emit_phys_guard_commit_state
+.popsection
+
+# rdi=expression, rsi=PredicateFact -> eax=1 if any value subtree consumes it.
+# This demand walk includes lazy arms; it is not a runtime
+# test or a source-pattern rewrite. Predicate identity remains the existing one.
+g_phys_expr_contains_predicate:
+    push rbx; push r12; push r13; push r14
+    mov r12,rdi; mov r13,rsi
+    test r12,r12; jz .gpecp_no
+    cmp qword ptr [r12],J_OBJECT; jne .gpecp_no
+    mov rdi,r12; call g_infer_expr
+    cmp eax,GTYPE_BOOL; jne .gpecp_args
+    mov rdi,r12; mov rsi,r13; call g_phys_predicate_equal
+    test eax,eax; jnz .gpecp_yes
+.gpecp_args:
+    mov rdi,r12; lea rsi,[rip+gk_args]; mov edx,gk_args_end-gk_args; call obj_get
+    test rax,rax; jz .gpecp_no
+    mov r14,[rax+24]
+.gpecp_child:
+    test r14,r14; jz .gpecp_no
+    mov rdi,r14; mov rsi,r13; call g_phys_expr_contains_predicate
+    test eax,eax; jnz .gpecp_yes
+    mov r14,[r14+32]; jmp .gpecp_child
+.gpecp_yes: mov eax,1; jmp .gpecp_done
+.gpecp_no: xor eax,eax
+.gpecp_done: pop r14; pop r13; pop r12; pop rbx; ret
+
+# A complete guarded transition has one current-generation control consumer.
+# Retire its numeric carrier only when neither arm, the loop condition, nor
+# another selected fact demands that value. Partial transitions retain their
+# carrier because their second transfer frontier can outlive old-state reuse.
+# The existing carrier slot records absence as -1; no parallel fact table,
+# predicate ABI or alternate transition emitter is introduced.
+g_phys_retire_control_materializations:
     push rbx; push r12; push r13; push r14; push r15
     xor ebx,ebx
-.gepgr_outer:
-    cmp ebx,dword ptr [rip+g_reg_iter_total]; jae .gepgr_ok
-    mov rax,[rip+g_phys_state_guard_ptr]; mov r12d,dword ptr [rax+rbx*4]
-    cmp r12d,0; jl .gepgr_next
-    mov rdx,[rip+g_phys_guard_region_uses_ptr]; mov eax,dword ptr [rdx+r12*4]
-    cmp eax,0; jle .gepgr_next
-    neg eax; mov dword ptr [rdx+r12*4],eax
+.gprcm_fact:
+    cmp ebx,[rip+g_phys_cse_resident_count]; jae .gprcm_done
+    mov rax,[rip+g_phys_cse_resident_type_ptr]
+    cmp dword ptr [rax+rbx*4],GTYPE_BOOL; jne .gprcm_next
+    mov rax,[rip+g_phys_cse_resident_frontier_ptr]
+    cmp dword ptr [rax+rbx*4],0; jne .gprcm_next
+    mov rax,[rip+g_phys_guard_region_uses_ptr]
+    cmp dword ptr [rax+rbx*4],2; jb .gprcm_next
+    mov edi,ebx; call g_phys_guard_covers_transition
+    test eax,eax; jz .gprcm_next
+    mov rax,[rip+g_phys_cse_resident_expr_ptr]; mov r12,[rax+rbx*8]
+    mov rdi,[rip+g_reg_iter_cond_expr]; mov rsi,r12
+    call g_phys_expr_contains_predicate
+    test eax,eax; jnz .gprcm_next
+    xor r13d,r13d
+.gprcm_parent:
+    cmp r13d,[rip+g_phys_cse_resident_count]; jae .gprcm_states
+    cmp r13d,ebx; je .gprcm_parent_next
+    mov rax,[rip+g_phys_cse_resident_expr_ptr]
+    mov rdi,[rax+r13*8]; mov rsi,r12; call g_phys_expr_contains_predicate
+    test eax,eax; jnz .gprcm_next
+.gprcm_parent_next: inc r13d; jmp .gprcm_parent
+.gprcm_states:
+    xor r13d,r13d
+.gprcm_state:
+    cmp r13d,[rip+g_reg_iter_total]; jae .gprcm_retire
+    mov eax,r13d; shl rax,5; add rax,[rip+g_states_ptr]
+    cmp dword ptr [rax+28],-1; je .gprcm_state_next
+    cmp dword ptr [rip+g_reg_iter_counted],0; je .gprcm_update
+    cmp r13d,[rip+g_reg_iter_counter_index]; je .gprcm_state_next
+.gprcm_update:
+    mov rdi,[rip+g_reg_iter_update_obj]; mov rsi,[rax]; mov edx,[rax+8]
+    call obj_get; mov r14,rax
+    # The complete-region proof owns each top-level select condition. Its two
+    # arms must have no numeric or nested-control demand for this same fact.
+    mov rdi,r14; mov esi,1; call g_phys_select_arm
+    test rax,rax; jz .gprcm_next
+    mov rdi,rax; mov rsi,r12; call g_phys_expr_contains_predicate
+    test eax,eax; jnz .gprcm_next
+    mov rdi,r14; xor esi,esi; call g_phys_select_arm
+    test rax,rax; jz .gprcm_next
+    mov rdi,rax; mov rsi,r12; call g_phys_expr_contains_predicate
+    test eax,eax; jnz .gprcm_next
+.gprcm_state_next: inc r13d; jmp .gprcm_state
+.gprcm_retire:
+    mov rax,[rip+g_phys_cse_resident_reg_ptr]
+    mov dword ptr [rax+rbx*4],-1
+.gprcm_next: inc ebx; jmp .gprcm_fact
+.gprcm_done: pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
+# edi=0 producers / 1 pending transfers. The existing signed use marker owns
+# readiness; zero retires a complete in-arm transition from the later frontier.
+g_emit_phys_guard_regions:
+    push rbx; push r12; push r13; push r14; push r15
+    sub rsp,24
+    mov [rsp],edi
+    xor ebx,ebx
+.gepgr_outer:
+    cmp ebx,[rip+g_reg_iter_total]; jae .gepgr_ok
+    mov rax,[rip+g_phys_state_guard_ptr]; mov r12d,[rax+rbx*4]
+    test r12d,r12d; js .gepgr_next
+    mov rdx,[rip+g_phys_guard_region_uses_ptr]; mov eax,[rdx+r12*4]
+    cmp dword ptr [rsp],0; je .gepgr_producers
+    neg eax; test eax,eax; jle .gepgr_next
+    mov [rdx+r12*4],eax
+    mov dword ptr [rsp+8],1; mov dword ptr [rsp+12],1
+    jmp .gepgr_emit
+.gepgr_producers:
+    test eax,eax; jle .gepgr_next
+    neg eax; mov [rdx+r12*4],eax
+    mov dword ptr [rsp+8],0; mov dword ptr [rsp+12],0
+    mov edi,r12d; call g_phys_guard_covers_transition
+    test eax,eax; jz .gepgr_emit
+    mov dword ptr [rsp+12],1
+    mov rdx,[rip+g_phys_guard_region_uses_ptr]
+    mov dword ptr [rdx+r12*4],0
+.gepgr_emit:
+    mov dword ptr [rsp+4],0
+    cmp dword ptr [rsp],0; jne .gepgr_condition
+    cmp dword ptr [rsp+12],1; jne .gepgr_condition
+    mov edi,r12d; call g_phys_guard_false_is_fixed
+    mov [rsp+4],eax
+.gepgr_condition:
     mov edi,r12d; call g_emit_phys_resident_bool_jz_index
     test rax,rax; jz .gepgr_bad
     mov r13,rax
-
-    xor r15d,r15d
-.gepgr_true_scan:
-    cmp r15d,dword ptr [rip+g_reg_iter_total]; jae .gepgr_true_done
-    mov rax,[rip+g_phys_state_guard_ptr]; cmp dword ptr [rax+r15*4],r12d; jne .gepgr_true_next
-    mov edi,r15d; mov esi,1; call g_emit_phys_guard_arm_state
+    cmp dword ptr [rsp+4],0; je .gepgr_true_arm
+    lea rdi,[rip+g_reg_iter_exit_chain]; mov rsi,r13; call g_phys_chain_append
+.gepgr_true_arm:
+    mov edi,r12d; mov esi,1; mov edx,[rsp+8]; mov ecx,[rsp+12]
+    call g_emit_phys_guard_phase_arm
     test eax,eax; jnz .gepgr_bad
-.gepgr_true_next:
-    inc r15d; jmp .gepgr_true_scan
-.gepgr_true_done:
+    cmp dword ptr [rsp+4],0; jne .gepgr_next
     call g_emit_jmp_patch
     test rax,rax; jz .gepgr_bad
     mov r14,rax
-    mov rsi,[rip+g_emit_ptr]; mov rdi,r13; call g_patch_rel32
-
-    xor r15d,r15d
-.gepgr_false_scan:
-    cmp r15d,dword ptr [rip+g_reg_iter_total]; jae .gepgr_false_done
-    mov rax,[rip+g_phys_state_guard_ptr]; cmp dword ptr [rax+r15*4],r12d; jne .gepgr_false_next
-    mov edi,r15d; xor esi,esi; call g_emit_phys_guard_arm_state
+    # Keep the complete false continuation unresolved until its arm's final
+    # span is known. A lazy predicate may own more than one false edge.
+    mov edi,r12d; xor esi,esi; mov edx,[rsp+8]; mov ecx,[rsp+12]
+    call g_emit_phys_guard_phase_arm
     test eax,eax; jnz .gepgr_bad
-.gepgr_false_next:
-    inc r15d; jmp .gepgr_false_scan
-.gepgr_false_done:
-    mov rsi,[rip+g_emit_ptr]; mov rdi,r14; call g_patch_rel32
-.gepgr_next:
-    inc ebx; jmp .gepgr_outer
-.gepgr_ok:
-    xor eax,eax; jmp .gepgr_done
-.gepgr_bad:
-    mov eax,1
+    G_EMIT_POSITION rsi
+    lea rax,[r14+4]; cmp rsi,rax; jne .gepgr_false_work
+    # An empty false arm owns no bytes. Its true-to-end jump has no execution
+    # demand either; erase it before publishing the same false-edge target.
+    lea rsi,[r14-1]; mov [rip+g_emit_ptr],rsi
+    mov rdi,r13; call g_phys_patch_chain
+    jmp .gepgr_next
+.gepgr_false_work:
+    mov [rsp+16],rsi
+    lea rsi,[r14+4]; mov rdi,r13; call g_phys_patch_chain
+    mov rsi,[rsp+16]; mov rdi,r14; call g_patch_rel32
+.gepgr_next: inc ebx; jmp .gepgr_outer
+.gepgr_ok: xor eax,eax; jmp .gepgr_done
+.gepgr_bad: mov eax,1
 .gepgr_done:
+    add rsp,24
     pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
 # edi=state index, esi=1 true arm / 0 false arm -> eax=0 success / 1 failure.
@@ -8013,6 +10864,7 @@ g_emit_phys_guard_commit_state:
 
     cmp r14d,GTYPE_F64; je .gepgcs_fp
     cmp r14d,GTYPE_F32; je .gepgcs_fp
+    cmp r14d,GTYPE_BOOL; je .gepgcs_int
     cmp r14d,GTYPE_U64; je .gepgcs_int
     cmp r14d,GTYPE_I64; jne .gepgcs_bad
 .gepgcs_int:
@@ -8043,58 +10895,6 @@ g_emit_phys_guard_commit_state:
 .gepgcs_done:
     pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
-# Emit branch-local commits for every fused guard. A guard's compile-time use
-# count is negative after its update Region was emitted; flipping it positive
-# here is only an emission marker. The same PredicateFact controls computation
-# and authority transfer, so identity arms carry zero physical work.
-g_emit_phys_guard_region_commits:
-    push rbx; push r12; push r13; push r14; push r15
-    xor ebx,ebx
-.gepgrc_outer:
-    cmp ebx,dword ptr [rip+g_reg_iter_total]; jae .gepgrc_ok
-    mov rax,[rip+g_phys_state_guard_ptr]; mov r12d,dword ptr [rax+rbx*4]
-    cmp r12d,0; jl .gepgrc_next
-    mov rdx,[rip+g_phys_guard_region_uses_ptr]; mov eax,dword ptr [rdx+r12*4]
-    cmp eax,0; jge .gepgrc_next
-    neg eax; mov dword ptr [rdx+r12*4],eax
-
-    mov edi,r12d; call g_emit_phys_resident_bool_jz_index
-    test rax,rax; jz .gepgrc_bad
-    mov r13,rax
-
-    xor r15d,r15d
-.gepgrc_true_scan:
-    cmp r15d,dword ptr [rip+g_reg_iter_total]; jae .gepgrc_true_done
-    mov rax,[rip+g_phys_state_guard_ptr]; cmp dword ptr [rax+r15*4],r12d; jne .gepgrc_true_next
-    mov edi,r15d; mov esi,1; call g_emit_phys_guard_commit_state
-    test eax,eax; jnz .gepgrc_bad
-.gepgrc_true_next:
-    inc r15d; jmp .gepgrc_true_scan
-.gepgrc_true_done:
-    call g_emit_jmp_patch
-    test rax,rax; jz .gepgrc_bad
-    mov r14,rax
-    mov rsi,[rip+g_emit_ptr]; mov rdi,r13; call g_patch_rel32
-
-    xor r15d,r15d
-.gepgrc_false_scan:
-    cmp r15d,dword ptr [rip+g_reg_iter_total]; jae .gepgrc_false_done
-    mov rax,[rip+g_phys_state_guard_ptr]; cmp dword ptr [rax+r15*4],r12d; jne .gepgrc_false_next
-    mov edi,r15d; xor esi,esi; call g_emit_phys_guard_commit_state
-    test eax,eax; jnz .gepgrc_bad
-.gepgrc_false_next:
-    inc r15d; jmp .gepgrc_false_scan
-.gepgrc_false_done:
-    mov rsi,[rip+g_emit_ptr]; mov rdi,r14; call g_patch_rel32
-.gepgrc_next:
-    inc ebx; jmp .gepgrc_outer
-.gepgrc_ok:
-    xor eax,eax; jmp .gepgrc_done
-.gepgrc_bad:
-    mov eax,1
-.gepgrc_done:
-    pop r15; pop r14; pop r13; pop r12; pop rbx; ret
-
 # ---------------- unified transition Physical Reality ----------------
 # 1.3.20 removes the historical 2-state xadd and 3-state shift/add private
 # transition emitters.  Every recurrence shape now enters the same Rank-N
@@ -8114,7 +10914,8 @@ g_emit_phys_guard_region_commits:
 g_try_emit_reg_iterate:
     push rbx; push r12; push r13; push r14; push r15
     mov rbx,rdi
-    mov rax,[rip+g_emit_ptr]; mov [rip+g_reg_iter_emit_start],rax
+    mov [rip+g_reg_iter_symbol],rbx
+    G_EMIT_POSITION rax; mov [rip+g_reg_iter_emit_start],rax
     mov r12,[rbx+32]
     mov dword ptr [rip+g_state_count],0
     mov dword ptr [rip+g_reg_iter_total],0
@@ -8126,7 +10927,7 @@ g_try_emit_reg_iterate:
 .gtri_decl_scan:
     test r13,r13; jz .gtri_decl_done
     cmp r14d,dword ptr [rip+g_state_capacity]; jae .gtri_no
-    mov rdi,r13; call g_state_decl_scalar_type; test eax,eax; jz .gtri_no
+    mov rdi,r13; call g_state_decl_type; test eax,eax; jz .gtri_no
     mov r10d,eax
     mov rdi,r13; lea rsi,[rip+gk_name]; mov edx,gk_name_end-gk_name; call obj_get
     test rax,rax; jz .gtri_no
@@ -8137,7 +10938,7 @@ g_try_emit_reg_iterate:
     mov dword ptr [r11+16],r10d
     mov dword ptr [r11+20],-1
     mov dword ptr [r11+24],r14d
-    mov dword ptr [r11+28],-1       # transition-slice dense lane: absent until proved
+    mov dword ptr [r11+28],-1       # recurrence causal slice: -1 dead, -2 live, >=0 dense lane
     mov rax,[rip+g_reg_iter_decls_ptr]; mov [rax+r14*8],r13
     inc r14d
     mov r13,[r13+32]; jmp .gtri_decl_scan
@@ -8167,6 +10968,7 @@ g_try_emit_reg_iterate:
     cmp qword ptr [rax],J_STRING; jne .gtri_no
     mov [rip+g_reg_iter_result_name_node],rax
 
+    mov eax,[rip+g_reg_iter_total]; mov [rip+g_state_count],eax
     # Prove common counted-loop form independently of the value update.
     mov dword ptr [rip+g_reg_iter_counted],0
     xor ecx,ecx
@@ -8176,6 +10978,9 @@ g_try_emit_reg_iterate:
     mov rdi,[rip+g_reg_iter_cond_expr]; mov rsi,[r11]; mov rdx,[r11+8]
     push rcx; call g_match_counter_bound; pop rcx
     test eax,eax; jz .gtri_counted_probe_next
+    mov [rip+g_counted_proof_kind],eax
+    mov eax,ecx; shl rax,5; mov r11,[rip+g_states_ptr]; add r11,rax
+    cmp dword ptr [r11+16],GTYPE_U64; jne .gtri_counted_probe_next
     mov rax,[rip+g_reg_iter_decls_ptr]; mov r13,[rax+rcx*8]
     mov rdi,r13; lea rsi,[rip+gk_init]; mov edx,gk_init_end-gk_init; push rcx; call obj_get; pop rcx
     test rax,rax; jz .gtri_counted_probe_next
@@ -8192,13 +10997,23 @@ g_try_emit_reg_iterate:
     mov rdi,rax; mov rsi,[r11]; mov rdx,[r11+8]
     push rcx; call g_match_counter_inc; pop rcx
     test eax,eax; jz .gtri_counted_probe_next
-    mov dword ptr [rip+g_reg_iter_counted],1
+    mov eax,[rip+g_counted_proof_kind]
+    mov dword ptr [rip+g_reg_iter_counted],eax
     mov dword ptr [rip+g_reg_iter_counter_index],ecx
     mov rax,[rip+g_counted_bound_expr]; mov [rip+g_reg_iter_bound_expr],rax
     jmp .gtri_counted_probe_done
 .gtri_counted_probe_next:
     inc ecx; jmp .gtri_counted_probe
 .gtri_counted_probe_done:
+    # The published StateFact and the loop-control relation own one causal
+    # backward slice for every recurrence realization.  Dead semantic states
+    # never enter carrier assignment, episode CSE, guards, or timestep updates.
+    # states[+28]: -1 dead, -2 live, >=0 temporary dense Rank-N lane.
+    mov eax,dword ptr [rip+g_reg_iter_total]
+    mov dword ptr [rip+g_state_count],eax
+    call g_build_iterate_live_slice
+    test eax,eax; jnz .gtri_no
+
     # 1.3.15: semantic data role is no longer a physical register identity.
     # Any finite represented state set enters the
     # same causal Physical Reality episode.  The counted induction fact is an
@@ -8209,7 +11024,11 @@ g_try_emit_reg_iterate:
 .gtri_role_loop:
     cmp ecx,dword ptr [rip+g_reg_iter_total]; jae .gtri_role_done
     mov eax,ecx; shl rax,5; mov r11,[rip+g_states_ptr]; add r11,rax
-    cmp dword ptr [rip+g_reg_iter_counted],1; jne .gtri_role_data
+    cmp dword ptr [r11+28],-1; jne .gtri_role_live
+    mov dword ptr [r11+20],-1
+    jmp .gtri_role_next
+.gtri_role_live:
+    cmp dword ptr [rip+g_reg_iter_counted],0; je .gtri_role_data
     cmp ecx,dword ptr [rip+g_reg_iter_counter_index]; jne .gtri_role_data
     mov dword ptr [r11+20],-1
     jmp .gtri_role_next
@@ -8236,15 +11055,13 @@ g_try_emit_reg_iterate:
     test eax,eax
     jnz .gtri_done
 
-    mov dword ptr [rip+g_phys_fp_transient_outputs],0
-.gtri_physical_profile_retry:
+    mov dword ptr [rip+g_phys_const_pool_ready],0
     call g_phys_assign_state_carriers
     test eax,eax; jnz .gtri_no
 
     # Speculative AOT physicalization proof. Emit each next-state
     # expression into the code buffer, verify its type, then rewind the buffer.
     # This is a compile-time proof probe only: no runtime graph walker exists.
-    mov dword ptr [rip+g_phys_shared_pressure_exhausted],0
     mov dword ptr [rip+g_phys_const_candidate_count],0
     mov dword ptr [rip+g_phys_const_resident_count],0
     mov dword ptr [rip+g_phys_cse_candidate_count],0
@@ -8252,14 +11069,18 @@ g_try_emit_reg_iterate:
     mov dword ptr [rip+g_phys_cse_ready_count],0
     mov dword ptr [rip+g_phys_fp_temp_peak],0
     mov dword ptr [rip+g_phys_fp_temp_live],0
+    mov dword ptr [rip+g_phys_int_temp_peak],0
+    mov dword ptr [rip+g_phys_int_temp_live],0
     mov dword ptr [rip+g_phys_fp_temp_exhausted],0
     mov dword ptr [rip+g_phys_const_collect],1
-    mov rax,[rip+g_emit_ptr]; mov [rip+g_reg_native_probe_start],rax
+    G_EMIT_POSITION rax; mov [rip+g_reg_native_probe_start],rax
     mov eax,dword ptr [rip+g_reg_iter_total]; mov dword ptr [rip+g_state_count],eax
     xor ecx,ecx
 .gtri_native_probe_loop:
     cmp ecx,dword ptr [rip+g_reg_iter_total]; jae .gtri_native_probe_done
-    cmp dword ptr [rip+g_reg_iter_counted],1; jne .gtri_native_probe_real
+    mov eax,ecx; shl rax,5; mov r11,[rip+g_states_ptr]; add r11,rax
+    cmp dword ptr [r11+28],-1; je .gtri_native_probe_next
+    cmp dword ptr [rip+g_reg_iter_counted],0; je .gtri_native_probe_real
     cmp ecx,dword ptr [rip+g_reg_iter_counter_index]; je .gtri_native_probe_next
 .gtri_native_probe_real:
     mov eax,ecx; shl rax,5; mov r11,[rip+g_states_ptr]; add r11,rax
@@ -8277,23 +11098,47 @@ g_try_emit_reg_iterate:
     # children participate in the same episode CSE instead of a second graph.
     push rcx; push rax
     mov rdi,rax; mov esi,edx; call g_phys_cse_note_tree
+    call g_phys_temp_reset
     pop rax; pop rcx
     mov edx,ecx; shl rdx,5; mov r11,[rip+g_states_ptr]; add r11,rdx
     mov edx,dword ptr [r11+16]
     cmp edx,GTYPE_F64; je .gtri_native_probe_fp
     cmp edx,GTYPE_F32; je .gtri_native_probe_fp
-    # Integer ValueFacts do not need a second speculative expression pass.
-    # The authoritative integer Physical-DAG emitter below either realizes the
-    # exact wrap semantics or rolls the whole causal episode back to the single
-    # generic semantic path.  Removing the duplicate integer proof path avoids
-    # a second admission branch that historically reintroduced a state-count
-    # cliff when partial residency began.
-    jmp .gtri_native_probe_next
+    cmp edx,GTYPE_BOOL; je .gtri_native_probe_int
+    cmp edx,GTYPE_U64; je .gtri_native_probe_int
+    cmp edx,GTYPE_I64; je .gtri_native_probe_int
+    jmp .gtri_native_probe_fail
+.gtri_native_probe_int:
+    # Integer roots participate in this same single physical profile pass. This
+    # measures real anonymous GPR pressure for shared-ValueFact admission; it is
+    # not a second integer backend or a workload/state-count admission branch.
+    push rcx; push rax
+    mov ecx,dword ptr [rsp+8]
+    mov rdx,[rip+g_reg_iter_out_reg_ptr]; mov eax,dword ptr [rdx+rcx*4]
+    mov dword ptr [rip+g_phys_probe_temp],0
+    cmp eax,0; jge .gtri_native_probe_int_dest
+    call g_phys_int_temp_alloc
+    cmp eax,0; jl .gtri_native_probe_int_fail
+    mov dword ptr [rip+g_phys_probe_temp],1
+.gtri_native_probe_int_dest:
+    mov ecx,dword ptr [rsp+8]
+    mov dword ptr [rip+g_phys_probe_dest],eax
+    mov esi,eax
+    mov eax,ecx; shl rax,5; mov r11,[rip+g_states_ptr]; add r11,rax
+    mov edx,dword ptr [r11+16]
+    pop rdi
+    call g_emit_phys_gpr_value_to
+    push rax
+    cmp dword ptr [rip+g_phys_probe_temp],1; jne .gtri_native_probe_int_done
+    mov edi,dword ptr [rip+g_phys_probe_dest]; call g_phys_int_temp_free
+.gtri_native_probe_int_done:
+    pop rax; pop rcx
+    jmp .gtri_native_probe_typecheck
+.gtri_native_probe_int_fail:
+    pop rax; pop rcx
+    jmp .gtri_native_probe_fail
 .gtri_native_probe_fp:
     push rcx; push rax
-    call g_phys_fp_temp_reset
-    call g_phys_int_temp_reset
-    call g_phys_fp_temp_reset
     mov ecx,dword ptr [rsp+8]
     mov rdx,[rip+g_reg_iter_out_reg_ptr]; mov eax,dword ptr [rdx+rcx*4]
     mov dword ptr [rip+g_phys_probe_temp],0
@@ -8323,47 +11168,46 @@ g_try_emit_reg_iterate:
 .gtri_native_probe_next:
     inc ecx; jmp .gtri_native_probe_loop
 .gtri_native_probe_fail:
-    # Rewind speculative bytes first.  If the proof failed specifically because
-    # anonymous FP carriers were exhausted while a persistent next-version bank
-    # was competing for the same physical reality, release that candidate and
-    # retry the identical DAG once.  No state-count or workload threshold is
-    # consulted. Other failures still use the one generic semantic fallback.
     mov rax,[rip+g_reg_native_probe_start]; mov [rip+g_emit_ptr],rax
     mov dword ptr [rip+g_phys_const_collect],0
     mov dword ptr [rip+g_state_count],0
-    cmp dword ptr [rip+g_phys_fp_temp_exhausted],0; je .gtri_native_probe_semantic_fail
-    cmp dword ptr [rip+g_phys_fp_transient_outputs],0; jne .gtri_native_probe_semantic_fail
-    mov dword ptr [rip+g_phys_fp_transient_outputs],1
-    jmp .gtri_physical_profile_retry
 .gtri_native_probe_semantic_fail:
     # Do not maintain a second stack-compatible recurrence backend here.
     jmp .gtri_no
 .gtri_native_probe_done:
+    cmp dword ptr [rip+g_reg_iter_counted],1; je .gtri_control_collected
+    # Control collection may retain immutable inputs, but introduces no new
+    # state-dependent producer into the update lifetime. The actual condition
+    # sees only the already-materialized invariant prefix, never stale values.
+    mov dword ptr [rip+g_phys_cse_conditional_visit],2
+    mov rdi,[rip+g_reg_iter_cond_expr]; mov esi,GTYPE_BOOL; call g_phys_cse_note_tree
+    mov dword ptr [rip+g_phys_cse_conditional_visit],0
+.gtri_control_collected:
+    call g_phys_temp_reset
+    mov rdi,[rip+g_reg_iter_cond_expr]; call g_emit_phys_bool_jz_patch
+    test rax,rax; jz .gtri_native_probe_fail
     mov rax,[rip+g_reg_native_probe_start]; mov [rip+g_emit_ptr],rax
     mov dword ptr [rip+g_phys_const_collect],0
     call g_phys_cse_finalize
     call g_phys_cse_order_dependencies
-    call g_phys_const_finalize
-    cmp dword ptr [rip+g_phys_shared_pressure_exhausted],0; je .gtri_profile_selected
-    cmp dword ptr [rip+g_phys_fp_transient_outputs],0; jne .gtri_profile_selected
-    # Persistent next-version carriers blocked reusable ValueFacts. Re-map the
-    # same Physical DAG with transient next-version realization and profile once
-    # more. This is physical competition, not a workload/state-count branch.
-    mov dword ptr [rip+g_phys_fp_transient_outputs],1
-    jmp .gtri_physical_profile_retry
-.gtri_profile_selected:
     # Repeated PredicateFacts with independent next carriers become one guarded
     # Physical Region before liveness/authority decisions. This is a projection
     # of the existing DAG, not a second control IR.
+    # The selected shared subgraphs are now fixed. Derive the real old-state
+    # last-consumer frontier, then age each FP next-StateFact into the smallest
+    # carrier relation admitted by that liveness.
+    call g_phys_order_state_updates
+    test eax,eax; jnz .gtri_native_probe_semantic_fail
+    call g_phys_finalize_fp_state_carriers
+    test eax,eax; jnz .gtri_native_probe_semantic_fail
+    call g_phys_const_finalize
     call g_phys_build_guard_regions
     test eax,eax; jnz .gtri_native_probe_semantic_fail
-    # The selected shared subgraphs are now fixed. Derive the real old-state
-    # last-consumer frontier before emitting the episode, so timestep transport
-    # follows causality rather than a semantic boundary convention.
-    call g_phys_build_state_last_use
-    call g_phys_prove_inplace_fp_epoch
-    mov dword ptr [rip+g_phys_fp_inplace_epoch],eax
+    call g_phys_retire_control_materializations
+    call g_phys_prove_countdown_axis
+    mov dword ptr [rip+g_reg_iter_countdown],eax
     mov dword ptr [rip+g_phys_cse_ready_count],0
+    mov dword ptr [rip+g_phys_cse_control_ready_count],0
     mov dword ptr [rip+g_state_count],0
 
     mov dword ptr [rip+g_iter_reg_mode],1
@@ -8412,55 +11256,87 @@ g_try_emit_reg_iterate:
 .gtri_init_done:
     call g_emit_phys_resident_constants
     test eax,eax; jnz .gtri_rollback
+    call g_emit_phys_constant_pool
+    test eax,eax; jnz .gtri_rollback
     cmp dword ptr [rip+g_reg_iter_counted],1; je .gtri_counted_setup
+    # General lazy control can consume invocation facts itself. Its established
+    # demand frontier precedes the condition; counted entry needs no such fact.
+    call g_emit_phys_episode_invariants
+    test eax,eax; jnz .gtri_rollback
+    cmp dword ptr [rip+g_reg_iter_counted],0; jne .gtri_lazy_setup
     mov rdi,[rip+g_reg_iter_max_expr]; call g_emit_expr; cmp eax,GTYPE_U64; jne .gtri_rollback
     call g_emit_pop_rax
     lea rdi,[rip+gc_mov_rbp_rax]; mov esi,gc_mov_rbp_rax_end-gc_mov_rbp_rax; call g_emit_bytes
     lea rdi,[rip+gc_xor_rbx]; mov esi,gc_xor_rbx_end-gc_xor_rbx; call g_emit_bytes
-    mov r15,[rip+g_emit_ptr]
-    call g_phys_fp_temp_reset
-    call g_phys_int_temp_reset
+.gtri_lazy_setup:
+    # A bounded semantic ordinal already owns RBX. Retain the original lazy
+    # condition; its true edge proves both increment safety and limit safety.
+    G_EMIT_LOOP_POSITION r15,.gtri_rollback
+    call g_emit_phys_episode_control
+    test eax,eax; jnz .gtri_rollback
+    call g_phys_temp_reset
     mov rdi,[rip+g_reg_iter_cond_expr]; call g_emit_phys_bool_jz_patch
     test rax,rax; jz .gtri_rollback
     mov r14,rax
+    cmp dword ptr [rip+g_reg_iter_counted],0; jne .gtri_updates_start
     lea rdi,[rip+gc_iter_max_guard]; mov esi,gc_iter_max_guard_end-gc_iter_max_guard; call g_emit_bytes
     jmp .gtri_updates_start
 .gtri_counted_setup:
     mov rdi,[rip+g_reg_iter_bound_expr]; call g_emit_expr; cmp eax,GTYPE_U64; jne .gtri_rollback
     call g_emit_pop_rax
+    cmp dword ptr [rip+g_reg_iter_countdown],1; je .gtri_countdown_setup
     lea rdi,[rip+gc_mov_rbp_rax]; mov esi,gc_mov_rbp_rax_end-gc_mov_rbp_rax; call g_emit_bytes
-    mov r15,[rip+g_emit_ptr]
+    G_EMIT_POSITION r15
     lea rdi,[rip+gc_reg_iter_cmp_rbx_rbp]; mov esi,gc_reg_iter_cmp_rbx_rbp_end-gc_reg_iter_cmp_rbx_rbp; call g_emit_bytes
 .gtri_counted_exit_patch:
     lea rdi,[rip+gc_jae_prefix]; mov esi,gc_jae_prefix_end-gc_jae_prefix; call g_emit_bytes
-    mov r14,[rip+g_emit_ptr]; xor edi,edi; call g_emit_u32
+    G_EMIT_POSITION r14; xor edi,edi; call g_emit_u32
+    jmp .gtri_counted_setup_done
+.gtri_countdown_setup:
+    lea rdi,[rip+gc_mov_rbp_rax]; mov esi,gc_mov_rbp_rax_end-gc_mov_rbp_rax; call g_emit_bytes
+    lea rdi,[rip+gc_reg_iter_mov_rbx_rax]; mov esi,gc_reg_iter_mov_rbx_rax_end-gc_reg_iter_mov_rbx_rax; call g_emit_bytes
+    G_EMIT_POSITION r15
+    lea rdi,[rip+gc_reg_iter_test_rbx_rbx]; mov esi,gc_reg_iter_test_rbx_rbx_end-gc_reg_iter_test_rbx_rbx; call g_emit_bytes
+    lea rdi,[rip+gc_je_prefix]; mov esi,gc_je_prefix_end-gc_je_prefix; call g_emit_bytes
+    G_EMIT_POSITION r14; xor edi,edi; call g_emit_u32
+.gtri_counted_setup_done:
+    # A proved counted entry has no update demand at zero. Materialize the same
+    # invocation prefix only on its true edge, before the steady-state backedge.
+    call g_emit_phys_episode_invariants
+    test eax,eax; jnz .gtri_rollback
     # Native transitions keep the initial zero-trip guard but make the steady
     # state backedge bottom-tested, eliminating the historical unconditional jmp.
-    mov r15,[rip+g_emit_ptr]
+    G_EMIT_LOOP_POSITION r15,.gtri_rollback
 .gtri_updates_start:
+    mov [rip+g_reg_iter_exit_chain],r14
+    mov dword ptr [rip+g_phys_window_active],1
+    mov dword ptr [rip+g_phys_window_count],0
     call g_emit_phys_episode_cse
     test eax,eax; jnz .gtri_rollback
+    xor edi,edi
     call g_emit_phys_guard_regions
     test eax,eax; jnz .gtri_rollback
-    xor ecx,ecx
+    mov dword ptr [rip+g_phys_update_position],0
 .gtri_update_emit:
-    cmp ecx,dword ptr [rip+g_reg_iter_total]; jae .gtri_commit_regs
-    cmp dword ptr [rip+g_reg_iter_counted],1; jne .gtri_update_guard_check
+    mov eax,[rip+g_phys_update_position]
+    cmp eax,dword ptr [rip+g_reg_iter_total]; jae .gtri_commit_regs
+    mov rdx,[rip+g_phys_update_order_ptr]; mov ecx,[rdx+rax*4]
+    mov eax,ecx; shl rax,5; mov r11,[rip+g_states_ptr]; add r11,rax
+    cmp dword ptr [r11+28],-1; je .gtri_update_skip_counter
+    cmp dword ptr [rip+g_reg_iter_counted],0; je .gtri_update_guard_check
     cmp ecx,dword ptr [rip+g_reg_iter_counter_index]; je .gtri_update_skip_counter
 .gtri_update_guard_check:
     mov rax,[rip+g_phys_state_guard_ptr]
     cmp dword ptr [rax+rcx*4],0; jge .gtri_update_skip_counter
 .gtri_update_emit_real:
-    mov eax,ecx; shl rax,5; mov r11,[rip+g_states_ptr]; add r11,rax
-    mov rdi,[rip+g_reg_iter_update_obj]; mov rsi,[r11]; mov edx,dword ptr [r11+8]
-    push rcx; call obj_get; pop rcx
-    test rax,rax; jz .gtri_rollback
+    mov rax,[rip+g_phys_update_expr_ptr]; mov rax,[rax+rcx*8]
+    push rcx; push rax
+    call g_phys_temp_reset
+    mov ecx,dword ptr [rsp+8]
     mov edx,ecx; shl rdx,5; mov r11,[rip+g_states_ptr]; add r11,rdx
     mov edx,dword ptr [r11+16]
     cmp edx,GTYPE_F64; je .gtri_update_emit_fp
     cmp edx,GTYPE_F32; je .gtri_update_emit_fp
-    push rcx; push rax
-    call g_phys_int_temp_reset
     mov ecx,dword ptr [rsp+8]
     mov rdx,[rip+g_reg_iter_out_reg_ptr]; mov eax,dword ptr [rdx+rcx*4]
     mov dword ptr [rip+g_phys_probe_temp],0
@@ -8475,7 +11351,7 @@ g_try_emit_reg_iterate:
     mov eax,ecx; shl rax,5; mov r11,[rip+g_states_ptr]; add r11,rax
     mov edx,dword ptr [r11+16]
     pop rdi
-    call g_emit_phys_int_expr_to
+    call g_emit_phys_gpr_value_to
     push rax
     cmp dword ptr [rip+g_phys_probe_temp],1; jne .gtri_update_int_ready
     # Next-version spill: RAX receives the physical result bits only after the
@@ -8499,35 +11375,12 @@ g_try_emit_reg_iterate:
     pop rax; pop rcx
     jmp .gtri_rollback
 .gtri_update_emit_fp:
-    push rcx; push rax
-    call g_phys_fp_temp_reset
-    call g_phys_int_temp_reset
     mov ecx,dword ptr [rsp+8]
     mov dword ptr [rip+g_phys_probe_temp],0
 
-    # The generation is either one fixed-point carrier authority or the mature
-    # disjoint next-version realization. Never mix the two within one FP epoch.
-    cmp dword ptr [rip+g_phys_fp_inplace_epoch],1; jne .gtri_update_fp_separate_dest
-    mov rdx,[rip+g_reg_iter_old_reg_ptr]; mov r12d,dword ptr [rdx+rcx*4]
-    cmp r12d,0; jl .gtri_update_fp_fail
-    mov rdx,[rip+g_reg_iter_out_reg_ptr]; mov dword ptr [rdx+rcx*4],r12d
-    mov eax,r12d
-    jmp .gtri_update_fp_dest
-
-.gtri_update_fp_separate_dest:
-    # A disjoint next-version carrier has no physical purpose once this state's
-    # old authority is already dead before the current update. Reuse that exact
-    # carrier as the output destination. The proof is the existing effective
-    # last-consumer frontier, so no workload/state-shape rule is introduced.
-    mov ecx,dword ptr [rsp+8]
-    mov rdx,[rip+g_reg_iter_old_reg_ptr]; mov r12d,dword ptr [rdx+rcx*4]
-    cmp r12d,0; jl .gtri_update_fp_separate_alloc
-    mov rdx,[rip+g_phys_state_last_use_ptr]; mov eax,dword ptr [rdx+rcx*4]
-    cmp eax,ecx; jge .gtri_update_fp_separate_alloc
-    mov rdx,[rip+g_reg_iter_out_reg_ptr]; mov dword ptr [rdx+rcx*4],r12d
-    mov eax,r12d
-    jmp .gtri_update_fp_dest
-.gtri_update_fp_separate_alloc:
+    # Carrier identity was finalized once from post-CSE liveness. A nonnegative
+    # output is the unique persistent destination (possibly the old carrier);
+    # otherwise this next ValueFact is transient until the common commit.
     mov rdx,[rip+g_reg_iter_out_reg_ptr]; mov eax,dword ptr [rdx+rcx*4]
     cmp eax,0; jge .gtri_update_fp_dest
     call g_phys_fp_temp_alloc
@@ -8552,7 +11405,7 @@ g_try_emit_reg_iterate:
     mov rdx,[rip+g_reg_iter_old_reg_ptr]; mov r12d,dword ptr [rdx+rcx*4]
     cmp r12d,0; jl .gtri_update_fp_transport_temp
     mov rdx,[rip+g_phys_state_last_use_ptr]; mov eax,dword ptr [rdx+rcx*4]
-    cmp eax,ecx; jg .gtri_update_fp_transport_temp
+    cmp eax,[rip+g_phys_update_position]; jg .gtri_update_fp_transport_temp
     mov edi,r12d; mov esi,dword ptr [rip+g_phys_probe_dest]
     mov eax,ecx; shl rax,5; mov r11,[rip+g_states_ptr]; add r11,rax
     mov edx,dword ptr [r11+16]
@@ -8568,10 +11421,8 @@ g_try_emit_reg_iterate:
     mov ecx,dword ptr [rsp+8]
     mov eax,ecx; shl rax,5; mov r11,[rip+g_states_ptr]; add r11,rax
     mov edi,dword ptr [rip+g_phys_probe_dest]; mov esi,dword ptr [r11+16]
-    call g_emit_phys_xmm_to_rax
-    test eax,eax; jnz .gtri_update_fp_spill_fail
-    mov ecx,dword ptr [rsp+8]
-    mov eax,ecx; call g_state_temp_addr; mov rdi,rax; call g_emit_store_rax_abs
+    mov eax,ecx; call g_state_temp_addr; mov rdx,rax
+    call g_emit_phys_xmm_to_state_mem
     test eax,eax; jnz .gtri_update_fp_spill_fail
     mov edi,dword ptr [rip+g_phys_probe_dest]; call g_phys_fp_temp_free
 .gtri_update_fp_ready:
@@ -8586,19 +11437,24 @@ g_try_emit_reg_iterate:
     pop rax; pop rcx
     jmp .gtri_rollback
 .gtri_update_skip_counter:
-    inc ecx; jmp .gtri_update_emit
+    inc dword ptr [rip+g_phys_update_position]; jmp .gtri_update_emit
 .gtri_commit_regs:
+    call g_phys_window_barrier
+    mov dword ptr [rip+g_phys_window_active],0
     # The next generation lives in disjoint output carriers. Commit only after
     # every expression has consumed the old generation: true simultaneous state
     # transition without a stack, temp array, or overwrite hazard. Guarded
     # Regions transfer only changed authorities; exact identity arms are zero work.
-    call g_emit_phys_guard_region_commits
+    mov edi,1
+    call g_emit_phys_guard_regions
     test eax,eax; jnz .gtri_rollback
     xor ecx,ecx
 .gtri_native_commit_loop:
     cmp ecx,dword ptr [rip+g_reg_iter_total]; jae .gtri_commit_after_data
+    mov eax,ecx; shl rax,5; mov r11,[rip+g_states_ptr]; add r11,rax
+    cmp dword ptr [r11+28],-1; je .gtri_native_commit_next
     mov rax,[rip+g_phys_state_guard_ptr]; cmp dword ptr [rax+rcx*4],0; jge .gtri_native_commit_next
-    cmp dword ptr [rip+g_reg_iter_counted],1; jne .gtri_native_commit_real
+    cmp dword ptr [rip+g_reg_iter_counted],0; je .gtri_native_commit_real
     cmp ecx,dword ptr [rip+g_reg_iter_counter_index]; je .gtri_native_commit_next
 .gtri_native_commit_real:
     mov eax,ecx; shl rax,5; mov r11,[rip+g_states_ptr]; add r11,rax
@@ -8625,26 +11481,31 @@ g_try_emit_reg_iterate:
     test eax,eax; jnz .gtri_rollback
     jmp .gtri_native_commit_next
 .gtri_commit_out_fp_to_mem:
-    mov edi,dword ptr [rip+g_phys_commit_out]; mov esi,dword ptr [rip+g_phys_commit_type]; push rcx; call g_emit_phys_xmm_to_rax; pop rcx
-    test eax,eax; jnz .gtri_rollback
-    mov eax,ecx; call g_state_slot_addr; mov rdi,rax; push rcx; call g_emit_store_rax_abs; pop rcx
+    mov eax,ecx; call g_state_slot_addr; mov rdx,rax
+    mov edi,dword ptr [rip+g_phys_commit_out]; mov esi,dword ptr [rip+g_phys_commit_type]; push rcx; call g_emit_phys_xmm_to_state_mem; pop rcx
     test eax,eax; jnz .gtri_rollback
     jmp .gtri_native_commit_next
 .gtri_commit_from_temp:
-    # Spilled next version was materialized once after its expression.  Commit
-    # either back into a resident old carrier or into the persistent state slot.
+    # The temp slot is already an AddressFact.  FP next-StateFacts move directly
+    # between that address and their resident carrier; integers retain the GPR
+    # form because RAX is their existing physical value authority.
+    cmp dword ptr [rip+g_phys_commit_type],GTYPE_F64; je .gtri_commit_from_temp_fp
+    cmp dword ptr [rip+g_phys_commit_type],GTYPE_F32; je .gtri_commit_from_temp_fp
     mov eax,ecx; call g_state_temp_addr; mov rdi,rax; push rcx; call g_emit_load_rax_abs; pop rcx
     test eax,eax; jnz .gtri_rollback
     cmp dword ptr [rip+g_phys_commit_old],0; jl .gtri_commit_temp_to_mem
-    cmp dword ptr [rip+g_phys_commit_type],GTYPE_F64; je .gtri_commit_temp_to_fp
-    cmp dword ptr [rip+g_phys_commit_type],GTYPE_F32; je .gtri_commit_temp_to_fp
     mov edi,dword ptr [rip+g_phys_commit_old]; xor esi,esi; push rcx; call g_emit_phys_gpr_move; pop rcx
     test eax,eax; jnz .gtri_rollback
     jmp .gtri_native_commit_next
-.gtri_commit_temp_to_fp:
-    mov edi,dword ptr [rip+g_phys_commit_old]; mov esi,dword ptr [rip+g_phys_commit_type]; push rcx; call g_emit_phys_xmm_from_rax; pop rcx
+.gtri_commit_from_temp_fp:
+    cmp dword ptr [rip+g_phys_commit_old],0; jl .gtri_commit_temp_fp_to_mem
+    mov eax,ecx; call g_state_temp_addr; mov rdx,rax
+    mov edi,dword ptr [rip+g_phys_commit_old]; mov esi,dword ptr [rip+g_phys_commit_type]; push rcx; call g_emit_phys_xmm_from_state_mem; pop rcx
     test eax,eax; jnz .gtri_rollback
     jmp .gtri_native_commit_next
+.gtri_commit_temp_fp_to_mem:
+    mov eax,ecx; call g_state_temp_addr; mov rdi,rax; push rcx; call g_emit_load_rax_abs; pop rcx
+    test eax,eax; jnz .gtri_rollback
 .gtri_commit_temp_to_mem:
     mov eax,ecx; call g_state_slot_addr; mov rdi,rax; push rcx; call g_emit_store_rax_abs; pop rcx
     test eax,eax; jnz .gtri_rollback
@@ -8654,29 +11515,36 @@ g_try_emit_reg_iterate:
     # Canonicalize generic emitted machine sequences only after the complete
     # simultaneous transition has been formed. No semantic/source pattern owns
     # a separate emitter.
-    mov rdi,r15; mov rsi,[rip+g_emit_ptr]; call g_phys_machine_canonicalize
-    cmp dword ptr [rip+g_reg_iter_counted],1; je .gtri_counted_inc
+    mov rdi,r15; G_EMIT_POSITION rsi; call g_phys_machine_canonicalize
+    cmp dword ptr [rip+g_reg_iter_countdown],1; je .gtri_countdown_backedge
     lea rdi,[rip+gc_inc_rbx]; mov esi,gc_inc_rbx_end-gc_inc_rbx; call g_emit_bytes
-    jmp .gtri_back_edge
-.gtri_counted_inc:
-    lea rdi,[rip+gc_reg_iter_inc_rbx]; mov esi,gc_reg_iter_inc_rbx_end-gc_reg_iter_inc_rbx; call g_emit_bytes
+    cmp dword ptr [rip+g_reg_iter_counted],1; jne .gtri_back_edge
     # Bottom-tested steady-state backedge: one conditional branch, no
     # unconditional jump and no duplicate top comparison per iteration.
     lea rdi,[rip+gc_reg_iter_cmp_rbx_rbp]; mov esi,gc_reg_iter_cmp_rbx_rbp_end-gc_reg_iter_cmp_rbx_rbp; call g_emit_bytes
-    lea rdi,[rip+gc_jb_prefix]; mov esi,gc_jb_prefix_end-gc_jb_prefix; call g_emit_bytes
-    mov rax,[rip+g_emit_ptr]; lea rcx,[rax+4]; cmp rcx,[rip+g_emit_end]; jbe 92f
-    mov dword ptr [rip+g_code_overflow],1; jmp .gtri_rollback
-92:
-    mov rdx,r15; sub rdx,rcx; mov [rax],edx; mov [rip+g_emit_ptr],rcx
+    mov esi,0x72
+    jmp .gtri_counted_patch_backedge
+.gtri_countdown_backedge:
+    lea rdi,[rip+gc_reg_iter_dec_rbx]; mov esi,gc_reg_iter_dec_rbx_end-gc_reg_iter_dec_rbx; call g_emit_bytes
+    mov esi,0x75
+.gtri_counted_patch_backedge:
+    mov rdi,r15; call g_emit_known_backedge
+    test eax,eax; jnz .gtri_rollback
     jmp .gtri_patch_exit
 .gtri_back_edge:
     mov edi,0xE9; call g_emit_u8
-    mov rax,[rip+g_emit_ptr]; lea rcx,[rax+4]; cmp rcx,[rip+g_emit_end]; jbe 92f
+    G_EMIT_POSITION rax; lea rcx,[rax+4]; cmp rcx,[rip+g_emit_end]; jbe 92f
     mov dword ptr [rip+g_code_overflow],1; jmp .gtri_rollback
 92:
     mov rdx,r15; sub rdx,rcx; mov [rax],edx; mov [rip+g_emit_ptr],rcx
 .gtri_patch_exit:
-    mov rsi,[rip+g_emit_ptr]; mov rdi,r14; call g_patch_rel32
+    G_EMIT_POSITION rax
+    sub rax,r15
+    imul rax,PRC_FRONTEND_BYTE_TICKS
+    mov edx,0xffffffff; cmp rax,rdx; ja 987f
+    mov [rip+g_current_loop_work_ticks],eax
+987:
+    G_EMIT_POSITION rsi; mov rdi,[rip+g_reg_iter_exit_chain]; call g_phys_patch_chain
     mov rax,[rip+g_reg_iter_result_name_node]
     mov rdi,[rax+8]; mov rsi,[rax+16]; call g_find_state; test rax,rax; jz .gtri_rollback
     mov r11,rax
@@ -8699,8 +11567,7 @@ g_try_emit_reg_iterate:
     test eax,eax; jnz .gtri_rollback
     jmp .gtri_store
 .gtri_result_counter:
-    mov edi,0; mov esi,3
-    call g_emit_phys_gpr_move
+    call g_emit_phys_final_counter
     test eax,eax; jnz .gtri_rollback
     jmp .gtri_store
 .gtri_result_spill:
@@ -8708,15 +11575,54 @@ g_try_emit_reg_iterate:
     test eax,eax; jnz .gtri_rollback
 .gtri_store:
     mov eax,dword ptr [rbx+24]; call g_binding_slot_addr; mov rdi,rax; call g_emit_store_rax_abs
+    test eax,eax; jnz .gtri_rollback
+    mov rdi,rbx; call g_emit_reg_iter_projection_stores
+    test eax,eax; jnz .gtri_rollback
     mov dword ptr [rip+g_iter_reg_mode],0
     mov dword ptr [rip+g_cached_binding_slot],PR_FACT_INVALID
     mov eax,1; jmp .gtri_done
 .gtri_rollback:
+    mov dword ptr [rip+g_current_loop_work_ticks],0
+    mov dword ptr [rip+g_phys_window_active],0
+    mov dword ptr [rip+g_phys_window_count],0
     mov rax,[rip+g_reg_iter_emit_start]; mov [rip+g_emit_ptr],rax
     mov dword ptr [rip+g_iter_reg_mode],0
     mov dword ptr [rip+g_cached_binding_slot],PR_FACT_INVALID
 .gtri_no: xor eax,eax
 .gtri_done: pop r15; pop r14; pop r13; pop r12; pop rbx; ret
+
+# The final ordinal of a proved zero-based exact counted loop is its bound,
+# including the zero-trip edge. Both publication paths consume this authority.
+g_emit_phys_final_counter:
+    xor edi,edi; mov esi,3
+    cmp dword ptr [rip+g_reg_iter_counted],1; jne 1f
+    mov esi,5
+1:  jmp g_emit_phys_gpr_move
+
+# rdi=already bound backward target, esi=short Jcc opcode. Choose encoding from
+# signed displacement alone. No labels move and no hot padding is introduced.
+g_emit_known_backedge:
+    push rbx; push r12
+    mov rbx,rdi; mov r12d,esi
+    call g_phys_window_barrier
+    mov rax,[rip+g_emit_ptr]
+    lea rcx,[rax+2]; mov rdx,rbx; sub rdx,rcx
+    cmp rdx,-128; jl .gekbe_near
+    cmp rdx,127; jg .gekbe_near
+    cmp rcx,[rip+g_emit_end]; ja .gekbe_fail
+    mov [rax],r12b; mov [rax+1],dl
+    jmp .gekbe_commit
+.gekbe_near:
+    lea rcx,[rax+6]; cmp rcx,[rip+g_emit_end]; ja .gekbe_fail
+    mov byte ptr [rax],0x0f
+    add r12d,0x10; mov [rax+1],r12b
+    sub rbx,rcx; mov [rax+2],ebx
+.gekbe_commit:
+    mov [rip+g_emit_ptr],rcx; xor eax,eax
+    pop r12; pop rbx; ret
+.gekbe_fail:
+    mov dword ptr [rip+g_code_overflow],1; mov eax,1
+    pop r12; pop rbx; ret
 
 # ---------------- generic counted recurrence proof helpers ----------------
 # rdi=expression, rsi=state name ptr, rdx=name len -> eax bool.
@@ -8749,6 +11655,114 @@ g_expr_u64_literal:
 .geul_bad: xor eax,eax; mov edx,1
 .geul_done: pop r12; pop rbx; ret
 
+
+# Publish exactly the downstream-consumed final StateFacts of one native
+# recurrence. The ordinary result slot was already stored by the caller.
+# rdi=iterate symbol -> eax=0/1.
+g_emit_reg_iter_projection_stores:
+    push rbx; push r12; push r13; push r14; push r15
+    mov rbx,rdi; xor r12d,r12d
+.gerips_loop:
+    cmp r12d,dword ptr [rip+g_iter_projection_count]; jae .gerips_ok
+    mov rax,[rip+g_iter_projection_symbol_ptr]
+    cmp qword ptr [rax+r12*8],rbx; jne .gerips_next
+    mov rax,[rip+g_iter_projection_slot_ptr]; mov r14d,dword ptr [rax+r12*4]
+    cmp r14d,dword ptr [rbx+24]; je .gerips_next
+    mov rax,[rip+g_iter_projection_state_index_ptr]; mov r15d,dword ptr [rax+r12*4]
+    cmp r15d,dword ptr [rip+g_reg_iter_total]; jae .gerips_bad
+    mov eax,r15d; shl rax,5; mov r13,[rip+g_states_ptr]; add r13,rax
+    mov rdx,[rip+g_reg_iter_carrier_kind_ptr]; mov eax,dword ptr [rdx+r15*4]
+    cmp eax,G_PHYS_CARRIER_COUNTER; je .gerips_counter
+    mov rdx,[rip+g_reg_iter_old_reg_ptr]; mov edi,dword ptr [rdx+r15*4]
+    cmp edi,0; jl .gerips_spill
+    cmp eax,G_PHYS_CARRIER_FP; je .gerips_fp
+    cmp eax,G_PHYS_CARRIER_INT; jne .gerips_bad
+    mov esi,edi; xor edi,edi
+    call g_emit_phys_gpr_move
+    test eax,eax; jnz .gerips_bad
+    jmp .gerips_store
+.gerips_fp:
+    mov esi,dword ptr [r13+16]
+    call g_emit_phys_xmm_to_rax
+    test eax,eax; jnz .gerips_bad
+    jmp .gerips_store
+.gerips_counter:
+    call g_emit_phys_final_counter
+    test eax,eax; jnz .gerips_bad
+    jmp .gerips_store
+.gerips_spill:
+    mov eax,r15d; call g_state_slot_addr; mov rdi,rax; call g_emit_load_rax_abs
+    test eax,eax; jnz .gerips_bad
+.gerips_store:
+    mov eax,r14d; call g_binding_slot_addr; mov rdi,rax; call g_emit_store_rax_abs
+    test eax,eax; jnz .gerips_bad
+.gerips_next:
+    inc r12d; jmp .gerips_loop
+.gerips_ok:
+    xor eax,eax; jmp .gerips_done
+.gerips_bad:
+    mov eax,1
+.gerips_done:
+    pop r15; pop r14; pop r13; pop r12; pop rbx; ret
+
+# Generic recurrence uses the same projection metadata; final states already
+# reside in the execution-local frame after the last simultaneous commit.
+g_emit_generic_iter_projection_stores:
+    push rbx; push r12; push r13; push r14
+    mov rbx,rdi; xor r12d,r12d
+.gegips_loop:
+    cmp r12d,dword ptr [rip+g_iter_projection_count]; jae .gegips_ok
+    mov rax,[rip+g_iter_projection_symbol_ptr]
+    cmp qword ptr [rax+r12*8],rbx; jne .gegips_next
+    mov rax,[rip+g_iter_projection_slot_ptr]; mov r13d,dword ptr [rax+r12*4]
+    cmp r13d,dword ptr [rbx+24]; je .gegips_next
+    mov rax,[rip+g_iter_projection_state_index_ptr]; mov r14d,dword ptr [rax+r12*4]
+    cmp r14d,dword ptr [rip+g_state_count]; jae .gegips_bad
+    mov eax,r14d; call g_state_slot_addr; mov rdi,rax; call g_emit_load_rax_abs
+    test eax,eax; jnz .gegips_bad
+    mov eax,r13d; call g_binding_slot_addr; mov rdi,rax; call g_emit_store_rax_abs
+    test eax,eax; jnz .gegips_bad
+.gegips_next:
+    inc r12d; jmp .gegips_loop
+.gegips_ok:
+    xor eax,eax; jmp .gegips_done
+.gegips_bad:
+    mov eax,1
+.gegips_done:
+    pop r14; pop r13; pop r12; pop rbx; ret
+
+# Transition-power already leaves the whole final dense StateFact vector in x[].
+# Publish projected lanes from that same scratch authority; do not rerun or clone
+# the recurrence merely because more than one downstream field is consumed.
+g_emit_transition_projection_stores:
+    push rbx; push r12; push r13; push r14; push r15
+    mov rbx,rdi; xor r12d,r12d
+.getps_loop:
+    cmp r12d,dword ptr [rip+g_iter_projection_count]; jae .getps_ok
+    mov rax,[rip+g_iter_projection_symbol_ptr]
+    cmp qword ptr [rax+r12*8],rbx; jne .getps_next
+    mov rax,[rip+g_iter_projection_slot_ptr]; mov r13d,dword ptr [rax+r12*4]
+    cmp r13d,dword ptr [rbx+24]; je .getps_next
+    mov rax,[rip+g_iter_projection_state_index_ptr]; mov r14d,dword ptr [rax+r12*4]
+    cmp r14d,dword ptr [rip+g_reg_iter_total]; jae .getps_bad
+    mov eax,r14d; shl rax,5; mov r15,[rip+g_states_ptr]; add r15,rax
+    mov ecx,dword ptr [r15+28]
+    test ecx,ecx; js .getps_bad
+    mov rdi,[rip+g_transition_power_scratch_base]
+    lea rdi,[rdi+rcx*8]
+    call g_emit_load_rax_abs
+    test eax,eax; jnz .getps_bad
+    mov eax,r13d; call g_binding_slot_addr; mov rdi,rax; call g_emit_store_rax_abs
+    test eax,eax; jnz .getps_bad
+.getps_next:
+    inc r12d; jmp .getps_loop
+.getps_ok:
+    xor eax,eax; jmp .getps_done
+.getps_bad:
+    mov eax,1
+.getps_done:
+    pop r15; pop r14; pop r13; pop r12; pop rbx; ret
+
 # ---------------- 1.3.67 Rank-N transition-power algebra ----------------
 # Transition power is no longer a scalar self-map authority.  The published
 # result owns a causal backward slice over the existing semantic state vector.
@@ -8761,9 +11775,89 @@ g_expr_u64_literal:
 # no state-count dispatch, fixed dimension, workload identity, or repetition
 # threshold exists.  A one-state recurrence is simply Rank-N with N=1.
 
+# Build the one recurrence-wide causal state slice.  The published result and
+# loop-control expressions seed the slice; state-update dependencies close it to
+# a fixed point.  The graph decides depth/cardinality. No workload name, state
+# count, timestep ratio, or dynamics class participates.
+# -> eax=0 success / 1 malformed semantic state reference.
+g_build_iterate_live_slice:
+    push rbx
+    push r12
+    push r13
+    xor ebx,ebx
+.gbils_clear:
+    cmp ebx,dword ptr [rip+g_reg_iter_total]
+    jae .gbils_seed_result
+    mov eax,ebx; shl rax,5; mov r11,[rip+g_states_ptr]; add r11,rax
+    mov dword ptr [r11+28],-1
+    inc ebx
+    jmp .gbils_clear
+.gbils_seed_result:
+    mov rax,[rip+g_reg_iter_result_name_node]
+    mov rdi,[rax+8]; mov rsi,[rax+16]; call g_find_state
+    test rax,rax; jz .gbils_bad
+    mov dword ptr [rax+28],-2
+
+    # Downstream field consumers are additional publication roots of the same
+    # recurrence. They seed the old backward slice; no separate bundle/live-set
+    # authority exists. Unconsumed final StateFacts remain causally dead.
+    xor r12d,r12d
+.gbils_projection_seed:
+    cmp r12d,dword ptr [rip+g_iter_projection_count]; jae .gbils_projection_done
+    mov rax,[rip+g_iter_projection_symbol_ptr]
+    mov r13,[rip+g_reg_iter_symbol]
+    cmp qword ptr [rax+r12*8],r13; jne .gbils_projection_next
+    mov rax,[rip+g_iter_projection_state_index_ptr]; mov ecx,dword ptr [rax+r12*4]
+    cmp ecx,dword ptr [rip+g_reg_iter_total]; jae .gbils_bad
+    mov eax,ecx; shl rax,5; mov r11,[rip+g_states_ptr]; add r11,rax
+    mov dword ptr [r11+28],-2
+.gbils_projection_next:
+    inc r12d; jmp .gbils_projection_seed
+.gbils_projection_done:
+
+    # Control is part of causality: a StateFact that determines whether another
+    # transition occurs is live even when it is not in the published value DAG.
+    mov rdi,[rip+g_reg_iter_cond_expr]
+    call g_transition_mark_state_refs
+    test eax,eax; jnz .gbils_bad
+    mov rdi,[rip+g_reg_iter_max_expr]
+    call g_transition_mark_state_refs
+    test eax,eax; jnz .gbils_bad
+
+.gbils_closure_pass:
+    mov dword ptr [rip+g_transition_slice_changed],0
+    xor ebx,ebx
+.gbils_closure_scan:
+    cmp ebx,dword ptr [rip+g_reg_iter_total]
+    jae .gbils_closure_done
+    mov eax,ebx; shl rax,5; mov r11,[rip+g_states_ptr]; add r11,rax
+    cmp dword ptr [r11+28],-2
+    jne .gbils_next
+    mov rdi,[rip+g_reg_iter_update_obj]; mov rsi,[r11]; mov edx,dword ptr [r11+8]
+    call obj_get
+    test rax,rax; jz .gbils_bad
+    mov rdi,rax
+    call g_transition_mark_state_refs
+    test eax,eax; jnz .gbils_bad
+.gbils_next:
+    inc ebx
+    jmp .gbils_closure_scan
+.gbils_closure_done:
+    cmp dword ptr [rip+g_transition_slice_changed],0
+    jne .gbils_closure_pass
+    xor eax,eax
+    jmp .gbils_done
+.gbils_bad:
+    mov eax,1
+.gbils_done:
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
 # rdi=expression -> eax=0 success / 1 malformed state reference.
 # Every semantic state reference reachable in the expression is added to the
-# current transition backward slice by changing states[+28] from -1 to -2.
+# current recurrence causal slice by changing states[+28] from -1 to -2.
 g_transition_mark_state_refs:
     push rbx
     push r12
@@ -8981,7 +12075,7 @@ g_try_emit_transition_power_slice:
     push r14
     push r15
     mov rbx,rdi
-    mov rax,[rip+g_emit_ptr]; mov [rip+g_transition_power_emit_start],rax
+    G_EMIT_POSITION rax; mov [rip+g_transition_power_emit_start],rax
     mov rax,[rip+g_runtime_temp_bytes_used]; mov [rip+g_transition_power_temp_start],rax
     cmp dword ptr [rip+g_reg_iter_counted],1
     jne .gtps_no
@@ -8999,46 +12093,12 @@ g_try_emit_transition_power_slice:
     mov r14d,dword ptr [rax+24]
     mov dword ptr [rip+g_transition_power_result_index],r14d
 
-    # Reset the per-state dense-lane fact and seed the result backward slice.
-    xor ecx,ecx
-.gtps_clear_slice:
-    cmp ecx,dword ptr [rip+g_reg_iter_total]
-    jae .gtps_seed
-    mov eax,ecx; shl rax,5; mov r11,[rip+g_states_ptr]; add r11,rax
-    mov dword ptr [r11+28],-1
-    inc ecx
-    jmp .gtps_clear_slice
-.gtps_seed:
-    mov eax,r14d; shl rax,5; mov r11,[rip+g_states_ptr]; add r11,rax
-    mov dword ptr [r11+28],-2
-
-    # Fixed point of semantic state dependencies.  The graph itself decides the
-    # slice depth; no finite pass count or state-count threshold is encoded.
-.gtps_closure_pass:
-    mov dword ptr [rip+g_transition_slice_changed],0
-    xor ecx,ecx
-.gtps_closure_scan:
-    cmp ecx,dword ptr [rip+g_reg_iter_total]
-    jae .gtps_closure_done_scan
-    mov eax,ecx; shl rax,5; mov r11,[rip+g_states_ptr]; add r11,rax
-    cmp dword ptr [r11+28],-2
-    jne .gtps_closure_next
-    mov rdi,[rip+g_reg_iter_update_obj]; mov rsi,[r11]; mov edx,dword ptr [r11+8]
-    push rcx; call obj_get; pop rcx
-    test rax,rax
-    jz .gtps_rollback
-    push rcx
-    mov rdi,rax
-    call g_transition_mark_state_refs
-    pop rcx
-    test eax,eax
-    jnz .gtps_rollback
-.gtps_closure_next:
-    inc ecx
-    jmp .gtps_closure_scan
-.gtps_closure_done_scan:
-    cmp dword ptr [rip+g_transition_slice_changed],0
-    jne .gtps_closure_pass
+    # The ordinary StateFact episode already owns the exact causal backward
+    # slice. Transition power is only another physical realization of those
+    # same live facts; it may assign temporary dense lanes but never rebuild a
+    # second dependency slice.
+    cmp dword ptr [rax+28],-1
+    je .gtps_no
 
     # Replace the temporary -2 mark with one dense Rank-N lane.  All reachable
     # states must share wrap-u64 algebra; unrelated states remain absent (-1).
@@ -9189,6 +12249,8 @@ g_try_emit_transition_power_slice:
     mov eax,dword ptr [rbx+24]; call g_binding_slot_addr; mov rdi,rax; call g_emit_store_rax_abs
     test eax,eax
     jnz .gtps_rollback
+    mov rdi,rbx; call g_emit_transition_projection_stores
+    test eax,eax; jnz .gtps_rollback
     mov dword ptr [rip+g_iter_reg_mode],0
     mov dword ptr [rip+g_cached_binding_slot],PR_FACT_INVALID
     mov eax,1
@@ -9202,7 +12264,10 @@ g_try_emit_transition_power_slice:
     cmp ecx,dword ptr [rip+g_reg_iter_total]
     jae .gtps_no
     mov eax,ecx; shl rax,5; mov r11,[rip+g_states_ptr]; add r11,rax
-    mov dword ptr [r11+28],-1
+    cmp dword ptr [r11+28],0
+    jl .gtps_rollback_next
+    mov dword ptr [r11+28],-2
+.gtps_rollback_next:
     inc ecx
     jmp .gtps_rollback_slice
 .gtps_no:
@@ -9216,39 +12281,26 @@ g_try_emit_transition_power_slice:
     pop rbx
     ret
 
-# rdi=exprA, rsi=exprB -> eax bool.
-# Accepts equal simple var references or equal u64 literals.
+# rdi=boundA, rsi=boundB -> eax=1 for equal immutable total u64 facts.
 g_expr_same_bound:
-    push rbx; push r12; push r13; push r14
-    mov rbx,rdi; mov r12,rsi
-    mov rdi,rbx; lea rsi,[rip+gk_var]; mov edx,gk_var_end-gk_var; call obj_get
-    test rax,rax; jz .gesb_literal
-    mov r13,rax
-    mov rdi,r12; lea rsi,[rip+gk_var]; mov edx,gk_var_end-gk_var; call obj_get
-    test rax,rax; jz .gesb_no
-    mov rdi,[r13+8]; mov rsi,[r13+16]; mov rdx,[rax+8]; mov ecx,dword ptr [rax+16]; call span_eq
-    jmp .gesb_done
-.gesb_literal:
-    mov rdi,rbx; call g_expr_u64_literal; test edx,edx; jnz .gesb_no
-    mov r13,rax
-    mov rdi,r12; call g_expr_u64_literal; test edx,edx; jnz .gesb_no
-    cmp rax,r13; sete al; movzx eax,al; jmp .gesb_done
+    push r12; push r13
+    mov r12,rdi; mov r13,rsi
+    mov rdi,r12; call g_infer_expr; cmp eax,GTYPE_U64; jne .gesb_no
+    mov rdi,r13; call g_infer_expr; cmp eax,GTYPE_U64; jne .gesb_no
+    mov rdi,r12; call g_semantic_expr_is_pure; test eax,eax; jz .gesb_no
+    mov rdi,r13; call g_semantic_expr_is_pure; test eax,eax; jz .gesb_no
+    mov rdi,r12; call g_semantic_expr_is_total; test eax,eax; jz .gesb_no
+    mov rdi,r13; call g_semantic_expr_is_total; test eax,eax; jz .gesb_no
+    mov rdi,r12; mov rsi,r13; call g_semantic_prove_equal; jmp .gesb_done
 .gesb_no: xor eax,eax
-.gesb_done: pop r14; pop r13; pop r12; pop rbx; ret
+.gesb_done: pop r13; pop r12; ret
 
-# rdi=state declaration node -> eax scalar type, 0 if not register-recurrence-safe.
-g_state_decl_scalar_type:
-    push rbx
-    mov rbx,rdi
-    mov rdi,rbx; lea rsi,[rip+gk_type]; mov edx,gk_type_end-gk_type; call obj_get
-    test rax,rax; jz .gsdst_no
-    mov rdi,rax; call g_type_from_node
-    cmp eax,GTYPE_U64; je .gsdst_done
-    cmp eax,GTYPE_I64; je .gsdst_done
-    cmp eax,GTYPE_F32; je .gsdst_done
-    cmp eax,GTYPE_F64; je .gsdst_done
-.gsdst_no: xor eax,eax
-.gsdst_done: pop rbx; ret
+# rdi=semantic state declaration -> eax natural type, before live-slice admission.
+g_state_decl_type:
+    lea rsi,[rip+gk_type]; mov edx,gk_type_end-gk_type; call obj_get
+    test rax,rax; jz .gsdt_done
+    mov rdi,rax; jmp g_type_from_node
+.gsdt_done: ret
 
 # rdi=expression, rsi=counter name ptr, rdx=name len -> eax bool
 # Match add(state(counter), 1), allowing argument reversal.
@@ -9276,27 +12328,136 @@ g_match_counter_inc:
 .gmci_no: xor eax,eax
 .gmci_done: pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
-# rdi=condition expr, rsi=counter name ptr, rdx=name len
-# eax=1 and g_counted_bound_expr set if condition is counter < bound.
+# rdi=condition, rsi=counter name, rdx=name len -> eax=control form.
+# 0 unknown; 1 exact i<limit; 2 original lazy guard entails i<limit.
+# The existing zero-init/unit-increment proof closes the ordinal relation.
 g_match_counter_bound:
-    push rbx; push r12; push r13; push r14; push r15
+    push rbx; push r12; push r13
     mov rbx,rdi; mov r12,rsi; mov r13,rdx
-    cmp qword ptr [rbx],J_OBJECT; jne .gmcb_no
+.gmcb_identity:
+    mov rdi,rbx; mov esi,GTYPE_BOOL; call g_semantic_identity_operand
+    test rax,rax; jz .gmcb_prove
+    mov rbx,rax; jmp .gmcb_identity
+.gmcb_prove:
+    mov rdi,rbx; mov rsi,r12; mov rdx,r13; mov ecx,1
+    call g_predicate_entails_counter_bound
+    cmp eax,1; jne .gmcb_no
+    mov rax,[rip+g_reg_iter_max_expr]; mov [rip+g_counted_bound_expr],rax
+    # Only an exact guard may become bottom-tested counted control. A compound
+    # guard keeps its original short-circuit control and all state consumers.
     mov rdi,rbx; lea rsi,[rip+gk_op]; mov edx,gk_op_end-gk_op; call obj_get
-    test rax,rax; jz .gmcb_no
+    test rax,rax; jz .gmcb_guarded
     mov rdi,[rax+8]; mov rsi,[rax+16]; lea rdx,[rip+gv_lt]; mov ecx,gv_lt_end-gv_lt; call span_eq
-    test eax,eax; jz .gmcb_no
-    mov rdi,rbx; lea rsi,[rip+gk_args]; mov edx,gk_args_end-gk_args; call obj_get
-    test rax,rax; jz .gmcb_no
-    cmp qword ptr [rax],J_ARRAY; jne .gmcb_no
-    mov r14,[rax+24]; test r14,r14; jz .gmcb_no
-    mov r15,[r14+32]; test r15,r15; jz .gmcb_no
-    cmp qword ptr [r15+32],0; jne .gmcb_no
-    mov rdi,r14; mov rsi,r12; mov rdx,r13; call g_expr_is_named_state; test eax,eax; jz .gmcb_no
-    mov [rip+g_counted_bound_expr],r15
+    test eax,eax; jz .gmcb_guarded
     mov eax,1; jmp .gmcb_done
+.gmcb_guarded: mov eax,2; jmp .gmcb_done
 .gmcb_no: xor eax,eax
-.gmcb_done: pop r15; pop r14; pop r13; pop r12; pop rbx; ret
+.gmcb_done: pop r13; pop r12; pop rbx; ret
+
+# One Boolean truth-edge fact, derived without changing evaluation order.
+# rdi=predicate, rsi=counter name, rdx=len, ecx=edge truth.
+# eax=0 unknown, 1 entails counter<immutable limit, 2 impossible edge.
+# AND/OR use the same intersection/union law; SELECT composes two guarded paths.
+g_predicate_entails_counter_bound:
+    push rbx; push r12; push r13; push r14; push r15
+    sub rsp,32
+    mov rbx,rdi; mov r12,rsi; mov r13,rdx; mov [rsp],ecx
+    test rbx,rbx; jz .gpecb_no
+    mov rdi,rbx; call g_expr_bool_literal
+    test edx,edx; jnz .gpecb_op
+    cmp eax,[rsp]; je .gpecb_no
+    mov eax,2; jmp .gpecb_done
+.gpecb_op:
+    mov rdi,rbx; lea rsi,[rip+gk_op]; mov edx,gk_op_end-gk_op; call obj_get
+    test rax,rax; jz .gpecb_no
+    mov [rsp+8],rax
+    mov rdi,rbx; lea rsi,[rip+gk_args]; mov edx,gk_args_end-gk_args; call obj_get
+    test rax,rax; jz .gpecb_no
+    mov r14,[rax+24]; test r14,r14; jz .gpecb_no
+    mov r15,[r14+32]
+    mov rax,[rsp+8]; mov rdi,[rax+8]; mov rsi,[rax+16]; lea rdx,[rip+gv_not]; mov ecx,gv_not_end-gv_not; call span_eq
+    test eax,eax; jz .gpecb_binary
+    test r15,r15; jnz .gpecb_no
+    mov rdi,r14; mov rsi,r12; mov rdx,r13; mov ecx,[rsp]; xor ecx,1
+    call g_predicate_entails_counter_bound; jmp .gpecb_done
+.gpecb_binary:
+    test r15,r15; jz .gpecb_no
+    mov rax,[rsp+8]; mov rdi,[rax+8]; mov rsi,[rax+16]; lea rdx,[rip+gv_select]; mov ecx,gv_select_end-gv_select; call span_eq
+    test eax,eax; jnz .gpecb_select
+    cmp qword ptr [r15+32],0; jne .gpecb_no
+    mov rax,[rsp+8]; mov rdi,[rax+8]; mov rsi,[rax+16]; lea rdx,[rip+gv_and]; mov ecx,gv_and_end-gv_and; call span_eq
+    test eax,eax; jnz .gpecb_and
+    mov rax,[rsp+8]; mov rdi,[rax+8]; mov rsi,[rax+16]; lea rdx,[rip+gv_or]; mov ecx,gv_or_end-gv_or; call span_eq
+    test eax,eax; jz .gpecb_relation
+    mov eax,[rsp]; xor eax,1; mov [rsp+4],eax; jmp .gpecb_pair
+.gpecb_and: mov eax,[rsp]; mov [rsp+4],eax
+.gpecb_pair:
+    mov rdi,r14; mov rsi,r12; mov rdx,r13; mov ecx,[rsp]
+    call g_predicate_entails_counter_bound; mov [rsp+16],eax
+    mov rdi,r15; mov rsi,r12; mov rdx,r13; mov ecx,[rsp]
+    call g_predicate_entails_counter_bound
+    cmp dword ptr [rsp+4],1; je .gpecb_intersection
+    mov edx,[rsp+16]; jmp .gpecb_union
+.gpecb_intersection:
+    # A conjunction edge is impossible if either side is impossible; otherwise
+    # any bound suffices. Unknown proofs never erase a runtime condition.
+    cmp eax,2; je .gpecb_done
+    cmp dword ptr [rsp+16],2; je .gpecb_impossible
+    or eax,[rsp+16]; jmp .gpecb_done
+.gpecb_union:
+    test eax,eax; jz .gpecb_done
+    test edx,edx; jz .gpecb_no
+    cmp eax,2; jne .gpecb_yes
+    mov eax,edx; jmp .gpecb_done
+.gpecb_select:
+    mov rax,[r15+32]; test rax,rax; jz .gpecb_no
+    cmp qword ptr [rax+32],0; jne .gpecb_no
+    mov [rsp+24],rax
+    # true path = condition(true) AND true-arm(demanded truth).
+    mov rdi,r14; mov rsi,r12; mov rdx,r13; mov ecx,1
+    call g_predicate_entails_counter_bound; mov [rsp+16],eax
+    mov rdi,r15; mov rsi,r12; mov rdx,r13; mov ecx,[rsp]
+    call g_predicate_entails_counter_bound
+    cmp eax,2; je .gpecb_true_path
+    cmp dword ptr [rsp+16],2; je .gpecb_true_impossible
+    or eax,[rsp+16]; jmp .gpecb_true_path
+.gpecb_true_impossible: mov eax,2
+.gpecb_true_path: mov [rsp+20],eax
+    # false path = condition(false) AND false-arm(demanded truth).
+    mov rdi,r14; mov rsi,r12; mov rdx,r13; xor ecx,ecx
+    call g_predicate_entails_counter_bound; mov [rsp+16],eax
+    mov rdi,[rsp+24]; mov rsi,r12; mov rdx,r13; mov ecx,[rsp]
+    call g_predicate_entails_counter_bound
+    cmp eax,2; je .gpecb_paths
+    cmp dword ptr [rsp+16],2; je .gpecb_false_impossible
+    or eax,[rsp+16]; jmp .gpecb_paths
+.gpecb_false_impossible: mov eax,2
+.gpecb_paths: mov edx,[rsp+20]; jmp .gpecb_union
+.gpecb_relation:
+    # Integer comparison duality only; no IEEE complement or arithmetic bound
+    # rewriting is assumed. Both comparison operands must be exact U64 facts.
+    mov rdi,r14; call g_infer_expr; cmp eax,GTYPE_U64; jne .gpecb_no
+    mov rdi,r15; call g_infer_expr; cmp eax,GTYPE_U64; jne .gpecb_no
+    mov rax,[rsp+8]; mov rdi,[rax+8]; mov rsi,[rax+16]
+    cmp dword ptr [rsp],0; je .gpecb_false_relation
+    lea rdx,[rip+gv_lt]; mov ecx,gv_lt_end-gv_lt; call span_eq; test eax,eax; jnz .gpecb_bound
+    mov rax,[rsp+8]; mov rdi,[rax+8]; mov rsi,[rax+16]; lea rdx,[rip+gv_gt]; mov ecx,gv_gt_end-gv_gt; call span_eq
+    test eax,eax; jz .gpecb_no
+    xchg r14,r15; jmp .gpecb_bound
+.gpecb_false_relation:
+    lea rdx,[rip+gv_ge]; mov ecx,gv_ge_end-gv_ge; call span_eq; test eax,eax; jnz .gpecb_bound
+    mov rax,[rsp+8]; mov rdi,[rax+8]; mov rsi,[rax+16]; lea rdx,[rip+gv_le]; mov ecx,gv_le_end-gv_le; call span_eq
+    test eax,eax; jz .gpecb_no
+    xchg r14,r15
+.gpecb_bound:
+    mov rdi,r14; mov rsi,r12; mov rdx,r13; call g_expr_is_named_state
+    test eax,eax; jz .gpecb_no
+    mov rdi,r15; mov rsi,[rip+g_reg_iter_max_expr]; call g_expr_same_bound
+    test eax,eax; jz .gpecb_no
+.gpecb_yes: mov eax,1; jmp .gpecb_done
+.gpecb_impossible: mov eax,2; jmp .gpecb_done
+.gpecb_no: xor eax,eax
+.gpecb_done: add rsp,32; pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
 # Emit one execution-local mutable StateFact frame around an iterate episode.
 # The frame size is the largest represented state vector, exactly the amount one
@@ -9392,7 +12553,7 @@ g_emit_iterate_binding:
     mov rdi,rax; call g_emit_expr; cmp eax,GTYPE_U64; jne .geit_bad
     call g_emit_pop_rax; lea rdi,[rip+gc_mov_rbp_rax]; mov esi,gc_mov_rbp_rax_end-gc_mov_rbp_rax; call g_emit_bytes
     lea rdi,[rip+gc_xor_rbx]; mov esi,gc_xor_rbx_end-gc_xor_rbx; call g_emit_bytes
-    mov r15,[rip+g_emit_ptr]
+    G_EMIT_LOOP_POSITION r15,.geit_bad
     # condition
     mov rdi,r12; lea rsi,[rip+gk_condition]; mov edx,gk_condition_end-gk_condition; call obj_get; test rax,rax; jz .geit_bad
     mov rdi,rax; call g_emit_expr; cmp eax,GTYPE_BOOL; jne .geit_bad
@@ -9431,16 +12592,19 @@ g_emit_iterate_binding:
 .update_next_iter:
     lea rdi,[rip+gc_inc_rbx]; mov esi,gc_inc_rbx_end-gc_inc_rbx; call g_emit_bytes
     mov edi,0xE9; call g_emit_u8
-    mov rax,[rip+g_emit_ptr]; lea rcx,[rax+4]; cmp rcx,[rip+g_emit_end]; jbe 93f
+    G_EMIT_POSITION rax; lea rcx,[rax+4]; cmp rcx,[rip+g_emit_end]; jbe 93f
     mov dword ptr [rip+g_code_overflow],1; jmp .geit_bad
 93:
     mov rdx,r15; sub rdx,rcx; mov [rax],edx; mov [rip+g_emit_ptr],rcx
-    mov rsi,[rip+g_emit_ptr]; mov rdi,r14; call g_patch_rel32
+    G_EMIT_POSITION rsi; mov rdi,r14; call g_patch_rel32
     # result state -> binding slot
     mov rdi,r12; lea rsi,[rip+gk_result]; mov edx,gk_result_end-gk_result; call obj_get; test rax,rax; jz .geit_bad
     mov rdi,[rax+8]; mov rsi,[rax+16]; call g_find_state; test rax,rax; jz .geit_bad
     mov eax,dword ptr [rax+20]; call g_state_slot_addr; mov rdi,rax; call g_emit_load_rax_abs
     mov eax,dword ptr [rbx+24]; call g_binding_slot_addr; mov rdi,rax; call g_emit_store_rax_abs
+    test eax,eax; jnz .geit_bad
+    mov rdi,rbx; call g_emit_generic_iter_projection_stores
+    test eax,eax; jnz .geit_bad
     xor eax,eax; jmp .geit_done
 .geit_bad: mov eax,1
 .geit_done:
@@ -9568,7 +12732,7 @@ g_emit_dictionary_lookup_core:
     mov rdi,r15; lea rsi,[rip+gk_value]; mov edx,gk_value_end-gk_value; call obj_get; test rax,rax; jz .gedlc_bad
     mov rdi,rax; call g_emit_expr; cmp eax,r14d; jne .gedlc_bad
     call g_emit_jmp_patch; push rax
-    mov rsi,[rip+g_emit_ptr]; mov rdi,r11; call g_patch_rel32
+    G_EMIT_POSITION rsi; mov rdi,r11; call g_patch_rel32
     mov r15,[r15+32]
     jmp .entry_loop
 .dict_default:
@@ -9644,7 +12808,7 @@ g_emit_string_input_eq:
     jmp .gesie_bad
 .strcmp_true:
     mov edi,1; call g_emit_mov_eax_imm
-    mov rsi,[rip+g_emit_ptr]
+    G_EMIT_POSITION rsi
     pop rdi; call g_patch_rel32
     mov edi,0x50; call g_emit_u8
     xor eax,eax; jmp .gesie_done
@@ -9656,21 +12820,7 @@ g_emit_string_input_eq:
 
 # ---------------- small node parser ----------------
 g_parse_i64_node:
-    # rdi=node -> rax bits, edx err
-    test rdi,rdi; jz .gpin_bad
-    cmp qword ptr [rdi],J_NUMBER; jne .gpin_bad
-    mov r8,[rdi+8]; mov rcx,[rdi+16]
-    xor r9d,r9d
-    cmp byte ptr [r8],'-'; jne .gpin_digits
-    mov r9d,1; inc r8; dec rcx
-.gpin_digits:
-    xor eax,eax; test rcx,rcx; jz .gpin_bad
-.gpin_loop:
-    movzx edx,byte ptr [r8]; cmp dl,'0'; jb .gpin_bad; cmp dl,'9'; ja .gpin_bad
-    imul rax,rax,10; sub edx,'0'; add rax,rdx; inc r8; dec rcx; jnz .gpin_loop
-    test r9d,r9d; jz .gpin_ok; neg rax
-.gpin_ok: xor edx,edx; ret
-.gpin_bad: xor eax,eax; mov edx,1; ret
+    jmp physical_parse_i64_node
 
 # Compiler-only causal storage is sized from represented structure.  No user
 # program cardinality is inferred from a fixed fragment/edge table.
@@ -9692,7 +12842,7 @@ g_prepare_graph_arena:
     syscall
 .gpga_size:
     mov eax,ebx
-    imul rax,rax,92               # three qword + seventeen dword fact vectors
+    imul rax,rax,108              # five qword + seventeen dword fact vectors
     jo .gpga_fail
     mov ecx,dword ptr [rip+g_symbol_capacity]
     add rax,rcx
@@ -9710,7 +12860,7 @@ g_prepare_graph_arena:
     js .gpga_fail
     mov [rip+g_graph_arena_ptr],rax
 
-    # Three qword vectors, then seventeen dword vectors. Memory traffic is a
+    # Source and lifetime vectors include two qword work projections. Traffic is a
     # property of the emitted fragment itself, not a second scheduling graph.
     mov [rip+g_fragment_start_ptr],rax
     mov ecx,ebx; shl rcx,3; add rax,rcx
@@ -9735,6 +12885,8 @@ g_prepare_graph_arena:
     mov [rip+g_region_first_out_ptr],rax; add rax,rcx
     mov [rip+g_region_entry_offsets_ptr],rax; add rax,rcx
     mov [rip+g_region_realization_ptr],rax; add rax,rcx
+    mov [rip+g_fragment_work_source_ptr],rax; add rax,rcx; add rax,rcx
+    mov [rip+g_fragment_work_kind_ptr],rax; add rax,rcx; add rax,rcx
     mov [rip+g_dep_visit_ptr],rax
 
     mov dword ptr [rip+g_edge_count],0
@@ -9983,6 +13135,7 @@ g_prepare_region_edge_arena:
 # selects or queries a resource consumer.
 
 g_fragment_begin:
+    mov dword ptr [rip+g_current_loop_work_ticks],0
     # rdi=semantic node, esi=1 binding / 2 output
     mov dword ptr [rip+g_current_fragment_memory_ops],0
     mov dword ptr [rip+g_fragment_emit_open],1
@@ -9991,7 +13144,7 @@ g_fragment_begin:
     jae .gfb_fail
     mov ecx,eax
     mov rdx,[rip+g_fragment_start_ptr]
-    mov r8,[rip+g_emit_ptr]
+    G_EMIT_POSITION r8
     mov [rdx+rcx*8],r8
     mov rdx,[rip+g_fragment_nodes_ptr]
     mov [rdx+rcx*8],rdi
@@ -10009,12 +13162,13 @@ g_fragment_finish:
     jae .gfe_fail
     mov ecx,eax
     mov rdx,[rip+g_fragment_end_ptr_ptr]
-    mov r8,[rip+g_emit_ptr]
+    G_EMIT_POSITION r8
     mov [rdx+rcx*8],r8
     mov rdx,[rip+g_fragment_memory_ops_ptr]
     mov r8d,dword ptr [rip+g_current_fragment_memory_ops]
     mov [rdx+rcx*4],r8d
     mov dword ptr [rip+g_fragment_emit_open],0
+    call g_fragment_work_fact
     inc dword ptr [rip+g_fragment_count]
     xor eax,eax
     ret
@@ -10154,6 +13308,29 @@ g_collect_deps_node:
     je .gcdn_arr
     jmp .gcdn_done
 .gcdn_obj:
+    # Structural field dependencies must follow the represented owner. Static
+    # records recurse into their old expression; iterate fields point directly
+    # at the producing recurrence fragment and carry the projected scalar type.
+    mov rdi,rbx; lea rsi,[rip+gk_field]; mov edx,gk_field_end-gk_field; call obj_get
+    test rax,rax; jz .gcdn_obj_plain
+    cmp qword ptr [rax],J_OBJECT; jne .gcdn_bad
+    mov r15,rax
+    mov rdi,r15; call g_resolve_field_expr
+    test rax,rax; jz .gcdn_field_iterate
+    mov rdi,rax; mov esi,r12d; lea edx,[r13d+1]; call g_collect_deps_node
+    jmp .gcdn_done
+.gcdn_field_iterate:
+    mov rdi,r15; call g_iter_field_info
+    test rax,rax; jz .gcdn_bad
+    mov r14,rax; mov r15d,ecx
+    mov rdi,r14; call g_fragment_for_symbol
+    test edx,edx; jnz .gcdn_bad
+    cmp eax,r12d; je .gcdn_done
+    mov edi,eax; mov esi,r12d; call g_edge_add_unique
+    test eax,eax; jnz .gcdn_bad
+    mov edi,r15d; mov esi,r13d; call g_edge_accumulate_type_transfer
+    jmp .gcdn_done
+.gcdn_obj_plain:
     mov r14,[rbx+24]
 .gcdn_obj_loop:
     test r14,r14
@@ -10561,23 +13738,6 @@ g_verify_causal_mesh:
     pop rbx
     ret
 
-# edi=fragment id -> eax=1 only when emission-time semantic proof marked this
-# fragment as one-shot straight-line work. The flag is recorded while the
-# binding/output kind is already known; no parser re-entry or second classifier
-# exists during physicalization.
-g_fragment_static_once:
-    cmp edi,dword ptr [rip+g_fragment_count]
-    jae .gfso_no
-    mov rax,[rip+g_fragment_static_ptr]
-    mov eax,dword ptr [rax+rdi*4]
-    test eax,eax
-    setne al
-    movzx eax,al
-    ret
-.gfso_no:
-    xor eax,eax
-    ret
-
 # Copy template + fused fragment regions into g_parallel_code and patch runtime tables.
 # Close one proved Region DAG against x86 plus an externally proved fabric
 # domain. This is deterministic compile-time coordinate descent on one physical
@@ -10617,6 +13777,10 @@ g_close_heterogeneous_placement:
     cmp ebx,dword ptr [rip+g_region_count]
     jae .gchp_pass_done
 
+    # Static fabric placement has no invocation bound consumer. A finite base
+    # is not proof that a Region with an iterative term is one-shot work.
+    call g_region_work_fact_ptr
+    cmp dword ptr [rax+12],0; jne .gchp_next_region
     mov eax,dword ptr [r15+rbx*4]
     cmp eax,-1                       # dynamic/unbounded stays on ISA
     je .gchp_next_region
@@ -10880,8 +14044,8 @@ g_materialize_parallel_code:
     push r14
     push r15
     # Parallel staging shares the same source-sized stable arena authority.
-    # Graph metadata is structural: 68*N + 16*E bytes. 1.3.90 appends one fixed
-    # 48-byte Physical Realization Descriptor per Region. The descriptor projects
+    # Graph metadata is structural: 84*N + 16*E bytes, including the existing
+    # 48-byte domain descriptor and one 16-byte work projection. These project
     # existing DAG/work/edge/completion facts; it is not a device graph or IR.
     mov rdi,[rip+g_parallel_code_ptr]
     lea rsi,[rip+general_parallel_release_blob]
@@ -10891,7 +14055,7 @@ g_materialize_parallel_code:
     mov r12d,GR_TEMPLATE_SIZE
     mov eax,dword ptr [rip+g_region_count]
     mov rdx,rax
-    imul rdx,rdx,68              # 68*N: four vectors + tag + 48-byte descriptor
+    imul rdx,rdx,84              # shared graph/domain records + 16-byte work fact
     mov eax,dword ptr [rip+g_region_edge_count]
     mov rcx,rax
     shl rcx,4                    # 16*E: edge_v/next + qword transfer fact
@@ -10910,8 +14074,12 @@ g_materialize_parallel_code:
 .gmpc_region:
     cmp ebx,dword ptr [rip+g_region_count]
     jae .gmpc_patch
-    add r12d,15
-    and r12d,-16
+    # Preserve the emitted byte phase when a Region is placed after metadata.
+    # Its first gap is unreachable; entry points directly at the first fragment.
+    mov rax,[rip+g_region_head_ptr]; mov r13d,[rax+rbx*4]
+    mov rax,[rip+g_fragment_start_ptr]; mov rcx,[rax+r13*8]
+    sub rcx,[rip+g_code_ptr]; sub rcx,r12
+    and ecx,PRC_CACHE_LINE_BYTES-1; add r12,rcx
     mov rax,[rip+g_parallel_code_capacity]
     cmp r12,rax
     jb 95f
@@ -10920,10 +14088,10 @@ g_materialize_parallel_code:
 95:
     mov rax,[rip+g_region_entry_offsets_ptr]
     mov [rax+rbx*4],r12d
-    mov rax,[rip+g_region_head_ptr]
-    mov r13d,[rax+rbx*4]
     mov rax,[rip+g_region_len_ptr]
     mov r14d,[rax+rbx*4]
+    call g_region_work_fact
+    mov r10d,eax                   # the existing iterative work projection
     xor r15d,r15d                 # straight-line front-end physical work ticks
     xor ebp,ebp                   # same Region's emitted memory-traffic ticks
 .gmpc_member:
@@ -10934,12 +14102,15 @@ g_materialize_parallel_code:
     sub rdx,rsi
     test rdx,rdx
     jz .gmpc_fail
+    # Fused members can have different source phases. Restore that relation
+    # outside their own loops, rather than silently undoing emission layout.
+    mov r9,rsi; sub r9,[rip+g_code_ptr]; sub r9,r12
+    and r9d,PRC_CACHE_LINE_BYTES-1
     cmp r15d,-1
     je .gmpc_work_done
-    mov edi,r13d
-    push rdx
-    call g_fragment_static_once
-    pop rdx
+    mov rax,[rip+g_fragment_static_ptr]
+    mov eax,[rax+r13*4]
+    or eax,r10d                    # known iteration owns its one-shot base too
     test eax,eax
     jz .gmpc_work_unbounded
     mov rax,[rip+g_fragment_memory_ops_ptr]
@@ -10949,8 +14120,13 @@ g_materialize_parallel_code:
     ja .gmpc_work_unbounded
     add ebp,eax
     jc .gmpc_work_unbounded
-    mov rax,rdx
+    mov rax,rdx; add rax,r9
     imul rax,PRC_FRONTEND_BYTE_TICKS
+    test r10d,r10d; jz .gmpc_base_priced
+    mov rcx,[rip+g_fragment_work_kind_ptr]
+    mov ecx,[rcx+r13*8+4]
+    sub rax,rcx
+.gmpc_base_priced:
     cmp rax,0x7ffffffe
     ja .gmpc_work_unbounded
     add eax,r15d
@@ -10961,6 +14137,8 @@ g_materialize_parallel_code:
     mov r15d,-1
 .gmpc_work_done:
     mov rax,r12
+    add rax,r9
+    jc .gmpc_fail
     add rax,rdx
     jc .gmpc_fail
     cmp rax,qword ptr [rip+g_parallel_code_capacity]
@@ -10968,8 +14146,11 @@ g_materialize_parallel_code:
     mov dword ptr [rip+g_code_overflow],1
     jmp .gmpc_fail
 96:
-    mov rdi,[rip+g_parallel_code_ptr]
-    add rdi,r12
+    mov r8,rsi
+    mov rdi,[rip+g_parallel_code_ptr]; add rdi,r12
+    mov esi,r9d; call g_phys_fill_nops
+    add r12,r9
+    mov rsi,r8
     mov rcx,rdx
     rep movsb
     add r12,rdx
@@ -10987,8 +14168,8 @@ g_materialize_parallel_code:
     cmovb r15d,ebp                  # resource max, never additive double-counting
 981:
     # Publish the AOT lower-bound work price directly into the compact runtime
-    # metadata. 0xffffffff means dynamic/unbounded and therefore remains an
-    # outward candidate. No second graph table survives in compiler state.
+    # metadata. A proved iterative projection uses this price as its one-shot
+    # base; unknown dynamic work retains 0xffffffff. No second graph survives.
     mov rax,[rip+g_parallel_code_ptr]
     add rax,GR_TEMPLATE_SIZE
     mov ecx,dword ptr [rip+g_region_count]
@@ -11125,6 +14306,8 @@ g_emit_image:
     push r13
     push r14
     push r15
+    call g_prepare_rankn_twiddle_facts
+    test eax,eax; jnz .geimg_fail
     mov eax,SYS_openat; mov edi,AT_FDCWD; mov rsi,[rip+g_output_path]; mov edx,OUT_FLAGS; mov r10d,0755; syscall
     test rax,rax; js .geimg_fail
     mov rbx,rax
@@ -11158,26 +14341,28 @@ g_emit_image:
     cmp rax,8; jne .geimg_close_fail
 
     # Read-only trailer layout:
-    #   input_type[I] | output_type[O] | RankNPrecision[R] | align64 | native code
+    #   input_type[I] | InputRange[I][24] | output_type[O] | RankNPrecision[R] | align64 | native code
     # PrecisionFacts are represented-source metadata, not a runtime capacity table.
     mov r12,GENERAL_RUNTIME_SIZE
     add r12,4095
     jc .geimg_close_fail
     and r12,-4096                    # trailer file offset
     mov r13d,dword ptr [rip+g_input_count]
-    shl r13,2                        # input type bytes
+    imul r13,r13,28                   # input type + range bytes
     mov r14d,dword ptr [rip+g_output_count]
     shl r14,2                        # output type bytes
     mov ebp,dword ptr [rip+g_rankn_type_count]
-    shl rbp,4                        # interned TypePhysicalFact bytes
+    imul rbp,rbp,RPF_FACT_BYTES           # interned TypePhysicalFact bytes
     mov r15,r13
     add r15,r14
     jc .geimg_close_fail
     add r15,rbp
     jc .geimg_close_fail
-    add r15,63
+    add r15,[rip+g_rankn_twiddle_bytes]
     jc .geimg_close_fail
-    and r15,-64                      # native code relative offset
+    add r15,PRC_CACHE_LINE_BYTES-1
+    jc .geimg_close_fail
+    and r15,-PRC_CACHE_LINE_BYTES                      # native code relative offset
     mov rax,r15
     add rax,[rip+g_image_code_len]
     jc .geimg_close_fail             # total trailer map bytes
@@ -11196,8 +14381,17 @@ g_emit_image:
 
     test r13,r13
     jz .geimg_output_types
-    mov eax,SYS_pwrite64; mov rdi,rbx; mov rsi,[rip+g_input_types_ptr]; mov rdx,r13; mov r10,r12; syscall
-    cmp rax,r13; jne .geimg_close_fail
+    mov eax,dword ptr [rip+g_input_count]; shl rax,2
+    push rax
+    mov rdx,rax; mov eax,SYS_pwrite64; mov rdi,rbx; mov rsi,[rip+g_input_types_ptr]; mov r10,r12; syscall
+    pop rdx
+    cmp rax,rdx; jne .geimg_close_fail
+    mov r10,r12; add r10,rdx
+    mov rdx,r13; mov eax,dword ptr [rip+g_input_count]; shl rax,2; sub rdx,rax
+    push rdx
+    mov eax,SYS_pwrite64; mov rdi,rbx; mov rsi,[rip+g_input_ranges_ptr]; syscall
+    pop rdx
+    cmp rax,rdx; jne .geimg_close_fail
 .geimg_output_types:
     test r14,r14
     jz .geimg_rankn_facts
@@ -11209,6 +14403,13 @@ g_emit_image:
     mov eax,SYS_pwrite64; mov rdi,rbx; mov rsi,[rip+g_rankn_type_facts_ptr]; mov rdx,rbp; mov r10,r12; add r10,r13; add r10,r14; syscall
     cmp rax,rbp; jne .geimg_close_fail
 .geimg_native_code:
+    mov rdx,[rip+g_rankn_twiddle_bytes]
+    test rdx,rdx; jz .geimg_code_payload
+    mov eax,SYS_pwrite64; mov rdi,rbx; mov rsi,[rip+g_rankn_twiddle_ptr]
+    mov r10,r12; add r10,r13; add r10,r14; add r10,rbp
+    syscall
+    cmp rax,[rip+g_rankn_twiddle_bytes]; jne .geimg_close_fail
+.geimg_code_payload:
     mov rsi,[rip+g_image_code_ptr]
     mov rdx,[rip+g_image_code_len]
     mov r10,r12
@@ -11257,10 +14458,21 @@ gc_jae_prefix: .byte 0x0F,0x83; gc_jae_prefix_end:
 gc_mov_r10_rbx: .byte 0x49,0x89,0xDA; gc_mov_r10_rbx_end:
 gc_inc_rbx: .byte 0x48,0xFF,0xC3; gc_inc_rbx_end:
 gc_mov_rax_r11: .byte 0x4C,0x89,0xD8; gc_mov_rax_r11_end:
-# if rbp==0 return 1
-gc_reject_if_rbp_zero: .byte 0x48,0x85,0xED,0x75,0x06,0xB8,0x01,0,0,0,0xC3; gc_reject_if_rbp_zero_end:
-# if rbx<rbp skip error else return 1
-gc_iter_max_guard: .byte 0x48,0x39,0xEB,0x72,0x06,0xB8,0x01,0,0,0,0xC3; gc_iter_max_guard_end:
+# Reject when the execution limit is exhausted.
+# One invocation-terminal Effect relation; stack/state frames have no successor.
+.macro EFFECT_REJECT
+    mov eax,GENERAL_RUNTIME_REJECT_VA
+    jmp rax
+.endm
+gc_effect_reject: EFFECT_REJECT
+gc_effect_reject_end:
+gc_check_shift_rcx: cmp rcx,64; jb 991f; EFFECT_REJECT
+991:
+gc_check_shift_rcx_end:
+
+gc_reject_if_rbp_zero: .byte 0x48,0x85,0xED,0x75,7; EFFECT_REJECT; gc_reject_if_rbp_zero_end:
+# Continue below the execution limit; otherwise reject the invocation.
+gc_iter_max_guard: .byte 0x48,0x39,0xEB,0x72,7; EFFECT_REJECT; gc_iter_max_guard_end:
 
 # register-resident iterate snippets
 # direct counted-loop register fragments
@@ -11268,9 +14480,10 @@ gc_reg_iter_cmp_r8_rbp: .byte 0x49,0x39,0xE8; gc_reg_iter_cmp_r8_rbp_end:
 gc_reg_iter_cmp_r9_rbp: .byte 0x49,0x39,0xE9; gc_reg_iter_cmp_r9_rbp_end:
 # cmp rbx,rbp and inc rbx form the independent counted-control authority.
 gc_reg_iter_cmp_rbx_rbp: .byte 0x48,0x39,0xEB; gc_reg_iter_cmp_rbx_rbp_end:
+gc_reg_iter_test_rbx_rbx: .byte 0x48,0x85,0xDB; gc_reg_iter_test_rbx_rbx_end:
+gc_reg_iter_dec_rbx: .byte 0x48,0xFF,0xCB; gc_reg_iter_dec_rbx_end:
 gc_reg_iter_inc_r8: .byte 0x49,0xFF,0xC0; gc_reg_iter_inc_r8_end:
 gc_reg_iter_inc_r9: .byte 0x49,0xFF,0xC1; gc_reg_iter_inc_r9_end:
-gc_reg_iter_inc_rbx: .byte 0x48,0xFF,0xC3; gc_reg_iter_inc_rbx_end:
 gc_push_r8: .byte 0x41,0x50; gc_push_r8_end:
 gc_push_r9: .byte 0x41,0x51; gc_push_r9_end:
 gc_push_r10: .byte 0x41,0x52; gc_push_r10_end:
@@ -11287,6 +14500,8 @@ gc_reg_iter_mov_rax_rbx: .byte 0x48,0x89,0xD8; gc_reg_iter_mov_rax_rbx_end:
 # 1.3.13 physical register-DAG fragments. These are emitted into the target
 # program; none execute inside the compiler.
 gc_jb_prefix: .byte 0x0F,0x82; gc_jb_prefix_end:
+gc_je_prefix: .byte 0x0F,0x84; gc_je_prefix_end:
+gc_jne_prefix: .byte 0x0F,0x85; gc_jne_prefix_end:
 # mov rax,r8; add rax,r9; add rax,r10; mov r8,r9; mov r9,r10; mov r10,rax
 
 gc_phys_mov_rax_r8:  .byte 0x4C,0x89,0xC0; gc_phys_mov_rax_r8_end:
@@ -11317,9 +14532,6 @@ gc_phys_imul_rax_r15: .byte 0x49,0x0F,0xAF,0xC7; gc_phys_imul_rax_r15_end:
 gc_phys_mov_rsi_rax: .byte 0x48,0x89,0xC6; gc_phys_mov_rsi_rax_end:
 gc_phys_mov_rdi_rax: .byte 0x48,0x89,0xC7; gc_phys_mov_rdi_rax_end:
 gc_phys_mov_rdx_rax: .byte 0x48,0x89,0xC2; gc_phys_mov_rdx_rax_end:
-gc_phys_mov_r8_rsi:  .byte 0x49,0x89,0xF0; gc_phys_mov_r8_rsi_end:
-gc_phys_mov_r9_rdi:  .byte 0x49,0x89,0xF9; gc_phys_mov_r9_rdi_end:
-gc_phys_mov_r10_rcx: .byte 0x49,0x89,0xCA; gc_phys_mov_r10_rcx_end:
 
 gc_phys_movq_xmm0_rax: .byte 0x66,0x48,0x0F,0x6E,0xC0; gc_phys_movq_xmm0_rax_end:
 gc_phys_movd_xmm0_eax: .byte 0x66,0x0F,0x6E,0xC0; gc_phys_movd_xmm0_eax_end:
@@ -11335,18 +14547,6 @@ gc_phys_movsd_xmm0_xmm4: .byte 0xF2,0x0F,0x10,0xC4; gc_phys_movsd_xmm0_xmm4_end:
 gc_phys_movss_xmm0_xmm2: .byte 0xF3,0x0F,0x10,0xC2; gc_phys_movss_xmm0_xmm2_end:
 gc_phys_movss_xmm0_xmm3: .byte 0xF3,0x0F,0x10,0xC3; gc_phys_movss_xmm0_xmm3_end:
 gc_phys_movss_xmm0_xmm4: .byte 0xF3,0x0F,0x10,0xC4; gc_phys_movss_xmm0_xmm4_end:
-gc_phys_movq_xmm8_rax: .byte 0x66,0x4C,0x0F,0x6E,0xC0; gc_phys_movq_xmm8_rax_end:
-gc_phys_movq_xmm9_rax: .byte 0x66,0x4C,0x0F,0x6E,0xC8; gc_phys_movq_xmm9_rax_end:
-gc_phys_movq_xmm10_rax:.byte 0x66,0x4C,0x0F,0x6E,0xD0; gc_phys_movq_xmm10_rax_end:
-gc_phys_movd_xmm8_eax: .byte 0x66,0x44,0x0F,0x6E,0xC0; gc_phys_movd_xmm8_eax_end:
-gc_phys_movd_xmm9_eax: .byte 0x66,0x44,0x0F,0x6E,0xC8; gc_phys_movd_xmm9_eax_end:
-gc_phys_movd_xmm10_eax:.byte 0x66,0x44,0x0F,0x6E,0xD0; gc_phys_movd_xmm10_eax_end:
-gc_phys_movq_rax_xmm8: .byte 0x66,0x4C,0x0F,0x7E,0xC0; gc_phys_movq_rax_xmm8_end:
-gc_phys_movq_rax_xmm9: .byte 0x66,0x4C,0x0F,0x7E,0xC8; gc_phys_movq_rax_xmm9_end:
-gc_phys_movq_rax_xmm10:.byte 0x66,0x4C,0x0F,0x7E,0xD0; gc_phys_movq_rax_xmm10_end:
-gc_phys_movd_eax_xmm8: .byte 0x66,0x44,0x0F,0x7E,0xC0; gc_phys_movd_eax_xmm8_end:
-gc_phys_movd_eax_xmm9: .byte 0x66,0x44,0x0F,0x7E,0xC8; gc_phys_movd_eax_xmm9_end:
-gc_phys_movd_eax_xmm10:.byte 0x66,0x44,0x0F,0x7E,0xD0; gc_phys_movd_eax_xmm10_end:
 
 gc_phys_movsd_xmm0_xmm8: .byte 0xF2,0x41,0x0F,0x10,0xC0; gc_phys_movsd_xmm0_xmm8_end:
 gc_phys_movsd_xmm0_xmm9: .byte 0xF2,0x41,0x0F,0x10,0xC1; gc_phys_movsd_xmm0_xmm9_end:
@@ -11405,12 +14605,6 @@ gc_phys_movsd_xmm7_xmm0:.byte 0xF2,0x0F,0x10,0xF8; gc_phys_movsd_xmm7_xmm0_end:
 gc_phys_movss_xmm5_xmm0:.byte 0xF3,0x0F,0x10,0xE8; gc_phys_movss_xmm5_xmm0_end:
 gc_phys_movss_xmm6_xmm0:.byte 0xF3,0x0F,0x10,0xF0; gc_phys_movss_xmm6_xmm0_end:
 gc_phys_movss_xmm7_xmm0:.byte 0xF3,0x0F,0x10,0xF8; gc_phys_movss_xmm7_xmm0_end:
-gc_phys_movsd_xmm8_xmm5:.byte 0xF2,0x44,0x0F,0x10,0xC5; gc_phys_movsd_xmm8_xmm5_end:
-gc_phys_movsd_xmm9_xmm6:.byte 0xF2,0x44,0x0F,0x10,0xCE; gc_phys_movsd_xmm9_xmm6_end:
-gc_phys_movsd_xmm10_xmm7:.byte 0xF2,0x44,0x0F,0x10,0xD7; gc_phys_movsd_xmm10_xmm7_end:
-gc_phys_movss_xmm8_xmm5:.byte 0xF3,0x44,0x0F,0x10,0xC5; gc_phys_movss_xmm8_xmm5_end:
-gc_phys_movss_xmm9_xmm6:.byte 0xF3,0x44,0x0F,0x10,0xCE; gc_phys_movss_xmm9_xmm6_end:
-gc_phys_movss_xmm10_xmm7:.byte 0xF3,0x44,0x0F,0x10,0xD7; gc_phys_movss_xmm10_xmm7_end:
 
 # scalar constant-operand snippets; input value in rax, constant in rcx
 gc_const_add: .byte 0x48,0x01,0xC8; gc_const_add_end:
@@ -11419,7 +14613,6 @@ gc_const_mul: .byte 0x48,0x0F,0xAF,0xC1; gc_const_mul_end:
 gc_const_and: .byte 0x48,0x21,0xC8; gc_const_and_end:
 gc_const_or:  .byte 0x48,0x09,0xC8; gc_const_or_end:
 gc_const_xor: .byte 0x48,0x31,0xC8; gc_const_xor_end:
-gc_const_udiv: .byte 0x31,0xD2,0x48,0xF7,0xF1; gc_const_udiv_end:
 gc_const_umod: .byte 0x31,0xD2,0x48,0xF7,0xF1,0x48,0x89,0xD0; gc_const_umod_end:
 gc_const_umin: .byte 0x48,0x39,0xC8,0x48,0x0F,0x47,0xC1; gc_const_umin_end:
 gc_const_umax: .byte 0x48,0x39,0xC8,0x48,0x0F,0x42,0xC1; gc_const_umax_end:
@@ -11438,8 +14631,7 @@ gc_neg_i64_trap:
     mov rdx,0x8000000000000000
     cmp rax,rdx
     jne .Lgc_neg_i64_ok
-    mov eax,1
-    ret
+    EFFECT_REJECT
 .Lgc_neg_i64_ok:
     neg rax
     push rax
@@ -11452,8 +14644,7 @@ gc_abs_i64_trap:
     mov rdx,0x8000000000000000
     cmp rax,rdx
     jne .Lgc_abs_i64_ok
-    mov eax,1
-    ret
+    EFFECT_REJECT
 .Lgc_abs_i64_ok:
     mov rcx,rax
     sar rcx,63
@@ -11481,98 +14672,20 @@ gc_trunc_f32:
     movd eax,xmm0
     push rax
 gc_trunc_f32_end:
-# Native scalar transcendental ValueFacts. x87 is used only as an ISA-level
-# realization primitive; values remain ordinary f32/f64 facts and are rounded
-# back to their declared format at this exact consumer edge.
-gc_log_f64: .byte 0xD9,0xED,0xDD,0x04,0x24,0xD9,0xF1,0xDD,0x1C,0x24; gc_log_f64_end:
-gc_log_f32: .byte 0xD9,0xED,0xD9,0x04,0x24,0xD9,0xF1,0xD9,0x1C,0x24; gc_log_f32_end:
-gc_exp_f64:
-    .byte 0xDD,0x04,0x24,0xD9,0xEA,0xDE,0xC9,0xD9,0xC0,0xD9,0xFC,0xDC,0xE9
-    .byte 0xD9,0xC9,0xD9,0xF0,0xD9,0xE8,0xDE,0xC1,0xD9,0xFD,0xDD,0xD9,0xDD,0x1C,0x24
-gc_exp_f64_end:
-gc_exp_f32:
-    .byte 0xD9,0x04,0x24,0xD9,0xEA,0xDE,0xC9,0xD9,0xC0,0xD9,0xFC,0xDC,0xE9
-    .byte 0xD9,0xC9,0xD9,0xF0,0xD9,0xE8,0xDE,0xC1,0xD9,0xFD,0xDD,0xD9,0xD9,0x1C,0x24
-gc_exp_f32_end:
-gc_sin_f64:
-    fld qword ptr [rsp]
-    fsin
-    fstp qword ptr [rsp]
-gc_sin_f64_end:
-gc_sin_f32:
-    fld dword ptr [rsp]
-    fsin
-    fstp dword ptr [rsp]
-gc_sin_f32_end:
-gc_cos_f64:
-    fld qword ptr [rsp]
-    fcos
-    fstp qword ptr [rsp]
-gc_cos_f64_end:
-gc_cos_f32:
-    fld dword ptr [rsp]
-    fcos
-    fstp dword ptr [rsp]
-gc_cos_f32_end:
-
 # Wide helper status contracts used by generated code.  A failed physical
 # relation is terminal for the generated program and exits with the historical
 # numeric-domain status 65.  Never `ret` through the expression-value stack.
-gc_wide_check_edx: .byte 0x85,0xD2,0x74,0x0C,0xBF,65,0,0,0,0xB8,60,0,0,0,0x0F,0x05; gc_wide_check_edx_end:
-gc_wide_check_eax: .byte 0x85,0xC0,0x74,0x0C,0xBF,65,0,0,0,0xB8,60,0,0,0,0x0F,0x05; gc_wide_check_eax_end:
+gc_wide_check_edx: .byte 0x85,0xD2,0x74,7; EFFECT_REJECT; gc_wide_check_edx_end:
+gc_wide_check_eax: .byte 0x85,0xC0,0x74,7; EFFECT_REJECT; gc_wide_check_eax_end:
 
 # casts top-of-stack
-# Unsigned 64 -> float uses the standard exact range-preserving split so values
-# with bit 63 set are not interpreted as negative signed integers.
-gc_cast_u64_f64:
-    pop rax
-    test rax,rax
-    js .Lgc_u64_f64_hi
-    cvtsi2sd xmm0,rax
-    jmp .Lgc_u64_f64_done
-.Lgc_u64_f64_hi:
+# Unsigned magnitude normalization shared by all native FP consumers.
+gc_unsigned_fp_split:
     mov rdx,rax
     shr rax,1
     and edx,1
     or rax,rdx
-    cvtsi2sd xmm0,rax
-    addsd xmm0,xmm0
-.Lgc_u64_f64_done:
-    movq rax,xmm0
-    push rax
-gc_cast_u64_f64_end:
-
-gc_cast_i64_f64:
-    pop rax
-    cvtsi2sd xmm0,rax
-    movq rax,xmm0
-    push rax
-gc_cast_i64_f64_end:
-
-gc_cast_u64_f32:
-    pop rax
-    test rax,rax
-    js .Lgc_u64_f32_hi
-    cvtsi2ss xmm0,rax
-    jmp .Lgc_u64_f32_done
-.Lgc_u64_f32_hi:
-    mov rdx,rax
-    shr rax,1
-    and edx,1
-    or rax,rdx
-    cvtsi2ss xmm0,rax
-    addss xmm0,xmm0
-.Lgc_u64_f32_done:
-    movd eax,xmm0
-    push rax
-gc_cast_u64_f32_end:
-
-gc_cast_i64_f32:
-    pop rax
-    cvtsi2ss xmm0,rax
-    movd eax,xmm0
-    push rax
-gc_cast_i64_f32_end:
+gc_unsigned_fp_split_end:
 
 gc_cast_f32_f64:
     pop rax
@@ -11594,9 +14707,7 @@ gc_cast_f64_f32_end:
 # now; the explicit general regression gate constrains values to its valid
 # representable range rather than silently redefining out-of-range behavior.
 gc_cast_f32_i64: .byte 0x58,0x66,0x0F,0x6E,0xC0,0xF3,0x48,0x0F,0x2C,0xC0,0x50; gc_cast_f32_i64_end:
-gc_cast_f32_u64=gc_cast_f32_i64; .set gc_cast_f32_u64_end,gc_cast_f32_i64_end
 gc_cast_f64_i64: .byte 0x58,0x66,0x48,0x0F,0x6E,0xC0,0xF2,0x48,0x0F,0x2C,0xC0,0x50; gc_cast_f64_i64_end:
-gc_cast_f64_u64=gc_cast_f64_i64; .set gc_cast_f64_u64_end,gc_cast_f64_i64_end
 
 # mixed precision stack conversions
 gc_top_f64_to_f32:
@@ -11640,7 +14751,8 @@ gc_second_f32_to_f64_end:
 gc_second_i64_to_f64:
     pop rcx
     pop rax
-    cvtsi2sd xmm0,rax
+    vxorps xmm0,xmm0,xmm0
+    vcvtsi2sd xmm0,xmm0,rax
     movq rax,xmm0
     push rax
     push rcx
@@ -11649,7 +14761,8 @@ gc_second_i64_to_f64_end:
 gc_second_i64_to_f32:
     pop rcx
     pop rax
-    cvtsi2ss xmm0,rax
+    vxorps xmm0,xmm0,xmm0
+    vcvtsi2ss xmm0,xmm0,rax
     movd eax,xmm0
     push rax
     push rcx
@@ -11660,14 +14773,16 @@ gc_second_u64_to_f64:
     pop rax
     test rax,rax
     js .Lgc_second_u64_f64_hi
-    cvtsi2sd xmm0,rax
+    vxorps xmm0,xmm0,xmm0
+    vcvtsi2sd xmm0,xmm0,rax
     jmp .Lgc_second_u64_f64_done
 .Lgc_second_u64_f64_hi:
     mov rdx,rax
     shr rax,1
     and edx,1
     or rax,rdx
-    cvtsi2sd xmm0,rax
+    vxorps xmm0,xmm0,xmm0
+    vcvtsi2sd xmm0,xmm0,rax
     addsd xmm0,xmm0
 .Lgc_second_u64_f64_done:
     movq rax,xmm0
@@ -11680,14 +14795,16 @@ gc_second_u64_to_f32:
     pop rax
     test rax,rax
     js .Lgc_second_u64_f32_hi
-    cvtsi2ss xmm0,rax
+    vxorps xmm0,xmm0,xmm0
+    vcvtsi2ss xmm0,xmm0,rax
     jmp .Lgc_second_u64_f32_done
 .Lgc_second_u64_f32_hi:
     mov rdx,rax
     shr rax,1
     and edx,1
     or rax,rdx
-    cvtsi2ss xmm0,rax
+    vxorps xmm0,xmm0,xmm0
+    vcvtsi2ss xmm0,xmm0,rax
     addss xmm0,xmm0
 .Lgc_second_u64_f32_done:
     movd eax,xmm0
@@ -11695,7 +14812,7 @@ gc_second_u64_to_f32:
     push rcx
 gc_second_u64_to_f32_end:
 
-# float binary snippets. Division checks zero bit-pattern ignoring sign.
+# IEEE float binary snippets; zero/nonfinite operands follow DIVSD/DIVSS semantics.
 .macro F64BIN name,opcode
 \name: .byte 0x59,0x58,0x66,0x48,0x0F,0x6E,0xC9,0x66,0x48,0x0F,0x6E,0xC0,0xF2,0x0F,\opcode,0xC1,0x66,0x48,0x0F,0x7E,0xC0,0x50
 \name\()_end:
@@ -11703,7 +14820,19 @@ gc_second_u64_to_f32_end:
 F64BIN gc_f64_add,0x58
 F64BIN gc_f64_sub,0x5C
 F64BIN gc_f64_mul,0x59
-gc_f64_div_checked: .byte 0x59,0x48,0x89,0xCA,0x48,0xB8,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0x7F,0x48,0x21,0xC2,0x75,0x06,0xB8,1,0,0,0,0xC3,0x58,0x66,0x48,0x0F,0x6E,0xC9,0x66,0x48,0x0F,0x6E,0xC0,0xF2,0x0F,0x5E,0xC1,0x66,0x48,0x0F,0x7E,0xC0,0x50; gc_f64_div_checked_end:
+F64BIN gc_f64_div,0x5E
+
+.p2align 3
+
+.p2align 3
+g_native_fp_op_table:
+    .quad gv_add; .long gv_add_end-gv_add,0; .quad gc_f64_add; .long gc_f64_add_end-gc_f64_add,0; .quad gc_f32_add; .long gc_f32_add_end-gc_f32_add,0
+    .quad gv_sub; .long gv_sub_end-gv_sub,0; .quad gc_f64_sub; .long gc_f64_sub_end-gc_f64_sub,0; .quad gc_f32_sub; .long gc_f32_sub_end-gc_f32_sub,0
+    .quad gv_mul; .long gv_mul_end-gv_mul,0; .quad gc_f64_mul; .long gc_f64_mul_end-gc_f64_mul,0; .quad gc_f32_mul; .long gc_f32_mul_end-gc_f32_mul,0
+    .quad gv_div; .long gv_div_end-gv_div,0; .quad gc_f64_div; .long gc_f64_div_end-gc_f64_div,0; .quad gc_f32_div; .long gc_f32_div_end-gc_f32_div,0
+    .quad gv_min; .long gv_min_end-gv_min,0; .quad gc_f64_min; .long gc_f64_min_end-gc_f64_min,0; .quad gc_f32_min; .long gc_f32_min_end-gc_f32_min,0
+    .quad gv_max; .long gv_max_end-gv_max,0; .quad gc_f64_max; .long gc_f64_max_end-gc_f64_max,0; .quad gc_f32_max; .long gc_f32_max_end-gc_f32_max,0
+    .quad 0
 gc_f64_min: .byte 0x59,0x58,0x66,0x48,0x0F,0x6E,0xC9,0x66,0x48,0x0F,0x6E,0xC0,0xF2,0x0F,0x5D,0xC1,0x66,0x48,0x0F,0x7E,0xC0,0x50; gc_f64_min_end:
 gc_f64_max: .byte 0x59,0x58,0x66,0x48,0x0F,0x6E,0xC9,0x66,0x48,0x0F,0x6E,0xC0,0xF2,0x0F,0x5F,0xC1,0x66,0x48,0x0F,0x7E,0xC0,0x50; gc_f64_max_end:
 .macro F32BIN name,opcode
@@ -11713,7 +14842,7 @@ gc_f64_max: .byte 0x59,0x58,0x66,0x48,0x0F,0x6E,0xC9,0x66,0x48,0x0F,0x6E,0xC0,0x
 F32BIN gc_f32_add,0x58
 F32BIN gc_f32_sub,0x5C
 F32BIN gc_f32_mul,0x59
-gc_f32_div_checked: .byte 0x59,0x89,0xCA,0x81,0xE2,0xFF,0xFF,0xFF,0x7F,0x75,0x06,0xB8,1,0,0,0,0xC3,0x58,0x66,0x0F,0x6E,0xC9,0x66,0x0F,0x6E,0xC0,0xF3,0x0F,0x5E,0xC1,0x66,0x0F,0x7E,0xC0,0x50; gc_f32_div_checked_end:
+F32BIN gc_f32_div,0x5E
 
 # integer arithmetic fragments
 # wrap
@@ -11721,104 +14850,54 @@ gc_add_wrap: .byte 0x59,0x58,0x48,0x01,0xC8,0x50; gc_add_wrap_end:
 gc_sub_wrap: .byte 0x59,0x58,0x48,0x29,0xC8,0x50; gc_sub_wrap_end:
 gc_mul_wrap: .byte 0x59,0x58,0x48,0x0F,0xAF,0xC1,0x50; gc_mul_wrap_end:
 # trap, good branch skips mov eax,1;ret (6 bytes)
-gc_uadd_trap: .byte 0x59,0x58,0x48,0x01,0xC8,0x73,0x06,0xB8,1,0,0,0,0xC3,0x50; gc_uadd_trap_end:
-gc_iadd_trap: .byte 0x59,0x58,0x48,0x01,0xC8,0x71,0x06,0xB8,1,0,0,0,0xC3,0x50; gc_iadd_trap_end:
-gc_usub_trap: .byte 0x59,0x58,0x48,0x29,0xC8,0x73,0x06,0xB8,1,0,0,0,0xC3,0x50; gc_usub_trap_end:
-gc_isub_trap: .byte 0x59,0x58,0x48,0x29,0xC8,0x71,0x06,0xB8,1,0,0,0,0xC3,0x50; gc_isub_trap_end:
+gc_uadd_trap: .byte 0x59,0x58,0x48,0x01,0xC8,0x73,7; EFFECT_REJECT; .byte 0x50; gc_uadd_trap_end:
+gc_iadd_trap: .byte 0x59,0x58,0x48,0x01,0xC8,0x71,7; EFFECT_REJECT; .byte 0x50; gc_iadd_trap_end:
+gc_usub_trap: .byte 0x59,0x58,0x48,0x29,0xC8,0x73,7; EFFECT_REJECT; .byte 0x50; gc_usub_trap_end:
+gc_isub_trap: .byte 0x59,0x58,0x48,0x29,0xC8,0x71,7; EFFECT_REJECT; .byte 0x50; gc_isub_trap_end:
 # unsigned mul: mul rcx -> rdx:rax, reject if rdx!=0
-gc_umul_trap: .byte 0x59,0x58,0x48,0xF7,0xE1,0x48,0x85,0xD2,0x74,0x06,0xB8,1,0,0,0,0xC3,0x50; gc_umul_trap_end:
-gc_imul_trap: .byte 0x59,0x58,0x48,0x0F,0xAF,0xC1,0x71,0x06,0xB8,1,0,0,0,0xC3,0x50; gc_imul_trap_end:
-gc_udiv_checked: .byte 0x59,0x48,0x85,0xC9,0x75,0x06,0xB8,1,0,0,0,0xC3,0x58,0x31,0xD2,0x48,0xF7,0xF1,0x50; gc_udiv_checked_end:
-# signed division/modulo: zero and INT64_MIN/-1 are handled before idiv,
-# preventing both wrong results and architectural #DE/SIGFPE escapes.
-gc_idiv_checked:
-    pop rcx
+gc_umul_trap: .byte 0x59,0x58,0x48,0xF7,0xE1,0x48,0x85,0xD2,0x74,7; EFFECT_REJECT; .byte 0x50; gc_umul_trap_end:
+gc_imul_trap: .byte 0x59,0x58,0x48,0x0F,0xAF,0xC1,0x71,7; EFFECT_REJECT; .byte 0x50; gc_imul_trap_end:
+# The single register relation also serves stack consumers via their own ABI.
+gc_udivmod_core:
     test rcx,rcx
-    jne .Lgc_idiv_t_nonzero
-    mov eax,1
-    ret
-.Lgc_idiv_t_nonzero:
-    pop rax
+    jne .Ludm_nonzero
+    EFFECT_REJECT
+.Ludm_nonzero:
+    xor edx,edx
+    div rcx
+gc_udivmod_core_end:
+gc_idivmod_trap_core:
+    test rcx,rcx
+    jne .Litdm_nonzero
+    EFFECT_REJECT
+.Litdm_nonzero:
     mov rdx,0x8000000000000000
     cmp rax,rdx
-    jne .Lgc_idiv_t_do
+    jne .Litdm_do
     cmp rcx,-1
-    jne .Lgc_idiv_t_do
-    mov eax,1
-    ret
-.Lgc_idiv_t_do:
+    jne .Litdm_do
+    EFFECT_REJECT
+.Litdm_do:
     cqo
     idiv rcx
-    push rax
-gc_idiv_checked_end:
-
-gc_idiv_wrap_checked:
-    pop rcx
+gc_idivmod_trap_core_end:
+gc_idivmod_wrap_core:
     test rcx,rcx
-    jne .Lgc_idiv_w_nonzero
-    mov eax,1
-    ret
-.Lgc_idiv_w_nonzero:
-    pop rax
+    jne .Liwdm_nonzero
+    EFFECT_REJECT
+.Liwdm_nonzero:
     mov rdx,0x8000000000000000
     cmp rax,rdx
-    jne .Lgc_idiv_w_do
+    jne .Liwdm_do
     cmp rcx,-1
-    jne .Lgc_idiv_w_do
-    push rax
-    jmp .Lgc_idiv_w_done
-.Lgc_idiv_w_do:
+    jne .Liwdm_do
+    xor edx,edx
+    jmp .Liwdm_done
+.Liwdm_do:
     cqo
     idiv rcx
-    push rax
-.Lgc_idiv_w_done:
-gc_idiv_wrap_checked_end:
-
-# mod
-gc_umod_checked: .byte 0x59,0x48,0x85,0xC9,0x75,0x06,0xB8,1,0,0,0,0xC3,0x58,0x31,0xD2,0x48,0xF7,0xF1,0x52; gc_umod_checked_end:
-gc_imod_checked:
-    pop rcx
-    test rcx,rcx
-    jne .Lgc_imod_t_nonzero
-    mov eax,1
-    ret
-.Lgc_imod_t_nonzero:
-    pop rax
-    mov rdx,0x8000000000000000
-    cmp rax,rdx
-    jne .Lgc_imod_t_do
-    cmp rcx,-1
-    jne .Lgc_imod_t_do
-    mov eax,1
-    ret
-.Lgc_imod_t_do:
-    cqo
-    idiv rcx
-    push rdx
-gc_imod_checked_end:
-
-gc_imod_wrap_checked:
-    pop rcx
-    test rcx,rcx
-    jne .Lgc_imod_w_nonzero
-    mov eax,1
-    ret
-.Lgc_imod_w_nonzero:
-    pop rax
-    mov rdx,0x8000000000000000
-    cmp rax,rdx
-    jne .Lgc_imod_w_do
-    cmp rcx,-1
-    jne .Lgc_imod_w_do
-    xor eax,eax
-    push rax
-    jmp .Lgc_imod_w_done
-.Lgc_imod_w_do:
-    cqo
-    idiv rcx
-    push rdx
-.Lgc_imod_w_done:
-gc_imod_wrap_checked_end:
+.Liwdm_done:
+gc_idivmod_wrap_core_end:
 
 # min/max ints
 gc_umin: .byte 0x59,0x58,0x48,0x39,0xC8,0x48,0x0F,0x47,0xC1,0x50; gc_umin_end:
@@ -11861,7 +14940,9 @@ RPFRESCMP gc_rankn_cmp_ge,ge
 
 # Float cmp fragments: ordered setcc after ucomi lhs,rhs.
 .macro F64CMP name,cc
-\name: .byte 0x59,0x58,0x66,0x48,0x0F,0x6E,0xC9,0x66,0x48,0x0F,0x6E,0xC0,0x66,0x0F,0x2E,0xC1,0x0F,\cc,0xC0,0x0F,0xB6,0xC0,0x50
+\name: .byte 0x59,0x58,0x66,0x48,0x0F,0x6E,0xC9,0x66,0x48,0x0F,0x6E,0xC0,0x66,0x0F,0x2E,0xC1
+    PHYSICAL_FP_SETCC \cc
+    .byte 0x0F,0xB6,0xC0,0x50
 \name\()_end:
 .endm
 F64CMP gc_f64_cmp_eq,0x94
@@ -11871,7 +14952,9 @@ F64CMP gc_f64_cmp_le,0x96
 F64CMP gc_f64_cmp_gt,0x97
 F64CMP gc_f64_cmp_ge,0x93
 .macro F32CMP name,cc
-\name: .byte 0x59,0x58,0x66,0x0F,0x6E,0xC9,0x66,0x0F,0x6E,0xC0,0x0F,0x2E,0xC1,0x0F,\cc,0xC0,0x0F,0xB6,0xC0,0x50
+\name: .byte 0x59,0x58,0x66,0x0F,0x6E,0xC9,0x66,0x0F,0x6E,0xC0,0x0F,0x2E,0xC1
+    PHYSICAL_FP_SETCC \cc
+    .byte 0x0F,0xB6,0xC0,0x50
 \name\()_end:
 .endm
 F32CMP gc_f32_cmp_eq,0x94
@@ -11885,22 +14968,27 @@ F32CMP gc_f32_cmp_ge,0x93
 gc_and_qword: .byte 0x59,0x58,0x48,0x21,0xC8,0x50; gc_and_qword_end:
 gc_or_qword: .byte 0x59,0x58,0x48,0x09,0xC8,0x50; gc_or_qword_end:
 gc_xor_qword: .byte 0x59,0x58,0x48,0x31,0xC8,0x50; gc_xor_qword_end:
-gc_shl_checked: .byte 0x59,0x48,0x83,0xF9,0x40,0x72,0x06,0xB8,1,0,0,0,0xC3,0x58,0x48,0xD3,0xE0,0x50; gc_shl_checked_end:
-gc_shr_checked: .byte 0x59,0x48,0x83,0xF9,0x40,0x72,0x06,0xB8,1,0,0,0,0xC3,0x58,0x48,0xD3,0xE8,0x50; gc_shr_checked_end:
+gc_shl_checked: .byte 0x59,0x48,0x83,0xF9,0x40,0x72,7; EFFECT_REJECT; .byte 0x58,0x48,0xD3,0xE0,0x50; gc_shl_checked_end:
+gc_shr_checked: .byte 0x59,0x48,0x83,0xF9,0x40,0x72,7; EFFECT_REJECT; .byte 0x58,0x48,0xD3,0xE8,0x50; gc_shr_checked_end:
 
 # reduction snippets: candidate rax, accumulator r11
 gc_red_add_wrap: .byte 0x49,0x01,0xC3; gc_red_add_wrap_end:
-gc_red_uadd_trap: .byte 0x49,0x01,0xC3,0x73,0x06,0xB8,1,0,0,0,0xC3; gc_red_uadd_trap_end:
-gc_red_iadd_trap: .byte 0x49,0x01,0xC3,0x71,0x06,0xB8,1,0,0,0,0xC3; gc_red_iadd_trap_end:
-gc_red_f64_add: .byte 0x66,0x49,0x0F,0x6E,0xDB,0x66,0x48,0x0F,0x6E,0xC0,0xF2,0x0F,0x58,0xD8,0x66,0x49,0x0F,0x7E,0xDB; gc_red_f64_add_end:
-gc_red_f32_add: .byte 0x66,0x41,0x0F,0x6E,0xDB,0x66,0x0F,0x6E,0xC0,0xF3,0x0F,0x58,0xD8,0x66,0x41,0x0F,0x7E,0xDB; gc_red_f32_add_end:
-# first guard: if rbx==0 r11=rax and skip following compare fragment via caller cannot know size;
-# retained as no-op marker in first general seed; min/max tests use nonempty simple integer paths.
+gc_red_uadd_trap: .byte 0x49,0x01,0xC3,0x73,7; EFFECT_REJECT; gc_red_uadd_trap_end:
+gc_red_iadd_trap: .byte 0x49,0x01,0xC3,0x71,7; EFFECT_REJECT; gc_red_iadd_trap_end:
+gc_red_f64_add:
+    vmovq xmm3,r11
+    vmovq xmm0,rax
+    vaddsd xmm3,xmm3,xmm0
+    vmovq r11,xmm3
+gc_red_f64_add_end:
+gc_red_f32_add:
+    vmovd xmm3,r11d
+    vmovd xmm0,eax
+    vaddss xmm3,xmm3,xmm0
+    vmovd r11d,xmm3
+gc_red_f32_add_end:
+# First nonempty candidate initializes the same ordered binary fold.
 gc_red_first_guard: .byte 0x48,0x85,0xDB,0x75,0x03,0x49,0x89,0xC3; gc_red_first_guard_end:
-gc_red_umin: .byte 0x4C,0x39,0xD8,0x49,0x0F,0x42,0xC3,0x49,0x89,0xC3; gc_red_umin_end:
-gc_red_umax: .byte 0x4C,0x39,0xD8,0x49,0x0F,0x47,0xC3,0x49,0x89,0xC3; gc_red_umax_end:
-gc_red_imin: .byte 0x4C,0x39,0xD8,0x49,0x0F,0x4C,0xC3,0x49,0x89,0xC3; gc_red_imin_end:
-gc_red_imax: .byte 0x4C,0x39,0xD8,0x49,0x0F,0x4F,0xC3,0x49,0x89,0xC3; gc_red_imax_end:
 
 # constants/keys
 # JSON keys
@@ -11965,8 +15053,6 @@ gv_mixed_high:.ascii "higher_precision_dominates"; gv_mixed_high_end:
 gv_bool:.ascii "bool"; gv_bool_end:
 gv_i64:.ascii "i64"; gv_i64_end:
 gv_u64:.ascii "u64"; gv_u64_end:
-gv_f32:.ascii "f32"; gv_f32_end:
-gv_f64:.ascii "f64"; gv_f64_end:
 gv_string:.ascii "string"; gv_string_end:
 gv_compute:.ascii "compute"; gv_compute_end:
 gv_map:.ascii "map"; gv_map_end:
@@ -12045,6 +15131,7 @@ g_io_meta_arena_bytes:.skip 8
 g_io_capacity:.skip 4
 g_output_capacity:.skip 4
 g_input_types_ptr:.skip 8
+g_input_ranges_ptr:.skip 8
 g_output_types_ptr:.skip 8
 g_rankn_type_facts_ptr:.skip 8
 g_rankn_type_count:.skip 4
@@ -12064,6 +15151,24 @@ g_reg_iter_old_reg_ptr:.skip 8
 g_reg_iter_out_reg_ptr:.skip 8
 g_phys_state_last_use_ptr:.skip 8
 g_phys_state_guard_ptr:.skip 8
+g_phys_update_order_ptr:.skip 8
+g_phys_update_position_ptr:.skip 8
+g_phys_update_pending_ptr:.skip 8
+g_phys_update_total_ptr:.skip 8
+g_phys_update_expr_ptr:.skip 8
+g_phys_update_position:.skip 4
+g_phys_update_order_error:.skip 4
+.p2align 3
+g_iter_projection_arena_ptr:.skip 8
+g_iter_projection_arena_bytes:.skip 8
+g_iter_projection_capacity:.skip 4
+g_iter_projection_count:.skip 4
+g_iter_projection_symbol_ptr:.skip 8
+g_iter_projection_name_ptr:.skip 8
+g_iter_projection_name_len:.skip 8
+g_iter_projection_slot_ptr:.skip 8
+g_iter_projection_type_ptr:.skip 8
+g_iter_projection_state_index_ptr:.skip 8
 # Per-program runtime arena layout facts, known to AOT code generation.
 g_runtime_input_values_base_va:.skip 8
 g_runtime_input_aux_base_va:.skip 8
@@ -12076,8 +15181,12 @@ g_runtime_rankn_temp_base_va:.skip 8
 g_runtime_arena_bytes:.skip 8
 # compile-time state for register-resident small iterate lowering
 g_reg_iter_counted:.skip 4
+g_counted_proof_kind:.skip 4
+g_reg_iter_countdown:.skip 4
 g_reg_iter_counter_index:.skip 4
 g_reg_iter_bound_expr:.skip 8
+# One AOT patch chain for the ordinary bound edge and proved completed Regions.
+g_reg_iter_exit_chain:.skip 8
 g_iter_reg_mode:.skip 4
 g_reg_iter_total:.skip 4
 g_reg_iter_data_count:.skip 4
@@ -12086,6 +15195,7 @@ g_reg_iter_update_obj:.skip 8
 g_reg_iter_max_expr:.skip 8
 g_reg_iter_cond_expr:.skip 8
 g_reg_iter_result_name_node:.skip 8
+g_reg_iter_symbol:.skip 8
 # declaration pointers are compile-time facts, one per language state
 # 1.3.15 Rank-N causal carrier map.  Indexed by declaration slot; -1 carrier
 # means the ValueFact remains physically materialized in the existing state
@@ -12094,14 +15204,9 @@ g_reg_iter_fp_count:.skip 4
 g_reg_iter_int_count:.skip 4
 g_phys_fp_reserved_mask:.skip 4
 g_phys_fp_carrier_count:.skip 4
-g_phys_fp_old_base:.skip 4
 g_phys_fp_all_mask:.skip 4
-g_phys_fp_total:.skip 4
-g_phys_fp_resident_budget:.skip 4
-g_phys_fp_transient_outputs:.skip 4
-g_phys_fp_inplace_epoch:.skip 4
 # Effective post-CSE last consumer for each semantic state ValueFact.
-g_phys_shared_pressure_exhausted:.skip 4
+g_phys_stack_episode:.skip 4
 g_phys_probe_dest:.skip 4
 g_phys_probe_temp:.skip 4
 g_phys_commit_old:.skip 4
@@ -12119,22 +15224,31 @@ g_phys_fact_arena_ptr:.skip 8
 g_phys_fact_arena_bytes:.skip 8
 g_phys_fact_capacity:.skip 4
 g_phys_cse_candidate_count:.skip 4
+g_phys_plan_root:.skip 8
 g_phys_cse_candidate_expr_ptr:.skip 8
 g_phys_cse_candidate_type_ptr:.skip 8
 g_phys_cse_candidate_uses_ptr:.skip 8
 g_phys_cse_candidate_cost_ptr:.skip 8
 g_phys_cse_resident_count:.skip 4
+g_phys_cse_resident_cost_ptr:.skip 8
+g_phys_cse_candidate_moves_ptr:.skip 8
+g_phys_cse_resident_frontier_ptr:.skip 8
+g_phys_cse_control_ready_count:.skip 4
 g_phys_cse_resident_expr_ptr:.skip 8
 g_phys_cse_resident_type_ptr:.skip 8
 g_phys_cse_resident_reg_ptr:.skip 8
 g_phys_guard_region_uses_ptr:.skip 8
 g_phys_cse_ready_count:.skip 4
 g_phys_int_temp_mask:.skip 4
+g_phys_int_temp_live:.skip 4
+g_phys_int_temp_peak:.skip 4
 g_phys_int_reserved_mask:.skip 4
 g_phys_const_candidate_count:.skip 4
 g_phys_const_candidate_bits_ptr:.skip 8
 g_phys_const_candidate_type_ptr:.skip 8
 g_phys_const_candidate_uses_ptr:.skip 8
+g_phys_const_candidate_pool_ptr:.skip 8
+g_phys_const_pool_ready:.skip 4
 g_phys_const_resident_count:.skip 4
 g_phys_const_resident_bits_ptr:.skip 8
 g_phys_const_resident_type_ptr:.skip 8
@@ -12214,3 +15328,61 @@ g_code_capacity_prev:.skip 8
 g_parallel_code_ptr:.skip 8
 g_parallel_code_capacity:.skip 8
 g_parallel_code_capacity_prev:.skip 8
+
+.section .rodata
+gc_f32_min: .byte 0x59,0x58,0x66,0x0F,0x6E,0xC9,0x66,0x0F,0x6E,0xC0,0xF3,0x0F,0x5D,0xC1,0x66,0x0F,0x7E,0xC0,0x50; gc_f32_min_end:
+
+.section .rodata
+gc_f32_max: .byte 0x59,0x58,0x66,0x0F,0x6E,0xC9,0x66,0x0F,0x6E,0xC0,0xF3,0x0F,0x5F,0xC1,0x66,0x0F,0x7E,0xC0,0x50; gc_f32_max_end:
+
+.section .rodata
+gc_zero_lhs_stack: pop rcx; xor eax,eax; push rax; push rcx; gc_zero_lhs_stack_end:
+
+.bss
+.p2align 3
+g_packet_ready:.skip 4
+g_packet_native_nodes:.skip 4
+
+g_packet_axis_offsets_ptr:.skip 8
+
+.bss
+.p2align 2
+g_phys_cse_memory_carrier:.skip 4
+g_packet_scalar_lane:.skip 4
+g_packet_slot_memory_base:.skip 4
+
+.section .rodata
+gv_fma: .ascii "fma"
+
+.bss
+.p2align 2
+g_phys_cse_conditional_visit:.skip 4
+.text
+
+.bss
+.p2align 3
+g_packet_fact_scope_ptr:.skip 8
+g_packet_fact_mixed_ptr:.skip 8
+
+.pushsection .rodata
+.balign 8
+g_rankn_math_layout_facts:
+    .quad GENERAL_RANKN_FP_SQRT_VA,GENERAL_RANKN_FP_SQRT_SPANS
+    .quad GENERAL_RANKN_FP_EXP_VA,GENERAL_RANKN_FP_EXP_SPANS
+    .quad GENERAL_RANKN_FP_LOG_VA,GENERAL_RANKN_FP_LOG_SPANS
+    .quad GENERAL_RANKN_FP_SIN_VA,GENERAL_RANKN_FP_SINCOS_SPANS
+    .quad GENERAL_RANKN_FP_COS_VA,GENERAL_RANKN_FP_SINCOS_SPANS
+.popsection
+
+.include "compiler/rankn_twiddle_fact.inc"
+
+.bss
+.p2align 3
+# Compiler-only emitted-control fact; no metadata enters the target program.
+g_phys_control_edge_serial:.skip 8
+.text
+
+.include "compiler/physical_scalar_facts.inc"
+.include "compiler/physical_scalar_window.inc"
+
+.include "compiler/physical_region_work.inc"

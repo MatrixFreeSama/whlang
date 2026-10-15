@@ -223,7 +223,7 @@ vec_vcvtuqq2pd_exact:
     call vec_vex2_rrr
     # signed conversion is now valid because temp <= 2^63-1.
     mov edi,ebx; mov esi,r13d
-    call vec_vcvtqq2pd
+    call vec_vcvtuqq2pd
     test eax,eax
     jnz .vcuq_free_fail
     # exact multiplication by two in binary floating point.

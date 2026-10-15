@@ -23,7 +23,7 @@
 .equ MREMAP_MAYMOVE,1
 .equ SURFACE_STREAM_INITIAL_BYTES,65536
 .equ SURFACE_AST_INITIAL_BYTES,1048576
-.equ SURFACE_FACT_RECORD_BYTES,432
+.equ SURFACE_FACT_RECORD_BYTES,440
 .equ SN_KIND,0
 .equ SN_OP,4
 .equ SN_PTR,8
@@ -54,6 +54,7 @@
 .equ NK_RECUR_DEF,18     # surface-only pure recursive definition wrapper
 .equ NK_RECUR_APPLY,19   # surface-only invocation; must converge to old iterate facts
 .equ NK_CALL_ARG,20      # surface-only arbitrary-arity call-argument chain
+.equ NK_FIELD,21         # canonical structural field projection; static records still erase early
 
 # Compile-time Structured Fact tags. Structured facts never enter canonical IR;
 # they are containers of existing scalar AST/ValueFacts and disappear through
@@ -61,16 +62,9 @@
 .equ STF_COMPLEX,1
 .equ STF_ROOT,2
 # Structured matrix/vector families encode their dimension in the tag.
-# matrix2/3/4 and vec2/3/4 are legacy surface aliases only; the algorithms
-# consume one dimension-bearing family rather than three named species.
+# Matrix/vector algorithms consume one dimension-bearing family.
 .equ STF_MATRIX_BASE,0x40000000
 .equ STF_VECTOR_BASE,0x80000000
-.equ STF_MAT2,STF_MATRIX_BASE+2
-.equ STF_MAT3,STF_MATRIX_BASE+3
-.equ STF_MAT4,STF_MATRIX_BASE+4
-.equ STF_VEC2,STF_VECTOR_BASE+2
-.equ STF_VEC3,STF_VECTOR_BASE+3
-.equ STF_VEC4,STF_VECTOR_BASE+4
 
 .equ OP_OR,1
 .equ OP_AND,2
@@ -105,6 +99,7 @@
 .equ OP_LOG,31
 .equ OP_SIN,32
 .equ OP_COS,33
+.equ OP_FMA,34
 
 # Surface-only native mathematics IDs. These are compile-time semantics, not
 # runtime opcodes. Every entry disappears into existing ValueFact operations.
@@ -176,35 +171,32 @@
 .equ MB_CEXP,66
 .equ MB_CLOG,67
 .equ MB_COMPONENT,68
-.equ MB_MATRIX2,69
-.equ MB_MATRIX3,70
-.equ MB_MATRIX4,71
-.equ MB_MGET,72
-.equ MB_MTRANSPOSE,73
-.equ MB_MTRACE,74
-.equ MB_MAKE_SPD,75
-.equ MB_CHOLESKY,76
-.equ MB_ORTHOGONALIZE,77
-.equ MB_QR_R,78
-.equ MB_LU_L,79
-.equ MB_LU_U,80
-.equ MB_LDLT_L,81
-.equ MB_LDLT_D,82
-.equ MB_MATRIX_EXP,83
-.equ MB_MATRIX_LOG,84
-.equ MB_MATRIX_SQRT,85
-.equ MB_EIG_VALUES,86
-.equ MB_EIG_VECTORS,87
-.equ MB_SVD_VALUES,88
-.equ MB_SVD_U,89
-.equ MB_SVD_V,90
-.equ MB_MATRIX_INV,91
-.equ MB_HADAMARD,92
-.equ MB_CSIN,93
-.equ MB_CCOS,94
-.equ MB_CSQRT,95
-.equ MB_ROOT_VALID,96
-.equ MB_LAST,96
+.equ MB_MGET,69
+.equ MB_MTRANSPOSE,70
+.equ MB_MTRACE,71
+.equ MB_MAKE_SPD,72
+.equ MB_CHOLESKY,73
+.equ MB_ORTHOGONALIZE,74
+.equ MB_QR_R,75
+.equ MB_LU_L,76
+.equ MB_LU_U,77
+.equ MB_LDLT_L,78
+.equ MB_LDLT_D,79
+.equ MB_MATRIX_EXP,80
+.equ MB_MATRIX_LOG,81
+.equ MB_MATRIX_SQRT,82
+.equ MB_EIG_VALUES,83
+.equ MB_EIG_VECTORS,84
+.equ MB_SVD_VALUES,85
+.equ MB_SVD_U,86
+.equ MB_SVD_V,87
+.equ MB_MATRIX_INV,88
+.equ MB_HADAMARD,89
+.equ MB_CSIN,90
+.equ MB_CCOS,91
+.equ MB_CSQRT,92
+.equ MB_ROOT_VALID,93
+.equ MB_LAST,93
 
 # Semantic Registry flags.  These describe mathematical identity only; they do
 # not create a runtime class or execution branch.  Every registered semantic is
@@ -418,6 +410,8 @@ s_prepare_surface_arenas:
     mov [rip+s_decl_ptrs],rbx
     mov rax,r12; imul rax,8; add rbx,rax
     mov [rip+s_decl_lens],rbx
+    mov rax,r12; imul rax,8; add rbx,rax
+    mov [rip+s_decl_range_max],rbx
     mov rax,r12; imul rax,8; add rbx,rax
     mov [rip+s_decl_shape_rank],rbx
     mov rax,r12; imul rax,4; add rbx,rax
@@ -888,75 +882,6 @@ s_is_ident_byte:
     mov eax,1; ret
 
 
-# rdi=source pointer -> eax byte length when a handwritten Unicode math token
-# starts here, else 0. Unquoted identifiers stop at these spellings; quoted
-# identifiers remain fully permissive. This keeps π² and a×b lexical rather
-# than accidentally absorbing the operator bytes into an UTF-8 identifier.
-s_unicode_math_token_len:
-    cmp rdi,[rip+s_end]; jae .sumtl_no
-    movzx eax,byte ptr [rdi]
-    cmp al,0xC2; je .sumtl_c2
-    cmp al,0xC3; je .sumtl_c3
-    cmp al,0xE2; je .sumtl_e2
-    cmp al,0xEF; je .sumtl_ef
-.sumtl_no: xor eax,eax; ret
-.sumtl_c2:
-    lea rcx,[rdi+1]; cmp rcx,[rip+s_end]; jae .sumtl_no
-    movzx eax,byte ptr [rdi+1]
-    cmp al,0xB2; je .sumtl_two       # ²
-    cmp al,0xB3; je .sumtl_two       # ³
-    cmp al,0xB7; je .sumtl_two       # ·
-    cmp al,0xAC; je .sumtl_two       # ¬
-    jmp .sumtl_no
-.sumtl_c3:
-    lea rcx,[rdi+1]; cmp rcx,[rip+s_end]; jae .sumtl_no
-    movzx eax,byte ptr [rdi+1]
-    cmp al,0x97; je .sumtl_two       # ×
-    cmp al,0xB7; je .sumtl_two       # ÷
-    jmp .sumtl_no
-.sumtl_e2:
-    lea rcx,[rdi+2]; cmp rcx,[rip+s_end]; jae .sumtl_no
-    movzx eax,byte ptr [rdi+1]
-    cmp al,0x81; je .sumtl_e281
-    cmp al,0x88; je .sumtl_e288
-    cmp al,0x89; je .sumtl_e289
-    cmp al,0x8B; je .sumtl_e28b
-    jmp .sumtl_no
-.sumtl_e281:
-    cmp byte ptr [rdi+2],0x84; je .sumtl_three  # ⁄ U+2044
-    jmp .sumtl_no
-.sumtl_e288:
-    movzx eax,byte ptr [rdi+2]
-    cmp al,0x92; je .sumtl_three     # −
-    cmp al,0x95; je .sumtl_three     # ∕
-    cmp al,0x97; je .sumtl_three     # ∗
-    cmp al,0x99; je .sumtl_three     # ∙
-    cmp al,0x9A; je .sumtl_three     # √
-    cmp al,0xA7; je .sumtl_three     # ∧
-    cmp al,0xA8; je .sumtl_three     # ∨
-    jmp .sumtl_no
-.sumtl_e289:
-    movzx eax,byte ptr [rdi+2]
-    cmp al,0xA0; je .sumtl_three     # ≠
-    cmp al,0xA4; je .sumtl_three     # ≤
-    cmp al,0xA5; je .sumtl_three     # ≥
-    jmp .sumtl_no
-.sumtl_e28b:
-    cmp byte ptr [rdi+2],0x85; je .sumtl_three  # ⋅
-    jmp .sumtl_no
-.sumtl_ef:
-    lea rcx,[rdi+2]; cmp rcx,[rip+s_end]; jae .sumtl_no
-    cmp byte ptr [rdi+1],0xBC; jne .sumtl_no
-    movzx eax,byte ptr [rdi+2]
-    cmp al,0x8B; je .sumtl_three     # ＋
-    cmp al,0x8D; je .sumtl_three     # －
-    cmp al,0x8A; je .sumtl_three     # ＊
-    cmp al,0x8F; je .sumtl_three     # ／
-    cmp al,0xBE; je .sumtl_three     # ＾
-    jmp .sumtl_no
-.sumtl_two: mov eax,2; ret
-.sumtl_three: mov eax,3; ret
-
 s_match_token:
     # rdi=literal ptr, esi=len, edx=boundary(1 keyword /0 operator). eax=1 consumed /0
     push rbx
@@ -1119,6 +1044,7 @@ s_decl_add:
     mov rax,[rip+s_decl_ptrs]; mov [rax+r13*8],rbx
     mov rax,[rip+s_decl_lens]; mov [rax+r13*8],r12
     mov rax,[rip+s_decl_shape_rank]; mov dword ptr [rax+r13*4],0
+    mov rax,[rip+s_decl_range_max]; mov qword ptr [rax+r13*8],-1
     inc dword ptr [rip+s_decl_count]
 .sda_ok:
     mov dword ptr [rip+s_last_decl_index],r13d
@@ -1468,7 +1394,6 @@ s_parse_name:
     mov al,[r9]; cmp al,'0'; jb .spn_num_tail; cmp al,'9'; ja .spn_num_tail
     inc r9; jmp .spn_numloop
 .spn_num_tail:
-    mov rdi,r9; call s_unicode_math_token_len; test eax,eax; jnz .spn_done
     mov dil,[r9]; call s_is_ident_byte
     test eax,eax; jnz .spn_loop
     jmp .spn_done
@@ -1478,7 +1403,6 @@ s_parse_name:
     mov r9,r8
 .spn_loop:
     cmp r9,[rip+s_end]; jae .spn_done
-    mov rdi,r9; call s_unicode_math_token_len; test eax,eax; jnz .spn_done
     mov dil,[r9]; call s_is_ident_byte
     test eax,eax; jz .spn_done
     inc r9; jmp .spn_loop
@@ -1722,12 +1646,6 @@ s_peek_binop:
 5:  cmp r10b,'>'; jne .spb_one; cmp r11b,'='; je .spb_ge; cmp r11b,'>'; je .spb_shr
 .spb_one:
     mov r10b,[r8]
-    # 1.3.29 handwritten-math compatibility. These UTF-8 spellings map to the
-    # existing arithmetic/comparison OPs; no compatibility runtime survives.
-    cmp r10b,0xC2; je .spb_utf_c2
-    cmp r10b,0xC3; je .spb_utf_c3
-    cmp r10b,0xE2; je .spb_utf_e2
-    cmp r10b,0xEF; je .spb_utf_ef
     cmp r10b,'|'; je .spb_bitor
     cmp r10b,'&'; je .spb_bitand
     cmp r10b,'<'; je .spb_lt
@@ -1738,54 +1656,6 @@ s_peek_binop:
     cmp r10b,'/'; je .spb_div
     cmp r10b,'%'; je .spb_mod
     jmp .spb_none
-# UTF-8 operator aliases. ecx is the exact source-byte length consumed.
-.spb_utf_c2:
-    lea r9,[r8+1]; cmp r9,[rip+s_end]; jae .spb_none
-    cmp byte ptr [r9],0xB7; je .spb_mul2       # · U+00B7
-    jmp .spb_none
-.spb_utf_c3:
-    lea r9,[r8+1]; cmp r9,[rip+s_end]; jae .spb_none
-    cmp byte ptr [r9],0x97; je .spb_mul2       # × U+00D7
-    cmp byte ptr [r9],0xB7; je .spb_div2       # ÷ U+00F7
-    jmp .spb_none
-.spb_utf_e2:
-    lea r9,[r8+2]; cmp r9,[rip+s_end]; jae .spb_none
-    cmp byte ptr [r8+1],0x81; jne 0f
-    cmp byte ptr [r8+2],0x84; je .spb_div3     # ⁄ U+2044
-0:  cmp byte ptr [r8+1],0x8B; jne 1f
-    cmp byte ptr [r8+2],0x85; je .spb_mul3     # ⋅ U+22C5
-1:  cmp byte ptr [r8+1],0x88; jne 2f
-    cmp byte ptr [r8+2],0x99; je .spb_mul3     # ∙ U+2219
-    cmp byte ptr [r8+2],0x95; je .spb_div3     # ∕ U+2215
-    cmp byte ptr [r8+2],0x97; je .spb_mul3     # ∗ U+2217
-    cmp byte ptr [r8+2],0x92; je .spb_sub3     # − U+2212
-    cmp byte ptr [r8+2],0xA7; je .spb_and3     # ∧ U+2227
-    cmp byte ptr [r8+2],0xA8; je .spb_or3      # ∨ U+2228
-2:  cmp byte ptr [r8+1],0x89; jne .spb_none
-    cmp byte ptr [r8+2],0xA4; je .spb_le3      # ≤ U+2264
-    cmp byte ptr [r8+2],0xA5; je .spb_ge3      # ≥ U+2265
-    cmp byte ptr [r8+2],0xA0; je .spb_ne3      # ≠ U+2260
-    jmp .spb_none
-.spb_utf_ef:
-    lea r9,[r8+2]; cmp r9,[rip+s_end]; jae .spb_none
-    cmp byte ptr [r8+1],0xBC; jne .spb_none
-    cmp byte ptr [r8+2],0x8B; je .spb_add3     # ＋ U+FF0B
-    cmp byte ptr [r8+2],0x8D; je .spb_sub3     # － U+FF0D
-    cmp byte ptr [r8+2],0x8A; je .spb_mul3     # ＊ U+FF0A
-    cmp byte ptr [r8+2],0x8F; je .spb_div3     # ／ U+FF0F
-    jmp .spb_none
-.spb_mul2: mov eax,OP_MUL; mov edx,10; mov ecx,2; ret
-.spb_div2: mov eax,OP_DIV; mov edx,10; mov ecx,2; ret
-.spb_add3: mov eax,OP_ADD; mov edx,9;  mov ecx,3; ret
-.spb_sub3: mov eax,OP_SUB; mov edx,9;  mov ecx,3; ret
-.spb_mul3: mov eax,OP_MUL; mov edx,10; mov ecx,3; ret
-.spb_div3: mov eax,OP_DIV; mov edx,10; mov ecx,3; ret
-.spb_le3:  mov eax,OP_LE;  mov edx,7;  mov ecx,3; ret
-.spb_ge3:  mov eax,OP_GE;  mov edx,7;  mov ecx,3; ret
-.spb_ne3:  mov eax,OP_NE;  mov edx,6;  mov ecx,3; ret
-.spb_and3: mov eax,OP_AND; mov edx,2; mov ecx,3; ret
-.spb_or3:  mov eax,OP_OR;  mov edx,1; mov ecx,3; ret
-
 .spb_or: mov eax,OP_OR; mov edx,1; mov ecx,2; ret
 .spb_and: mov eax,OP_AND; mov edx,2; mov ecx,2; ret
 .spb_bitor: mov eax,OP_BIT_OR; mov edx,3; mov ecx,1; ret
@@ -1854,42 +1724,28 @@ s_parse_power:
 .sppow_fail: xor eax,eax
 .sppow_done: pop r12; pop rbx; ret
 
-# eax=1 and consumes ^, **, or fullwidth ＾; otherwise eax=0.
+# eax=1 and consumes ^ or **; otherwise eax=0.
 s_match_power_token:
     call s_skip
     mov r8,[rip+s_cur]; cmp r8,[rip+s_end]; jae .smpt_no
     cmp byte ptr [r8],'^'; je .smpt_one
-    cmp byte ptr [r8],'*'; jne .smpt_full
+    cmp byte ptr [r8],'*'; jne .smpt_no
     lea r9,[r8+1]; cmp r9,[rip+s_end]; jae .smpt_no
     cmp byte ptr [r9],'*'; jne .smpt_no
     add r8,2; mov [rip+s_cur],r8; mov eax,1; ret
 .smpt_one: inc r8; mov [rip+s_cur],r8; mov eax,1; ret
-.smpt_full:
-    lea r9,[r8+2]; cmp r9,[rip+s_end]; jae .smpt_no
-    cmp byte ptr [r8],0xEF; jne .smpt_no
-    cmp byte ptr [r8+1],0xBC; jne .smpt_no
-    cmp byte ptr [r8+2],0xBE; jne .smpt_no   # ＾ U+FF3E
-    add r8,3; mov [rip+s_cur],r8; mov eax,1; ret
 .smpt_no: xor eax,eax; ret
 
 s_parse_unary:
     push rbx
-    # Handwritten unary aliases disappear into the existing unary OPs.
-    lea rdi,[rip+tok_sqrt_math]; mov esi,3; xor edx,edx; call s_match_token
-    test eax,eax; jnz .spu_sqrt
-    lea rdi,[rip+tok_not_math]; mov esi,2; xor edx,edx; call s_match_token
-    test eax,eax; jnz .spu_not
     lea rdi,[rip+tok_bang]; mov esi,1; xor edx,edx; call s_match_token
     test eax,eax; jnz .spu_not
     lea rdi,[rip+tok_tilde]; mov esi,1; xor edx,edx; call s_match_token
     test eax,eax; jnz .spu_bitnot
     lea rdi,[rip+tok_minus]; mov esi,1; xor edx,edx; call s_match_token
     test eax,eax; jnz .spu_neg
-    lea rdi,[rip+tok_minus_math]; mov esi,3; xor edx,edx; call s_match_token
-    test eax,eax; jnz .spu_neg
     call s_parse_power
     pop rbx; ret
-.spu_sqrt: mov ebx,OP_SQRT; jmp .spu_make
 .spu_not: mov ebx,OP_NOT; jmp .spu_make
 .spu_bitnot: mov ebx,OP_BIT_NOT; jmp .spu_make
 .spu_neg: mov ebx,OP_NEG
@@ -1920,10 +1776,6 @@ s_parse_postfix:
     test rax,rax; jz .spp_fail
     mov r12,rax
 .spp_loop:
-    lea rdi,[rip+tok_sup2]; mov esi,2; xor edx,edx; call s_match_token
-    test eax,eax; jnz .spp_pow2
-    lea rdi,[rip+tok_sup3]; mov esi,2; xor edx,edx; call s_match_token
-    test eax,eax; jnz .spp_pow3
     lea rdi,[rip+tok_dot]; mov esi,1; xor edx,edx; call s_match_token
     test eax,eax; jnz .spp_field
     lea rdi,[rip+tok_lbrack]; mov esi,1; xor edx,edx; call s_match_token
@@ -1957,15 +1809,20 @@ s_parse_postfix:
 .spp_field:
     cmp dword ptr [r12+SN_KIND],NK_VAR; jne .spp_fail
     call s_parse_name; test edx,edx; jnz .spp_fail
-    mov rdx,rax; mov rcx,rcx
-    mov rdi,[r12+SN_PTR]; mov rsi,[r12+SN_LEN]; call s_record_lookup
-    test rax,rax; jz .spp_fail
+    mov r13,rax                         # field-name pointer
+    mov rbx,rcx                         # field-name length
+    mov rdi,[r12+SN_PTR]; mov rsi,[r12+SN_LEN]; mov rdx,r13; mov rcx,rbx; call s_record_lookup
+    test rax,rax; jnz .spp_field_static
+    # No compile-time record owns the projection. Preserve the same structural
+    # field relation for the General frontend; it will accept only a represented
+    # structural owner (currently iterate final StateFacts) and reject invented fields.
+    call s_new_ast; test rax,rax; jz .spp_fail
+    mov dword ptr [rax+SN_KIND],NK_FIELD
+    mov rcx,[r12+SN_PTR]; mov [rax+SN_PTR],rcx
+    mov rcx,[r12+SN_LEN]; mov [rax+SN_LEN],rcx
+    mov [rax+SN_A],r13; mov [rax+SN_B],rbx
     mov r12,rax; jmp .spp_loop
-.spp_pow2:
-    mov rdi,r12; mov esi,2; call s_expand_pow_u64; test rax,rax; jz .spp_fail
-    mov r12,rax; jmp .spp_loop
-.spp_pow3:
-    mov rdi,r12; mov esi,3; call s_expand_pow_u64; test rax,rax; jz .spp_fail
+.spp_field_static:
     mov r12,rax; jmp .spp_loop
 .spp_done: mov rax,r12; jmp .spp_exit
 .spp_fail: xor eax,eax
@@ -2036,6 +1893,12 @@ s_parse_primary:
     # rewrite an exact callable to a nearby input name before call lookahead.
     mov rdi,r12; mov rsi,r13; call s_function_lookup
     cmp eax,-1; jne .sppp_exact_function_name
+    # Exact semantic identities share the same precedence as pure functions.
+    # Human-shell declaration repair cannot rewrite a registered callable.
+    mov rdi,r12; mov rsi,r13; call s_math_builtin_lookup
+    test eax,eax; jnz .sppp_exact_function_name
+    mov rdi,r12; mov rsi,r13; call s_semantic_parse_lookup
+    test eax,eax; jnz .sppp_exact_function_name
     # Resolve declared-name typo/newline repair before any lookahead can consume
     # the separating newline. Non-declared function names are left unchanged.
     mov rdi,r12; mov rsi,r13; call s_try_decl_repair
@@ -2105,7 +1968,6 @@ s_parse_primary:
     cmp al,'e'; je .sppp_num_exp_probe
     cmp al,'E'; je .sppp_num_exp_probe
 .sppp_num_ident_probe:
-    mov rdi,r9; call s_unicode_math_token_len; test eax,eax; jnz .sppp_number_real
     mov dil,[r9]; call s_is_ident_byte
     test eax,eax; jnz .sppp_word
     jmp .sppp_number_real
@@ -2549,6 +2411,7 @@ s_op_name:
     lea rax,[rip+op_log]; mov ecx,3; cmp edi,OP_LOG; je .son_ret
     lea rax,[rip+op_sin]; mov ecx,3; cmp edi,OP_SIN; je .son_ret
     lea rax,[rip+op_cos]; mov ecx,3; cmp edi,OP_COS; je .son_ret
+    lea rax,[rip+op_fma]; mov ecx,3; cmp edi,OP_FMA; je .son_ret
     lea rax,[rip+op_ushr]; mov ecx,4; cmp edi,OP_USHR; je .son_ret
     xor eax,eax; xor ecx,ecx
 .son_ret: ret
@@ -2571,6 +2434,7 @@ s_emit_ast:
     cmp eax,NK_LOAD; je .sea_load
     cmp eax,NK_IMM_U64; je .sea_imm_u64
     cmp eax,NK_IMM_F64_BITS; je .sea_imm_f64_bits
+    cmp eax,NK_FIELD; je .sea_field
     jmp .sea_fail
 .sea_imm_f64_bits:
     lea rdi,[rip+js_lit_prefix]; call s_out_cstr
@@ -2631,6 +2495,15 @@ cmp dword ptr [rbx+SN_AUX],0; je .sea_bool_false
 .sea_state:
     lea rdi,[rip+js_state_prefix]; call s_out_cstr
     mov rdi,[rbx+SN_PTR]; mov rsi,[rbx+SN_LEN]; call s_out_quote_span; jmp .sea_close
+.sea_field:
+    # Canonical field projection. Static record fields never reach this node;
+    # only structural downstream consumers such as an iterate final StateFact do.
+    lea rdi,[rip+js_field_prefix]; call s_out_cstr
+    mov rdi,[rbx+SN_PTR]; mov rsi,[rbx+SN_LEN]; call s_out_quote_span
+    lea rdi,[rip+js_field_name_mid]; call s_out_cstr
+    mov rdi,[rbx+SN_A]; mov rsi,[rbx+SN_B]; call s_out_quote_span
+    lea rdi,[rip+js_field_close]; call s_out_cstr
+    jmp .sea_ok
 .sea_op:
     lea rdi,[rip+js_op_prefix]; call s_out_cstr
     mov edi,dword ptr [rbx+SN_OP]; call s_op_name
@@ -2643,7 +2516,9 @@ cmp dword ptr [rbx+SN_AUX],0; je .sea_bool_false
     mov dil,','; call s_out_byte
     mov rdi,[rbx+SN_B]; call s_emit_ast; test eax,eax; jnz .sea_fail
     mov eax,dword ptr [rbx+SN_OP]
-    cmp eax,OP_SELECT; jne .sea_args_close
+    cmp eax,OP_SELECT; je .sea_ternary
+    cmp eax,OP_FMA; jne .sea_args_close
+.sea_ternary:
     mov dil,','; call s_out_byte
     mov rdi,[rbx+SN_C]; call s_emit_ast; test eax,eax; jnz .sea_fail
 .sea_args_close:
@@ -3044,6 +2919,7 @@ s_clone_subst_root:
     mov rdi,[rbx+SN_B]; mov rsi,r12; mov rdx,r13; mov rcx,r14; call s_clone_subst_root
     test rax,rax; jz .scsr_fail; mov [rsp+8],rax
     cmp r15d,OP_SELECT; je .scsr_select
+    cmp r15d,OP_FMA; je .scsr_fma
     mov edi,r15d; mov rsi,[rsp]; mov rdx,[rsp+8]; call s_ast_binary_new
     jmp .scsr_done
 .scsr_select:
@@ -3051,6 +2927,12 @@ s_clone_subst_root:
     test rax,rax; jz .scsr_fail
     mov rdi,[rsp]; mov rsi,[rsp+8]; mov rdx,rax; call s_root_select_new
     jmp .scsr_done
+.scsr_fma:
+    mov rdi,[rbx+SN_C]; mov rsi,r12; mov rdx,r13; mov rcx,r14; call s_clone_subst_root
+    test rax,rax; jz .scsr_fail
+    mov rdi,[rsp]; mov rsi,[rsp+8]; mov rdx,rax; call s_ast_select_new
+    test rax,rax; jz .scsr_fail
+    mov dword ptr [rax+SN_OP],OP_FMA; jmp .scsr_done
 .scsr_unary:
     mov r15d,dword ptr [rbx+SN_OP]
     mov rdi,[rbx+SN_A]; mov rsi,r12; mov rdx,r13; mov rcx,r14; call s_clone_subst_root
@@ -3444,14 +3326,24 @@ s_expand_pow_ast:
     mov rbx,rdi; mov r12,rsi
     mov rdi,r12; call s_eval_static_u64
     test edx,edx; jnz .sepa_real
-    test rax,rax; jz .sepa_real
+    test rax,rax; jnz .sepa_positive
+    call s_struct_one; jmp .sepa_done
+.sepa_positive:
     mov rsi,rax; mov rdi,rbx; call s_expand_pow_u64
     jmp .sepa_done
 .sepa_real:
     mov rdi,rbx; call s_expand_log_ast; test rax,rax; jz .sepa_fail
     mov r13,rax
     mov edi,OP_MUL; mov rsi,r12; mov rdx,r13; call s_ast_binary_new; test rax,rax; jz .sepa_fail
-    mov rdi,rax; call s_expand_exp_ast
+    mov rdi,rax; call s_expand_exp_ast; test rax,rax; jz .sepa_fail
+    mov r13,rax
+    # The exponent-zero identity owns the singular log(0)*0 boundary. It is
+    # represented with the existing lazy semantic select, before physicalization.
+    call s_struct_zero
+    mov edi,OP_EQ; mov rsi,r12; mov rdx,rax; call s_ast_scalar_binary_new
+    test rax,rax; jz .sepa_fail; mov r12,rax
+    call s_struct_one
+    mov rdi,r12; mov rsi,rax; mov rdx,r13; call s_ast_select_new
     jmp .sepa_done
 .sepa_fail: mov dword ptr [rip+s_error],1; xor eax,eax
 .sepa_done: pop r13; pop r12; pop rbx; ret
@@ -3578,9 +3470,8 @@ s_math_poly_horner:
 .smph_fail: mov dword ptr [rip+s_error],1; xor eax,eax
 .smph_done: pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
-# Shared Euler/Lambert exp seed. rdi=x -> rax=q where q approximates
-# exp(x/64)-1 directly.  The subtraction-free q form is the common fact:
-# exp consumes 1+q and exact squaring; expm1 consumes q and q*(q+2).
+# Existing expm1 subtraction-free seed. rdi=x -> q=exp(x/64)-1.
+# Expm1 consumes q and q*(q+2), preserving tiny arguments locally.
 # No second approximation family and no near-zero cancellation are introduced.
 s_expand_exp_seed_q_ast:
     push rbx; push r12; push r13; push r14; push r15
@@ -3607,30 +3498,13 @@ s_expand_exp_seed_q_ast:
 .seesq_fail: xor eax,eax
 .seesq_done: pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
-# exp(x): the general scalar lane retains its one native OP_EXP ValueFact. Other
-# lanes consume the same shared q seed and the historical six squarings.
+# Elementary functions retain one identity before physical contraction.
 s_expand_exp_ast:
-    cmp dword ptr [rip+s_general_lane],0
-    je .seea_expand_recipe
+    # Keep one semantic identity; precision and carrier are local consumer facts.
     mov rsi,rdi
     mov edi,OP_EXP
     jmp s_ast_unary_new
-.seea_expand_recipe:
-    push rbx; push r12; push r13; push r14; push r15
-    call s_expand_exp_seed_q_ast; test rax,rax; jz .seea_fail; mov rbx,rax
-    mov rdi,0x3ff0000000000000; call s_math_const_bits
-    mov edi,OP_ADD; mov rsi,rax; mov rdx,rbx; call s_ast_binary_new; mov rbx,rax
-    mov r15d,6
-.seea_sq:
-    mov edi,OP_SQUARE; mov rsi,rbx; call s_ast_unary_new; test rax,rax; jz .seea_fail
-    mov rbx,rax; dec r15d; jnz .seea_sq
-    mov rax,rbx; jmp .seea_done
-.seea_fail: xor eax,eax
-.seea_done: pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
-# expm1(x): same q seed, but square in the shifted coordinate q=e^x-1:
-# (1+q)^2-1 = q*(q+2).  The identity is global, branchless, and preserves tiny
-# x that exp(x)-1 would round to zero.
 s_expand_expm1_ast:
     push rbx; push r12; push r13; push r14; push r15
     call s_expand_exp_seed_q_ast; test rax,rax; jz .seem1_fail; mov rbx,rax
@@ -3644,59 +3518,13 @@ s_expand_expm1_ast:
 .seem1_fail: xor eax,eax
 .seem1_done: pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
-# log(x): ten square roots reduce every positive finite f64 to a tiny interval;
-# then atanh transform plus a rational tail. x=0 naturally reaches -Inf and
-# negative x naturally becomes NaN through sqrt, without a runtime branch.
+# The log semantic identity survives until its local physical consumer.
 s_expand_log_ast:
-    # General scalar mathematics keeps log as one native ValueFact; no libm or
-    # second math runtime is introduced.  Other lanes retain the existing
-    # arithmetic realization recipe.
-    cmp dword ptr [rip+s_general_lane],0
-    je .sela_expand_recipe
+    # Keep one semantic identity; precision and carrier are local consumer facts.
     mov rsi,rdi
     mov edi,OP_LOG
     jmp s_ast_unary_new
-.sela_expand_recipe:
-    # Repeated sqrt is an old, branch-free range contraction. Fourteen roots
-    # make u=(z-1)/(z+1) tiny for every positive finite f64. Seven odd atanh
-    # terms plus a geometric tail close the remainder; x=0 drives the tail
-    # denominator to zero and therefore produces -Inf by native FP semantics.
-    push rbx; push r12; push r13; push r14; push r15
-    mov r12,rdi; mov rbx,r12; mov r13d,14
-.sela_sqrt:
-    mov edi,OP_SQRT; mov rsi,rbx; call s_ast_unary_new; test rax,rax; jz .sela_fail
-    mov rbx,rax; dec r13d; jnz .sela_sqrt
-    mov rdi,0x3ff0000000000000; call s_math_const_bits; mov r13,rax
-    mov edi,OP_SUB; mov rsi,rbx; mov rdx,r13; call s_ast_binary_new; mov r14,rax
-    mov edi,OP_ADD; mov rsi,rbx; mov rdx,r13; call s_ast_binary_new; mov r15,rax
-    mov edi,OP_DIV; mov rsi,r14; mov rdx,r15; call s_ast_binary_new; test rax,rax; jz .sela_fail
-    mov r12,rax                         # u
-    mov edi,OP_MUL; mov rsi,r12; mov rdx,r12; call s_ast_binary_new; mov r13,rax # z=u^2
-    mov rdi,r13; lea rsi,[rip+s_math_log_coeff]; mov edx,7; call s_math_poly_horner; test rax,rax; jz .sela_fail
-    mov r14,rax
-    # z^7, built as a linear recurrence rather than exponentiation-by-squaring;
-    # canonical serialization therefore grows linearly and preserves less-work.
-    mov r15,r13; mov ebx,6
-.sela_zpow:
-    mov edi,OP_MUL; mov rsi,r15; mov rdx,r13; call s_ast_binary_new; mov r15,rax
-    dec ebx; jnz .sela_zpow
-    mov rdi,0x402e000000000000; call s_math_const_bits; mov rbx,rax # 15
-    mov rdi,0x3ff0000000000000; call s_math_const_bits; mov rdx,rax
-    mov edi,OP_SUB; mov rsi,rdx; mov rdx,r13; call s_ast_binary_new; mov r13,rax
-    mov edi,OP_MUL; mov rsi,rbx; mov rdx,r13; call s_ast_binary_new; mov r13,rax
-    mov edi,OP_DIV; mov rsi,r15; mov rdx,r13; call s_ast_binary_new; mov r15,rax
-    mov edi,OP_ADD; mov rsi,r14; mov rdx,r15; call s_ast_binary_new; mov r14,rax
-    mov edi,OP_MUL; mov rsi,r12; mov rdx,r14; call s_ast_binary_new; mov r14,rax
-    mov rdi,0x40e0000000000000; call s_math_const_bits # 32768 = 2*16384
-    mov edi,OP_MUL; mov rsi,r14; mov rdx,rax; call s_ast_binary_new
-    jmp .sela_done
-.sela_fail: xor eax,eax
-.sela_done: pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
-# Compensated log1p authority.  Kahan's correction keeps x alive when 1+x
-# rounds to 1: y=1+x, c=y-1, log1p(x)=log(y)*x/c.  Only c=0 needs a
-# protected denominator and sparse select; there is no runtime control branch
-# and no second approximation family.
 s_expand_log1p_ast:
     push rbx; push r12; push r13; push r14; push r15
     sub rsp,64
@@ -3708,6 +3536,14 @@ s_expand_log1p_ast:
     mov edi,OP_EQ; mov rsi,[rsp+24]; mov rdx,rax; call s_ast_scalar_binary_new; test rax,rax; jz .sel1p_fail; mov [rsp+32],rax
     call s_struct_one; mov rdi,[rsp+32]; mov rsi,rax; mov rdx,[rsp+24]; call s_ast_select_new; test rax,rax; jz .sel1p_fail; mov [rsp+40],rax
     mov edi,OP_DIV; mov rsi,[rsp]; mov rdx,[rsp+40]; call s_ast_scalar_binary_new; test rax,rax; jz .sel1p_fail; mov [rsp+48],rax
+    # Equal represented numerator and denominator have compensation one.
+    # This closes both the ordinary exact case and the infinity identity
+    # without inventing a magnitude-selected logarithm implementation.
+    mov edi,OP_EQ; mov rsi,[rsp]; mov rdx,[rsp+24]; call s_ast_scalar_binary_new
+    test rax,rax; jz .sel1p_fail; mov [rsp+56],rax
+    call s_struct_one
+    mov rdi,[rsp+56]; mov rsi,rax; mov rdx,[rsp+48]; call s_ast_select_new
+    test rax,rax; jz .sel1p_fail; mov [rsp+48],rax
     mov rdi,[rsp+16]; call s_expand_log_ast; test rax,rax; jz .sel1p_fail
     mov edi,OP_MUL; mov rsi,rax; mov rdx,[rsp+48]; call s_ast_scalar_binary_new; test rax,rax; jz .sel1p_fail
     mov rdi,[rsp+32]; mov rsi,[rsp]; mov rdx,rax; call s_ast_select_new
@@ -3715,60 +3551,19 @@ s_expand_log1p_ast:
 .sel1p_fail: xor eax,eax
 .sel1p_done: add rsp,64; pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
-# Shared Cody-Waite style reduction for sin/cos; rdi=x -> rax=reduced r.
-s_math_reduce_tau:
-    push rbx; push r12; push r13; push r14
-    mov r12,rdi
-    mov rdi,0x3fc45f306dc9c883; call s_math_const_bits # 1/(2pi)
-    mov edi,OP_MUL; mov rsi,r12; mov rdx,rax; call s_ast_binary_new; mov r13,rax
-    mov edi,OP_TRUNC; mov rsi,r13; call s_ast_unary_new; test rax,rax; jz .smrt_fail
-    mov r13,rax # q
-    mov rdi,0x401921fb54440000; call s_math_const_bits; mov r14,rax
-    mov edi,OP_MUL; mov rsi,r13; mov rdx,r14; call s_ast_binary_new; mov r14,rax
-    mov edi,OP_SUB; mov rsi,r12; mov rdx,r14; call s_ast_binary_new; mov r12,rax
-    mov rdi,0x3da68c234c4c6629; call s_math_const_bits; mov r14,rax
-    mov edi,OP_MUL; mov rsi,r13; mov rdx,r14; call s_ast_binary_new; mov r14,rax
-    mov edi,OP_SUB; mov rsi,r12; mov rdx,r14; call s_ast_binary_new
-    jmp .smrt_done
-.smrt_fail: xor eax,eax
-.smrt_done: pop r14; pop r13; pop r12; pop rbx; ret
-
+# Shared sin/cos semantic identities; physical range reduction belongs downstream.
 s_expand_sin_ast:
-    # General lane keeps sine as one ValueFact so fpP can consume the same
-    # precision-bearing semantic.  Non-general lanes retain the old arithmetic
-    # recipe and therefore do not acquire a second math runtime.
-    cmp dword ptr [rip+s_general_lane],0
-    je .sesa_expand_recipe
+    # Keep one semantic identity; precision and carrier are local consumer facts.
     mov rsi,rdi
     mov edi,OP_SIN
     jmp s_ast_unary_new
-.sesa_expand_recipe:
-    push rbx; push r12
-    call s_math_reduce_tau; test rax,rax; jz .sesa_fail; mov r12,rax
-    mov edi,OP_SQUARE; mov rsi,r12; call s_ast_unary_new; mov rbx,rax
-    mov rdi,rbx; lea rsi,[rip+s_math_sin_coeff]; mov edx,16; call s_math_poly_horner; test rax,rax; jz .sesa_fail
-    mov edi,OP_MUL; mov rsi,r12; mov rdx,rax; call s_ast_binary_new; jmp .sesa_done
-.sesa_fail: xor eax,eax
-.sesa_done: pop r12; pop rbx; ret
 
 s_expand_cos_ast:
-    # Same single semantic authority as sine; precision is decided only at the
-    # consumer edge in the general frontend.
-    cmp dword ptr [rip+s_general_lane],0
-    je .smcos_expand_recipe
+    # Keep one semantic identity; precision and carrier are local consumer facts.
     mov rsi,rdi
     mov edi,OP_COS
     jmp s_ast_unary_new
-.smcos_expand_recipe:
-    push rbx; push r12
-    call s_math_reduce_tau; test rax,rax; jz .smcos_fail; mov r12,rax
-    mov edi,OP_SQUARE; mov rsi,r12; call s_ast_unary_new; mov rbx,rax
-    mov rdi,rbx; lea rsi,[rip+s_math_cos_coeff]; mov edx,16; call s_math_poly_horner
-    jmp .smcos_done
-.smcos_fail: xor eax,eax
-.smcos_done: pop r12; pop rbx; ret
 
-# atan(x): repeated half-angle contraction, then odd Taylor on a tiny argument.
 s_expand_atan_ast:
     # Two half-angle contractions put ordinary finite simulation arguments into
     # a rapidly convergent odd series without a branch/piecewise runtime.
@@ -3791,24 +3586,74 @@ s_expand_atan_ast:
 .seaa_fail: xor eax,eax
 .seaa_done: pop r14; pop r13; pop r12; pop rbx; ret
 
-# tanh(x): Lambert continued fraction x/(1+x²/(3+x²/(5+...))).
-# 64 levels keep large ordinary simulation arguments stable without exp overflow.
+# Parameterized positive-scale hyperbolic relation. Mode selects only the
+# mathematical projection, not the input range, carrier or source frontend.
 s_expand_tanh_ast:
+    mov esi,2
+s_expand_hyperbolic_ast:
     push rbx; push r12; push r13; push r14; push r15
-    mov r12,rdi
-    mov edi,OP_SQUARE; mov rsi,r12; call s_ast_unary_new; mov r14,rax # x2
-    mov r13d,41
-    mov rdi,r13; call s_math_small_u64_f64; mov rbx,rax # denominator tail
-    mov r15d,20
-.seta_cf:
-    mov edi,OP_DIV; mov rsi,r14; mov rdx,rbx; call s_ast_binary_new; mov rbx,rax
-    lea edi,[r15*2-1]; mov rdi,rdi; call s_math_small_u64_f64
-    mov edi,OP_ADD; mov rsi,rax; mov rdx,rbx; call s_ast_binary_new; mov rbx,rax
-    dec r15d; jnz .seta_cf
-    mov edi,OP_DIV; mov rsi,r12; mov rdx,rbx; call s_ast_binary_new
-    jmp .setanh_done
-.seta_fail: xor eax,eax
-.setanh_done: pop r15; pop r14; pop r13; pop r12; pop rbx; ret
+    sub rsp,48
+    mov [rsp],rdi; mov [rsp+8],esi
+    mov edi,OP_ABS; mov rsi,[rsp]; call s_ast_unary_new; mov r12,rax
+    mov edi,OP_NEG; mov rsi,r12; call s_ast_unary_new; mov rdi,rax; call s_expand_exp_ast; mov r13,rax
+    mov edi,OP_SQUARE; mov rsi,r13; call s_ast_unary_new; mov r14,rax
+    call s_struct_one; mov r15,rax
+    mov edi,OP_ADD; mov rsi,r15; mov rdx,r14; call s_ast_binary_new; mov [rsp+16],rax
+    mov edi,OP_SUB; mov rsi,r15; mov rdx,r14; call s_ast_binary_new; mov [rsp+24],rax
+    mov rdi,0x4000000000000000; call s_math_const_bits
+    mov edi,OP_MUL; mov rsi,r13; mov rdx,rax; call s_ast_binary_new; mov [rsp+32],rax
+    cmp dword ptr [rsp+8],2; jb .sehy_unbounded
+    mov rsi,[rsp+24]; mov rdx,[rsp+16]
+    cmp dword ptr [rsp+8],2; je .sehy_div
+    mov rsi,[rsp+32]; mov rdx,[rsp+16]
+    cmp dword ptr [rsp+8],3; je .sehy_div
+    mov rsi,[rsp+32]; mov rdx,[rsp+24]
+    cmp dword ptr [rsp+8],4; je .sehy_div
+    mov rsi,[rsp+16]; mov rdx,[rsp+24]
+.sehy_div: mov edi,OP_DIV; call s_ast_binary_new; mov rbx,rax; jmp .sehy_sign
+.sehy_unbounded:
+    # Half scaling is inside exp, so exp(x)/2 does not overflow prematurely.
+    mov rdi,0x3fe62e42fefa39ef; call s_math_const_bits; mov r14,rax
+    mov edi,OP_SUB; mov rsi,r12; mov rdx,r14; call s_ast_binary_new; mov rdi,rax; call s_expand_exp_ast; mov rbx,rax
+    mov edi,OP_NEG; mov rsi,r12; call s_ast_unary_new
+    mov edi,OP_SUB; mov rsi,rax; mov rdx,r14; call s_ast_binary_new; mov rdi,rax; call s_expand_exp_ast; mov rdx,rax; mov rsi,rbx
+    mov edi,OP_ADD; cmp dword ptr [rsp+8],1; je .sehy_combine
+    mov edi,OP_SUB
+.sehy_combine: call s_ast_binary_new; mov rbx,rax
+.sehy_sign:
+    # Near zero, a shared even Taylor pair avoids exp subtraction. This is
+    # one conditioning domain for the entire family, not a workload selector.
+    mov rdi,r12; lea rsi,[rip+s_math_sinh_small]; mov edx,9; call s_expand_even_poly_ast
+    mov edi,OP_MUL; mov rsi,r12; mov rdx,rax; call s_ast_scalar_binary_new; mov r13,rax
+    mov rdi,r12; lea rsi,[rip+s_math_cosh_small]; mov edx,9; call s_expand_even_poly_ast; mov r15,rax
+    mov rax,r13; cmp dword ptr [rsp+8],0; je .sehy_small_select
+    mov rax,r15; cmp dword ptr [rsp+8],1; je .sehy_small_select
+    mov rsi,r13; mov rdx,r15; cmp dword ptr [rsp+8],2; je .sehy_small_div
+    call s_struct_one; mov rsi,rax; mov rdx,r15
+    cmp dword ptr [rsp+8],3; je .sehy_small_div
+    mov rdx,r13; cmp dword ptr [rsp+8],4; je .sehy_small_div
+    mov rsi,r15
+.sehy_small_div: mov edi,OP_DIV; call s_ast_scalar_binary_new
+.sehy_small_select:
+    mov [rsp+16],rax
+    mov rdi,0x3fe0000000000000; call s_math_const_bits
+    mov edi,OP_LE; mov rsi,r12; mov rdx,rax; call s_ast_scalar_binary_new
+    mov rdi,rax; mov rsi,[rsp+16]; mov rdx,rbx; call s_ast_select_new; mov rbx,rax
+    cmp dword ptr [rsp+8],1; je .sehy_done
+    cmp dword ptr [rsp+8],3; je .sehy_done
+    mov edi,OP_NEG; mov rsi,rbx; call s_ast_unary_new; mov r14,rax
+    call s_struct_zero; mov [rsp+40],rax
+    mov edi,OP_LT; mov rsi,[rsp]; mov rdx,rax; call s_ast_scalar_binary_new
+    mov rdi,rax; mov rsi,r14; mov rdx,rbx; call s_ast_select_new; mov rbx,rax
+    # Odd zero and reciprocal poles consume the original signed zero.
+    cmp dword ptr [rsp+8],4; jb .sehy_zero_value
+    call s_struct_one; mov edi,OP_DIV; mov rsi,rax; mov rdx,[rsp]; call s_ast_binary_new; mov r14,rax; jmp .sehy_zero_select
+.sehy_zero_value: mov r14,[rsp]
+.sehy_zero_select:
+    mov edi,OP_EQ; mov rsi,[rsp]; mov rdx,[rsp+40]; call s_ast_scalar_binary_new
+    mov rdi,rax; mov rsi,r14; mov rdx,rbx; call s_ast_select_new; mov rbx,rax
+.sehy_done: mov rax,rbx
+    add rsp,48; pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
 # rdi=x, rsi=high->low coefficient table, edx=count -> P(x*x).
 s_expand_even_poly_ast:
@@ -3844,27 +3689,25 @@ s_expand_scaled_hypot_ast:
 .sesha_done:
     add rsp,48; pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
-# Abramowitz-Stegun 7.1.26 shared complement kernel. rdi=x ->
-# q≈erfc(abs(x)).  erf and erfc are merely sign projections of this one old
-# approximation, so the expensive t/poly/exp structure exists only once.
+# One compactified complement relation: t=1/(1+abs(x));
+# erfc(abs(x)) = exp(-x*x) * t * P(2*t-1).
+# Coefficients approximate erfcx(1/t-1)/t on the entire compact interval.
 s_expand_erf_tail_ast:
     push rbx; push r12; push r13; push r14; push r15
-    sub rsp,16
-    mov [rsp],rdi
-    mov edi,OP_ABS; mov rsi,[rsp]; call s_ast_unary_new; test rax,rax; jz .seeft_fail; mov r13,rax
-    mov rdi,0x3fd4f740a93d7b8c; call s_math_const_bits
-    mov edi,OP_MUL; mov rsi,r13; mov rdx,rax; call s_ast_binary_new; mov r14,rax
-    mov rdi,0x3ff0000000000000; call s_math_const_bits; mov r15,rax
-    mov edi,OP_ADD; mov rsi,r15; mov rdx,r14; call s_ast_binary_new; mov r14,rax
-    mov edi,OP_DIV; mov rsi,r15; mov rdx,r14; call s_ast_binary_new; mov r13,rax # t
-    mov rdi,r13; lea rsi,[rip+s_math_erf_coeff]; mov edx,5; call s_math_poly_horner; test rax,rax; jz .seeft_fail
+    mov r12,rdi
+    mov edi,OP_ABS; mov rsi,r12; call s_ast_unary_new; mov r13,rax
+    call s_struct_one; mov r15,rax
+    mov edi,OP_ADD; mov rsi,r13; mov rdx,r15; call s_ast_binary_new
+    mov edi,OP_DIV; mov rsi,r15; mov rdx,rax; call s_ast_binary_new; mov r13,rax
+    mov rdi,0x4000000000000000; call s_math_const_bits
+    mov edi,OP_MUL; mov rsi,r13; mov rdx,rax; call s_ast_binary_new
+    mov edi,OP_SUB; mov rsi,rax; mov rdx,r15; call s_ast_binary_new
+    mov rdi,rax; lea rsi,[rip+s_math_erf_coeff]; mov edx,33; call s_math_poly_horner
     mov edi,OP_MUL; mov rsi,rax; mov rdx,r13; call s_ast_binary_new; mov r14,rax
-    mov edi,OP_SQUARE; mov rsi,[rsp]; call s_ast_unary_new; mov r15,rax
-    mov edi,OP_NEG; mov rsi,r15; call s_ast_unary_new; mov rdi,rax; call s_expand_exp_ast; test rax,rax; jz .seeft_fail
+    mov edi,OP_SQUARE; mov rsi,r12; call s_ast_unary_new
+    mov edi,OP_NEG; mov rsi,rax; call s_ast_unary_new; mov rdi,rax; call s_expand_exp_ast
     mov edi,OP_MUL; mov rsi,r14; mov rdx,rax; call s_ast_binary_new
-    jmp .seeft_done
-.seeft_fail: xor eax,eax
-.seeft_done: add rsp,16; pop r15; pop r14; pop r13; pop r12; pop rbx; ret
+    pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
 s_expand_erf_ast:
     push rbx; push r12; push r13; push r14; push r15
@@ -3875,7 +3718,10 @@ s_expand_erf_ast:
     mov edi,OP_SUB; mov rsi,rax; mov rdx,[rsp+8]; call s_ast_scalar_binary_new; test rax,rax; jz .seef_fail; mov [rsp+16],rax # magnitude
     mov edi,OP_NEG; mov rsi,rax; call s_ast_unary_new; test rax,rax; jz .seef_fail; mov [rsp+24],rax
     call s_struct_zero; mov edi,OP_GE; mov rsi,[rsp]; mov rdx,rax; call s_ast_scalar_binary_new; test rax,rax; jz .seef_fail
-    mov rdi,rax; mov rsi,[rsp+16]; mov rdx,[rsp+24]; call s_ast_select_new
+    mov rdi,rax; mov rsi,[rsp+16]; mov rdx,[rsp+24]; call s_ast_select_new; mov rbx,rax
+    call s_struct_zero
+    mov edi,OP_EQ; mov rsi,[rsp]; mov rdx,rax; call s_ast_scalar_binary_new
+    mov rdi,rax; mov rsi,[rsp]; mov rdx,rbx; call s_ast_select_new
     jmp .seef_done
 .seef_fail: xor eax,eax
 .seef_done: add rsp,32; pop r15; pop r14; pop r13; pop r12; pop rbx; ret
@@ -4080,7 +3926,9 @@ s_expand_lgamma_ast:
     mov rdi,r15; call s_expand_log_ast; test rax,rax; jz .selga_fail
     mov edi,OP_MUL; mov rsi,r13; mov rdx,rax; call s_ast_binary_new; test rax,rax; jz .selga_fail; mov r13,rax
     mov edi,OP_SUB; mov rsi,r13; mov rdx,r15; call s_ast_binary_new; test rax,rax; jz .selga_fail; mov r13,rax
-    mov rdi,r14; call s_expand_log_ast; test rax,rax; jz .selga_fail
+    # lgamma is log(abs(Gamma)); the shared Lanczos sum retains its sign.
+    mov edi,OP_ABS; mov rsi,r14; call s_ast_unary_new; test rax,rax; jz .selga_fail
+    mov rdi,rax; call s_expand_log_ast; test rax,rax; jz .selga_fail
     mov edi,OP_ADD; mov rsi,r13; mov rdx,rax; call s_ast_binary_new; test rax,rax; jz .selga_fail; mov r13,rax
     mov rdi,0x3fed67f1c864beb4; call s_math_const_bits # half_ln_2pi
     mov edi,OP_ADD; mov rsi,r13; mov rdx,rax; call s_ast_binary_new
@@ -4092,6 +3940,7 @@ s_expand_gamma_ast:
     # Historical projection of the shared Lanczos core.  Keeping this operation
     # order preserves the old f64 release bits while deleting the duplicate core.
     push rbx; push r12; push r13; push r14; push r15
+    sub rsp,8; mov [rsp],rdi
     call s_expand_lanczos_core_ast; test rax,rax; jz .sega_fail
     mov r14,rax                              # sum
     mov r15,rdx                              # t
@@ -4102,9 +3951,13 @@ s_expand_gamma_ast:
     mov edi,OP_MUL; mov rsi,r13; mov rdx,r14; call s_ast_binary_new; mov r13,rax
     mov rdi,0x40040d931ff62705; call s_math_const_bits
     mov edi,OP_MUL; mov rsi,rax; mov rdx,r13; call s_ast_binary_new
+    mov rbx,rax
+    call s_struct_one; mov edi,OP_DIV; mov rsi,rax; mov rdx,[rsp]; call s_ast_binary_new; mov r14,rax
+    call s_struct_zero; mov edi,OP_EQ; mov rsi,[rsp]; mov rdx,rax; call s_ast_scalar_binary_new
+    mov rdi,rax; mov rsi,r14; mov rdx,rbx; call s_ast_select_new
     jmp .sega_done
 .sega_fail: xor eax,eax
-.sega_done: pop r15; pop r14; pop r13; pop r12; pop rbx; ret
+.sega_done: add rsp,8; pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
 # Principal Lambert-W for x>=0.  A classical Halley iteration starts from
 # log1p(x); omission keeps the historical three-refinement default.
@@ -4363,19 +4216,9 @@ s_expand_math_builtin:
 .semb_log1p:
     mov rdi,r12; call s_expand_log1p_ast; jmp .semb_done
 .semb_sinh:
-    # sinh = t/sqrt(1-t^2), t=tanh(x): one convergent structure, no duplicated exp.
-    mov rdi,r12; call s_expand_tanh_ast; mov r14,rax
-    mov edi,OP_SQUARE; mov rsi,r14; call s_ast_unary_new; mov r15,rax
-    mov rdi,0x3ff0000000000000; call s_math_const_bits
-    mov edi,OP_SUB; mov rsi,rax; mov rdx,r15; call s_ast_binary_new; mov rsi,rax; mov edi,OP_SQRT; call s_ast_unary_new; mov r15,rax
-    mov edi,OP_DIV; mov rsi,r14; mov rdx,r15; call s_ast_binary_new; jmp .semb_done
+    mov esi,0; mov rdi,r12; call s_expand_hyperbolic_ast; jmp .semb_done
 .semb_cosh:
-    # cosh = 1/sqrt(1-tanh(x)^2)
-    mov rdi,r12; call s_expand_tanh_ast; mov r14,rax
-    mov edi,OP_SQUARE; mov rsi,r14; call s_ast_unary_new; mov r15,rax
-    mov rdi,0x3ff0000000000000; call s_math_const_bits; mov r14,rax
-    mov edi,OP_SUB; mov rsi,r14; mov rdx,r15; call s_ast_binary_new; mov rsi,rax; mov edi,OP_SQRT; call s_ast_unary_new; mov r15,rax
-    mov edi,OP_DIV; mov rsi,r14; mov rdx,r15; call s_ast_binary_new; jmp .semb_done
+    mov esi,1; mov rdi,r12; call s_expand_hyperbolic_ast; jmp .semb_done
 .semb_asinh:
     # asinh(x)=sign(x)*log1p(a + a^2/(1+hypot(a,1))), a=abs(x).
     # Old log1p + old scaled hypot become one stable identity, no magnitude route.
@@ -4417,20 +4260,11 @@ s_expand_math_builtin:
     mov rdi,r12; call s_expand_sin_ast; mov r15,rax
     mov edi,OP_DIV; mov rsi,r14; mov rdx,r15; call s_ast_binary_new; jmp .semb_done
 .semb_sech:
-    # sech = sqrt(1-tanh^2), avoiding a second exponential tree.
-    mov rdi,r12; call s_expand_tanh_ast; mov r14,rax
-    mov edi,OP_SQUARE; mov rsi,r14; call s_ast_unary_new; mov r15,rax
-    mov rdi,0x3ff0000000000000; call s_math_const_bits
-    mov edi,OP_SUB; mov rsi,rax; mov rdx,r15; call s_ast_binary_new; mov rsi,rax; mov edi,OP_SQRT; call s_ast_unary_new; jmp .semb_done
+    mov esi,3; mov rdi,r12; call s_expand_hyperbolic_ast; jmp .semb_done
 .semb_csch:
-    # csch = sech/tanh.
-    mov rdi,r12; call s_expand_tanh_ast; mov r14,rax
-    mov edi,OP_SQUARE; mov rsi,r14; call s_ast_unary_new; mov r15,rax
-    mov rdi,0x3ff0000000000000; call s_math_const_bits
-    mov edi,OP_SUB; mov rsi,rax; mov rdx,r15; call s_ast_binary_new; mov rsi,rax; mov edi,OP_SQRT; call s_ast_unary_new; mov r15,rax
-    mov edi,OP_DIV; mov rsi,r15; mov rdx,r14; call s_ast_binary_new; jmp .semb_done
+    mov esi,4; mov rdi,r12; call s_expand_hyperbolic_ast; jmp .semb_done
 .semb_coth:
-    mov rdi,r12; call s_expand_tanh_ast; mov r14,rax; jmp .semb_recip_r14
+    mov esi,5; mov rdi,r12; call s_expand_hyperbolic_ast; jmp .semb_done
 .semb_rsqrt:
     mov edi,OP_SQRT; mov rsi,r12; call s_ast_unary_new; mov r14,rax; jmp .semb_recip_r14
 .semb_recip: mov r14,r12
@@ -4465,10 +4299,9 @@ s_expand_math_builtin:
     mov edi,1; mov esi,MATH_DEFAULT_LAMBERTW_ITER; call s_math_iteration_count; test edx,edx; jnz .semb_fail
     mov rsi,rax; mov rdi,r12; call s_expand_lambertw_ast; jmp .semb_done
 .semb_besselj0:
-    mov rdi,r12; lea rsi,[rip+s_math_bessel_j0_coeff]; mov edx,13; call s_expand_even_poly_ast; jmp .semb_done
+    mov rdi,r12; xor esi,esi; call s_expand_bessel_ast; jmp .semb_done
 .semb_besselj1:
-    mov rdi,r12; lea rsi,[rip+s_math_bessel_j1_coeff]; mov edx,13; call s_expand_even_poly_ast; test rax,rax; jz .semb_fail
-    mov edi,OP_MUL; mov rsi,r12; mov rdx,rax; call s_ast_binary_new; jmp .semb_done
+    mov rdi,r12; mov esi,1; call s_expand_bessel_ast; jmp .semb_done
 .semb_besseli0:
     mov rdi,r12; lea rsi,[rip+s_math_bessel_i0_coeff]; mov edx,13; call s_expand_even_poly_ast; jmp .semb_done
 .semb_zeta:
@@ -4500,9 +4333,9 @@ s_expand_math_builtin:
     add rsp,32; jmp .semb_fail
 .semb_fma:
     mov rax,[rip+s_math_call_args]
-    mov r12,[rax]; mov r13,[rax+8]; mov r14,[rax+16]
-    mov edi,OP_MUL; mov rsi,r12; mov rdx,r13; call s_ast_binary_new; test rax,rax; jz .semb_fail
-    mov edi,OP_ADD; mov rsi,rax; mov rdx,r14; call s_ast_binary_new; jmp .semb_done
+    mov rdi,[rax]; mov rsi,[rax+8]; mov rdx,[rax+16]
+    call s_ast_select_new; test rax,rax; jz .semb_fail
+    mov dword ptr [rax+SN_OP],OP_FMA; jmp .semb_done
 .semb_clamp:
     mov rax,[rip+s_math_call_args]
     mov r12,[rax]; mov r13,[rax+8]; mov r14,[rax+16]
@@ -4682,12 +4515,6 @@ s_expand_math_builtin:
     cmp dword ptr [r12+SN_KIND],NK_STRUCT; jne .semb_fail
     mov rdi,r13; call s_eval_static_u64; test edx,edx; jnz .semb_fail
     mov esi,eax; mov rdi,r12; call s_struct_component; jmp .semb_done
-.semb_matrix2:
-    mov rdx,[rip+s_math_call_args]; mov edi,STF_MAT2; mov esi,4; call s_struct_build; jmp .semb_done
-.semb_matrix3:
-    mov rdx,[rip+s_math_call_args]; mov edi,STF_MAT3; mov esi,9; call s_struct_build; jmp .semb_done
-.semb_matrix4:
-    mov rdx,[rip+s_math_call_args]; mov edi,STF_MAT4; mov esi,16; call s_struct_build; jmp .semb_done
 .semb_mget:
     cmp dword ptr [r12+SN_KIND],NK_STRUCT; jne .semb_fail
     mov edi,dword ptr [r12+SN_AUX]; call s_matrix_dim; test eax,eax; jz .semb_fail; mov r14d,eax
@@ -5134,8 +4961,19 @@ s_ast_diff:
     cmp r14d,OP_MIN; je .sad_bin_min
     cmp r14d,OP_MAX; je .sad_bin_max
     cmp r14d,OP_SELECT; je .sad_bin_select
+    cmp r14d,OP_FMA; je .sad_bin_fma
     # comparisons, boolean/bitwise and modulo are piecewise/discrete.
     jmp .sad_zero
+.sad_bin_fma:
+    mov rdi,[rbx+SN_A]; mov rsi,r12; mov rdx,r13; call s_ast_diff; test rax,rax; jz .sad_fail
+    mov edi,OP_MUL; mov rsi,rax; mov rdx,[rbx+SN_B]; call s_ast_binary_new; test rax,rax; jz .sad_fail
+    mov [rsp],rax
+    mov rdi,[rbx+SN_B]; mov rsi,r12; mov rdx,r13; call s_ast_diff; test rax,rax; jz .sad_fail
+    mov edi,OP_MUL; mov rsi,[rbx+SN_A]; mov rdx,rax; call s_ast_binary_new; test rax,rax; jz .sad_fail
+    mov edi,OP_ADD; mov rsi,[rsp]; mov rdx,rax; call s_ast_binary_new; test rax,rax; jz .sad_fail
+    mov [rsp],rax
+    mov rdi,[rbx+SN_C]; mov rsi,r12; mov rdx,r13; call s_ast_diff; test rax,rax; jz .sad_fail
+    mov edi,OP_ADD; mov rsi,[rsp]; mov rdx,rax; call s_ast_binary_new; jmp .sad_done
 .sad_bin_linear:
     mov rdi,[rbx+SN_A]; mov rsi,r12; mov rdx,r13; call s_ast_diff; test rax,rax; jz .sad_fail
     mov [rsp],rax
@@ -5245,34 +5083,6 @@ s_ast_scalar_binary_new:
     mov [rax+SN_A],r12; mov [rax+SN_B],r13
 .sasbn_done: pop r13; pop r12; pop rbx; ret
 
-s_struct_from_array:
-    # edi=tag, esi=count, rdx=qword[count] component ASTs -> rax struct/0
-    push rbx; push r12; push r13; push r14; push r15
-    mov ebx,edi; mov r12d,esi; mov r13,rdx
-    test r12d,r12d; jz .ssfa_fail
-    xor r14d,r14d; xor r15d,r15d              # head/tail
-.ssfa_loop:
-    cmp r14d,r12d; jae .ssfa_wrap
-    call s_new_ast; test rax,rax; jz .ssfa_fail
-    mov dword ptr [rax+SN_KIND],NK_STRUCT_ELEM
-    mov rcx,[r13+r14*8]; mov [rax+SN_A],rcx
-    mov qword ptr [rax+SN_NEXT],0
-    test r15,r15; jz .ssfa_first
-    mov [r15+SN_NEXT],rax; mov r15,rax; jmp .ssfa_next
-.ssfa_first:
-    mov r15,rax; mov [rsp],rax                 # temporary head in saved-r15 slot is unsafe; use r13? no
-    # store head in SN_B scratch of first cell by self-reference until wrapper
-    mov [rax+SN_B],rax
-.ssfa_next:
-    inc r14d; jmp .ssfa_loop
-.ssfa_wrap:
-    # recover head by walking count-1 predecessors from tail is unavailable;
-    # build head separately using a stack local in the corrected implementation.
-    # This label is replaced below.
-    jmp .ssfa_fail
-.ssfa_fail:
-    xor eax,eax
-    pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
 # Correct structured constructor with explicit local head/tail slots.
 s_struct_build:
@@ -5455,7 +5265,7 @@ s_matrix_tag_from_n:
 
 s_matrix_mul_struct:
     # rdi=A,rsi=B same square matrix tag -> matrix struct.  The result scratch
-    # is n^2-derived; matrix2/3/4 are merely surface aliases of this relation.
+    # is n^2-derived from the dimension-bearing matrix relation.
     push rbx; push r12; push r13; push r14; push r15
     mov r12,rdi; mov r13,rsi
     mov r15d,dword ptr [r12+SN_AUX]
@@ -6381,6 +6191,7 @@ s_ast_binary_new:
 .sabn_zero: xor eax,eax; ret
 
 s_ast_shape_product_new:
+    cmp dword ptr [rip+s_wh_shape_basis],0; jne s_wh_shape_product_new
     # Canonical physical extent owned by ShapeFact-N.  This synthetic value is
     # never a user variable and therefore cannot collide with source spelling.
     call s_new_ast; test rax,rax; jz .saspn_done
@@ -6415,12 +6226,6 @@ s_shapefact_extent_var_matches:
     jmp .srnvm_done
 .srnvm_no: xor eax,eax
 .srnvm_done: pop rbx; ret
-
-s_ast_shape_q_new:
-    call s_new_ast; test rax,rax; jz .sarqn_done
-    mov dword ptr [rax+SN_KIND],NK_AXIS
-    lea rcx,[rip+shape_q_name]; mov [rax+SN_PTR],rcx; mov qword ptr [rax+SN_LEN],SHAPEFN_Q_NAME_LEN
-.sarqn_done: ret
 
 # Canonical ShapeFact-N affine-coordinate proof.
 # rdi=node, esi=dynamic axis id -> eax=1 when node is an integer affine form
@@ -6579,6 +6384,7 @@ s_shapefact_rewrite:
     cmp eax,NK_LOAD; je .srw_load
     mov rax,rbx; jmp .srw_done
 .srw_var:
+    cmp dword ptr [rip+s_wh_shape_basis],0; jne .srw_same
     # A runtime extent is a ShapeFact, not a privileged source variable.
     # Canonical tensor expressions consume the synthetic physical product fact;
     # the logical runtime extent is recovered by exact division by the static
@@ -6836,41 +6642,9 @@ s_item_prefix:
 # -----------------------------------------------------------------------------
 # rdi=name ptr,rsi=len -> rax=parameterized floating precision, or 0.
 # The only non-native spelling is fp<decimal-bits>. Native fp32/fp64 aliases
-# are consumed earlier. Precision is a machine-size Physical Fact, never a bit
-# field inside a semantic type ID; unsigned overflow is the sole parser frontier.
-s_parse_param_fp_span:
-    cmp rsi,3
-    jb .sppfs_bad
-    cmp byte ptr [rdi],'f'
-    jne .sppfs_bad
-    cmp byte ptr [rdi+1],'p'
-    jne .sppfs_bad
-    xor eax,eax
-    mov ecx,2
-.sppfs_loop:
-    cmp rcx,rsi
-    jae .sppfs_done
-    movzx r8d,byte ptr [rdi+rcx]
-    cmp r8b,'0'
-    jb .sppfs_bad
-    cmp r8b,'9'
-    ja .sppfs_bad
-    sub r8d,'0'
-    mov r9,10
-    mul r9
-    test rdx,rdx
-    jnz .sppfs_bad
-    add rax,r8
-    jc .sppfs_bad
-    inc rcx
-    jmp .sppfs_loop
-.sppfs_done:
-    cmp rax,64
-    jbe .sppfs_bad
-    ret
-.sppfs_bad:
-    xor eax,eax
-    ret
+# One shared PrecisionFact parser owns all native and parameterized spellings.
+.include "compiler/float_type_fact.inc"
+FLOAT_TYPE_PRECISION s_parse_float_precision_span
 
 s_parse_type_emit:
     # output JSON type representation; eax code 1 bool,2 i64,3 u64,4 f32,5 f64,6 string,7 parameterized fp>64, 0 fail
@@ -6882,22 +6656,17 @@ s_parse_type_emit:
     mov rdi,r12; mov rsi,rbx; lea rdx,[rip+ty_bool]; mov ecx,4; call s_span_eq; test eax,eax; jz 1f; mov r10d,1; jmp .spte_base
 1:  mov rdi,r12; mov rsi,rbx; lea rdx,[rip+ty_i64]; mov ecx,3; call s_span_eq; test eax,eax; jz 2f; mov r10d,2; jmp .spte_base
 2:  mov rdi,r12; mov rsi,rbx; lea rdx,[rip+ty_u64]; mov ecx,3; call s_span_eq; test eax,eax; jz 3f; mov r10d,3; jmp .spte_base
-3:  mov rdi,r12; mov rsi,rbx; lea rdx,[rip+ty_f32]; mov ecx,3; call s_span_eq; test eax,eax; jnz .spte_f32
-    mov rdi,r12; mov rsi,rbx; lea rdx,[rip+ty_fp32]; mov ecx,4; call s_span_eq; test eax,eax; jnz .spte_f32
-    mov rdi,r12; mov rsi,rbx; lea rdx,[rip+ty_float32]; mov ecx,7; call s_span_eq; test eax,eax; jnz .spte_f32
-    mov rdi,r12; mov rsi,rbx; lea rdx,[rip+ty_real32]; mov ecx,6; call s_span_eq; test eax,eax; jz 4f
-.spte_f32:
-    lea r12,[rip+ty_f32]; mov ebx,3; mov r10d,4; jmp .spte_base
-4:  mov rdi,r12; mov rsi,rbx; lea rdx,[rip+ty_f64]; mov ecx,3; call s_span_eq; test eax,eax; jnz .spte_f64
-    mov rdi,r12; mov rsi,rbx; lea rdx,[rip+ty_fp64]; mov ecx,4; call s_span_eq; test eax,eax; jnz .spte_f64
-    mov rdi,r12; mov rsi,rbx; lea rdx,[rip+ty_float64]; mov ecx,7; call s_span_eq; test eax,eax; jnz .spte_f64
-    mov rdi,r12; mov rsi,rbx; lea rdx,[rip+ty_real64]; mov ecx,6; call s_span_eq; test eax,eax; jnz .spte_f64
-    mov rdi,r12; mov rsi,rbx; lea rdx,[rip+ty_double]; mov ecx,6; call s_span_eq; test eax,eax; jz 5f
-.spte_f64:
-    lea r12,[rip+ty_f64]; mov ebx,3; mov r10d,5; jmp .spte_base
-5:  mov rdi,r12; mov rsi,rbx; call s_parse_param_fp_span; test rax,rax; jz 6f
+3:  mov rdi,r12; mov rsi,rbx; call s_parse_float_precision_span
+    cmp rax,32; je .spte_f32
+    cmp rax,64; je .spte_f64
+    test rax,rax; jz .spte_string
     mov r10d,7; jmp .spte_base
-6:  mov rdi,r12; mov rsi,rbx; lea rdx,[rip+ty_string]; mov ecx,6; call s_span_eq; test eax,eax; jz .spte_fail; mov r10d,6
+.spte_f32:
+    mov r10d,4; jmp .spte_base
+.spte_f64:
+    mov r10d,5; jmp .spte_base
+.spte_string:
+    mov rdi,r12; mov rsi,rbx; lea rdx,[rip+ty_string]; mov ecx,6; call s_span_eq; test eax,eax; jz .spte_fail; mov r10d,6
 .spte_base:
     # tolerant suffix is currently accepted only for floating point.
     lea rdi,[rip+tok_tilde]; mov esi,1; xor edx,edx; call s_match_token
@@ -6937,6 +6706,7 @@ s_parse_type_emit:
 # Axis list parsers
 # -----------------------------------------------------------------------------
 s_axis_scope_clear:
+    mov dword ptr [rip+s_wh_shape_basis],0
     mov dword ptr [rip+s_axis_count],0
     ret
 s_state_scope_clear:
@@ -6963,6 +6733,8 @@ s_state_add:
 # Parse WH axis list [name:extent,...], emit canonical axes array and install scope.
 s_parse_wh_axes_emit:
     call s_axis_scope_clear
+    mov dword ptr [rip+s_wh_shape_record_valid],1
+    mov rax,[rip+s_out_ptr]; mov [rip+s_wh_axis_output_start],rax
     mov dil,'['; call s_out_byte
     lea rdi,[rip+tok_lbrack]; mov esi,1; xor edx,edx; call s_expect_token
     xor ebx,ebx
@@ -6978,14 +6750,30 @@ s_parse_wh_axes_emit:
     lea rdi,[rip+js_extent_mid]; call s_out_cstr
     lea rdi,[rip+tok_colon]; mov esi,1; xor edx,edx; call s_expect_token
     xor edi,edi; call s_parse_expr; test rax,rax; jz .spwa_fail
+    cmp dword ptr [rax+SN_KIND],NK_VAR; jne .spwa_general_extent
+    mov rdx,[rax+SN_PTR]; mov rcx,[rax+SN_LEN]
+    cmp qword ptr [rip+s_wh_extent_ptr],0; jne .spwa_compare_extent
+    mov [rip+s_wh_extent_ptr],rdx; mov [rip+s_wh_extent_len],rcx
+    jmp .spwa_emit_extent
+.spwa_compare_extent:
+    push rax
+    mov rdi,[rip+s_wh_extent_ptr]; mov rsi,[rip+s_wh_extent_len]
+    call s_span_eq; test eax,eax; pop rax; jnz .spwa_emit_extent
+.spwa_general_extent:
+    mov dword ptr [rip+s_general_lane],1
+.spwa_emit_extent:
+    mov rdi,rax; mov esi,ebx; call s_wh_record_shape_axis
     mov rdi,rax; call s_emit_ast
     mov dil,'}'; call s_out_byte
     inc ebx
     lea rdi,[rip+tok_comma]; mov esi,1; xor edx,edx; call s_match_token
     test eax,eax; jnz .spwa_loop
     lea rdi,[rip+tok_rbrack]; mov esi,1; xor edx,edx; call s_expect_token
-    mov dil,']'; call s_out_byte
-    xor eax,eax; ret
+    cmp ebx,1; je 1f
+    mov dword ptr [rip+s_general_lane],1
+1:  mov dil,']'; call s_out_byte
+    call s_wh_shape_prepare
+    ret
 .spwa_fail: mov eax,1; ret
 
 # WHEX axes [i in extent,j in 2,...]. Records sparse logical ShapeFact-N.
@@ -7156,17 +6944,19 @@ s_parse_contract_decl:
 .spcd_strdone: inc r8; mov [rip+s_cur],r8; jmp .spcd_done
 .spcd_overflow:
     call s_parse_name; test edx,edx; jnz .spcd_fail
-    mov rdi,rax; mov rsi,rcx; lea rdx,[rip+cv_wrap]; mov ecx,4; call s_span_eq; test eax,eax; jz .spcd_trytrap
+    mov r12,rax; mov r13,rcx
+    mov rdi,r12; mov rsi,r13; lea rdx,[rip+cv_wrap]; mov ecx,4; call s_span_eq; test eax,eax; jz .spcd_trytrap
     mov dword ptr [rip+s_overflow_wrap],1; jmp .spcd_done
 .spcd_trytrap:
-    mov rdi,rax; mov rsi,rcx; lea rdx,[rip+cv_trap]; mov ecx,4; call s_span_eq; test eax,eax; jz .spcd_fail
+    mov rdi,r12; mov rsi,r13; lea rdx,[rip+cv_trap]; mov ecx,4; call s_span_eq; test eax,eax; jz .spcd_fail
     mov dword ptr [rip+s_overflow_wrap],0; jmp .spcd_done
 .spcd_det:
     call s_parse_name; test edx,edx; jnz .spcd_fail
-    mov rdi,rax; mov rsi,rcx; lea rdx,[rip+kw_true]; mov ecx,4; call s_span_eq; test eax,eax; jz .spcd_detfalse
+    mov r12,rax; mov r13,rcx
+    mov rdi,r12; mov rsi,r13; lea rdx,[rip+kw_true]; mov ecx,4; call s_span_eq; test eax,eax; jz .spcd_detfalse
     mov dword ptr [rip+s_deterministic],1; jmp .spcd_done
 .spcd_detfalse:
-    mov rdi,rax; mov rsi,rcx; lea rdx,[rip+kw_false]; mov ecx,5; call s_span_eq; test eax,eax; jz .spcd_fail
+    mov rdi,r12; mov rsi,r13; lea rdx,[rip+kw_false]; mov ecx,5; call s_span_eq; test eax,eax; jz .spcd_fail
     mov dword ptr [rip+s_deterministic],0
 .spcd_done: call s_optional_semicolon; xor eax,eax; ret
 .spcd_fail: mov dword ptr [rip+s_error],1; mov eax,1; ret
@@ -7186,8 +6976,8 @@ s_parse_input_decl:
     # Wide scalar inputs are sovereign General values.  Mark the existing
     # general lane here so an input/output-only program does not get routed to
     # the tensor frontend merely because it has no let binding.
-    cmp eax,7; je .spid_general_lane
-    cmp eax,8; jne .spid_type_ready
+    cmp eax,3; je .spid_type_ready
+    cmp eax,5; je .spid_type_ready
 .spid_general_lane:
     mov dword ptr [rip+s_general_lane],1
 .spid_type_ready:
@@ -7198,6 +6988,14 @@ s_parse_input_decl:
     call s_parse_signed_literal_emit; test eax,eax; jnz .spid_fail
     lea rdi,[rip+tok_dotdot]; mov esi,2; xor edx,edx; call s_expect_token
     lea rdi,[rip+js_max_key]; call s_out_cstr
+    push qword ptr [rip+s_cur]
+    xor edi,edi; call s_parse_expr
+    mov rdi,rax; call s_eval_static_u64
+    test edx,edx; jnz .spid_range_unknown
+    mov ecx,dword ptr [rip+s_last_decl_index]
+    mov rdx,[rip+s_decl_range_max]; mov [rdx+rcx*8],rax
+.spid_range_unknown:
+    pop qword ptr [rip+s_cur]
     call s_parse_signed_literal_emit; test eax,eax; jnz .spid_fail
 .spid_close:
     mov dil,'}'; call s_out_byte; call s_commit_inputs; call s_optional_semicolon; xor eax,eax; ret
@@ -8047,9 +7845,8 @@ s_emit_collected_iterate_binding:
     pop r15; pop r14; pop r13; pop r12; pop rbx; ret
 
 s_parse_tensor_decl:
-    # Legacy WH tensor/reduce surface remains in the sovereign general lane;
-    # structural WH `for` is the explicit topology-recovery spelling.
-    mov dword ptr [rip+s_general_lane],1
+    # Pure maps share the existing topology authority; mixed bindings select
+    # General through their semantic facts, never through this spelling.
     # WH tensor map.
     call s_stream_bindings; lea rdi,[rip+s_binding_count]; call s_item_prefix
     lea rdi,[rip+js_binding_name]; call s_out_cstr
@@ -8062,15 +7859,22 @@ s_parse_tensor_decl:
     lea rdi,[rip+js_type_key]; call s_out_cstr
     lea rdi,[rip+tok_colon]; mov esi,1; xor edx,edx; call s_expect_token
     call s_parse_type_emit; test eax,eax; jz .sptn_fail
+    cmp eax,5; je 1f
+    mov dword ptr [rip+s_general_lane],1
+1:
     lea rdi,[rip+js_expr_key]; call s_out_cstr
     lea rdi,[rip+tok_eq1]; mov esi,1; xor edx,edx; call s_expect_token
     xor edi,edi; call s_parse_expr; test rax,rax; jz .sptn_fail
-    mov rdi,rax; call s_emit_ast
+    push rax; mov rdi,rax; call s_tensor_relation_admit; pop rax
+    mov rdi,rax; call s_emit_wh_shape_ast
     mov dil,'}'; call s_out_byte; call s_commit_bindings; call s_axis_scope_clear; call s_optional_semicolon; xor eax,eax; ret
 .sptn_fail: mov dword ptr [rip+s_error],1; mov eax,1; ret
 
 s_parse_reduce_decl:
+    inc dword ptr [rip+s_ordered_reduce_count]
+    cmp dword ptr [rip+s_ordered_reduce_count],1; jbe 1f
     mov dword ptr [rip+s_general_lane],1
+1:
     call s_stream_bindings; lea rdi,[rip+s_binding_count]; call s_item_prefix
     lea rdi,[rip+js_binding_name]; call s_out_cstr
     call s_parse_name; test edx,edx; jnz .sprd_fail
@@ -8082,6 +7886,9 @@ s_parse_reduce_decl:
     lea rdi,[rip+js_acc_key]; call s_out_cstr
     lea rdi,[rip+tok_colon]; mov esi,1; xor edx,edx; call s_expect_token
     call s_parse_type_emit; test eax,eax; jz .sprd_fail
+    cmp eax,5; je 1f
+    mov dword ptr [rip+s_general_lane],1
+1:
     lea rdi,[rip+js_reduce_kind_mid]; call s_out_cstr
     lea rdi,[rip+tok_eq1]; mov esi,1; xor edx,edx; call s_expect_token
     call s_parse_name; test edx,edx; jnz .sprd_fail
@@ -8104,7 +7911,8 @@ s_parse_reduce_decl:
 .sprd_sem_sum:
     call .sprd_sem_emit_header
     xor edi,edi; call s_parse_expr; test rax,rax; jz .sprd_fail
-    mov rdi,rax; call s_emit_ast
+    push rax; mov rdi,rax; call s_tensor_relation_admit; pop rax
+    mov rdi,rax; call s_emit_wh_shape_ast
     jmp .sprd_sem_done
 .sprd_sem_dot:
     call .sprd_sem_emit_header
@@ -8112,14 +7920,16 @@ s_parse_reduce_decl:
     lea rdi,[rip+tok_comma]; mov esi,1; xor edx,edx; call s_expect_token
     xor edi,edi; call s_parse_expr; test rax,rax; jz .sprd_fail; mov r13,rax
     mov edi,OP_MUL; mov rsi,r12; mov rdx,r13; call s_ast_binary_new; test rax,rax; jz .sprd_fail
-    mov rdi,rax; call s_emit_ast
+    push rax; mov rdi,rax; call s_tensor_relation_admit; pop rax
+    mov rdi,rax; call s_emit_wh_shape_ast
     jmp .sprd_sem_done
 .sprd_sem_sqnorm:
     call .sprd_sem_emit_header
     xor edi,edi; call s_parse_expr; test rax,rax; jz .sprd_fail; mov r12,rax
     mov rdi,r12; xor esi,esi; xor edx,edx; xor ecx,ecx; call s_clone_subst; test rax,rax; jz .sprd_fail
     mov edi,OP_MUL; mov rsi,r12; mov rdx,rax; call s_ast_binary_new; test rax,rax; jz .sprd_fail
-    mov rdi,rax; call s_emit_ast
+    push rax; mov rdi,rax; call s_tensor_relation_admit; pop rax
+    mov rdi,rax; call s_emit_wh_shape_ast
     jmp .sprd_sem_done
 .sprd_sem_sqdist:
     call .sprd_sem_emit_header
@@ -8129,7 +7939,8 @@ s_parse_reduce_decl:
     mov edi,OP_SUB; mov rsi,r12; mov rdx,r13; call s_ast_binary_new; test rax,rax; jz .sprd_fail; mov r12,rax
     mov rdi,r12; xor esi,esi; xor edx,edx; xor ecx,ecx; call s_clone_subst; test rax,rax; jz .sprd_fail
     mov edi,OP_MUL; mov rsi,r12; mov rdx,rax; call s_ast_binary_new; test rax,rax; jz .sprd_fail
-    mov rdi,rax; call s_emit_ast
+    push rax; mov rdi,rax; call s_tensor_relation_admit; pop rax
+    mov rdi,rax; call s_emit_wh_shape_ast
     jmp .sprd_sem_done
 .sprd_sem_done:
     mov dil,'}'; call s_out_byte; call s_commit_bindings; call s_axis_scope_clear; call s_optional_semicolon; xor eax,eax; ret
@@ -9662,6 +9473,9 @@ s_path_is_whex:
 .spiw_no: xor eax,eax; ret
 
 s_finalize_json:
+    cmp dword ptr [rip+s_output_count],1; jbe 1f
+    mov dword ptr [rip+s_general_lane],1
+1:
     lea rax,[rip+surface_json_buffer]; mov [rip+s_active_base_var],rax
     mov qword ptr [rip+s_active_end_var],0
     lea rax,[rip+surface_json_cap]; mov [rip+s_active_cap_var],rax
@@ -9715,8 +9529,12 @@ s_finalize_json:
     mov rdi,[rip+s_tests_buf]; mov rsi,[rip+s_tests_end]; sub rsi,rdi; call s_out_span
     # Close tests exactly once. Optional metadata is appended to the root object.
     mov dil,']'; call s_out_byte
-    # Optional compiler-lane and ShapeFact-N metadata.  ShapeFact-N is the only
-    # logical-shape authority; no product/rank compatibility scalar survives.
+    # A program without bindings has only scalar invocation/publication facts.
+    # The Tensor consumer requires a binding carrier; the existing General
+    # consumer already owns this rank-zero case for every scalar precision.
+    cmp dword ptr [rip+s_binding_count],0; jne 97f
+    mov dword ptr [rip+s_general_lane],1
+97: # Optional compiler-lane and ShapeFact-N metadata.
     cmp dword ptr [rip+s_general_lane],0; je .sfj_shape
     lea rdi,[rip+js_general_lane]; call s_out_cstr
 .sfj_shape:
@@ -9782,9 +9600,12 @@ surface_lower_to_json:
     mov rdi,rbx; call s_diag_reset_for_path
     mov dword ptr [rip+s_error],0
     mov dword ptr [rip+s_ast_count],0
+    mov qword ptr [rip+s_wh_extent_ptr],0
+    mov qword ptr [rip+s_wh_extent_len],0
+    mov dword ptr [rip+s_ordered_reduce_count],0
     mov dword ptr [rip+s_input_count],0; mov dword ptr [rip+s_binding_count],0
     mov dword ptr [rip+s_output_count],0; mov dword ptr [rip+s_test_count],0
-    mov dword ptr [rip+s_general_lane],0; mov dword ptr [rip+s_shapefact_active],0
+    mov dword ptr [rip+s_tensor_demand_caps],0; mov dword ptr [rip+s_general_lane],0; mov dword ptr [rip+s_shapefact_active],0
     mov dword ptr [rip+s_record_field_count],0; mov dword ptr [rip+s_function_count],0; mov dword ptr [rip+s_decl_count],0; mov dword ptr [rip+s_struct_decl_count],0
     mov dword ptr [rip+s_function_param_total],0; mov dword ptr [rip+s_decl_shape_stride_count],0
     mov dword ptr [rip+s_subst_multi_active],0
@@ -9837,9 +9658,6 @@ rec_counter_name:.ascii "@r.counter"
 rec_counter_name_end:
 # punctuation
  tok_bang:.ascii "!"; tok_tilde:.ascii "~"; tok_minus:.ascii "-"; tok_plus:.ascii "+"
- tok_minus_math:.byte 0xE2,0x88,0x92; tok_sqrt_math:.byte 0xE2,0x88,0x9A
- tok_not_math:.byte 0xC2,0xAC
- tok_sup2:.byte 0xC2,0xB2; tok_sup3:.byte 0xC2,0xB3
  tok_lparen:.ascii "("; tok_rparen:.ascii ")"; tok_lbrack:.ascii "["; tok_rbrack:.ascii "]"
  tok_lbrace:.ascii "{"; tok_rbrace:.ascii "}"; tok_comma:.ascii ","; tok_colon:.ascii ":"; tok_semicolon:.ascii ";"
  tok_eq1:.ascii "="; tok_dot:.ascii "."; tok_dotdot:.ascii ".."; tok_arrowfat:.ascii "=>"; tok_arrowthin:.ascii "->"
@@ -9876,8 +9694,6 @@ shape_q_name:.ascii "__shape_q"; shape_product_name:.ascii "__shape_product"
 ck_integer_overflow:.ascii "integer_overflow"; ck_deterministic:.ascii "deterministic"
 cv_wrap:.ascii "wrap"; cv_trap:.ascii "trap"; cv_tolerant:.ascii "tolerant"; cv_strict:.ascii "strict_by_default"
 ty_bool:.ascii "bool"; ty_i64:.ascii "i64"; ty_u64:.ascii "u64"; ty_f32:.ascii "f32"; ty_f64:.ascii "f64"; ty_string:.ascii "string"
-ty_fp32:.ascii "fp32"; ty_fp64:.ascii "fp64"; ty_float32:.ascii "float32"; ty_float64:.ascii "float64"
-ty_real32:.ascii "real32"; ty_real64:.ascii "real64"; ty_double:.ascii "double"
 default_program:.ascii "surface_program"
 lit_true:.asciz "true"; lit_false:.asciz "false"; num_zero_float:.asciz "0.0"
 lit_f64bits_prefix:.asciz "@f64bits:"
@@ -10283,7 +10099,7 @@ mb_det2:.ascii "det2"; mb_det3:.ascii "det3"; mb_besseli1:.ascii "besseli1"
 mb_complex:.ascii "complex"; mb_real:.ascii "real"; mb_imag:.ascii "imag"; mb_conj:.ascii "conj"; mb_cabs:.ascii "cabs"
 mb_cexp:.ascii "complex_exp"; mb_clog:.ascii "complex_log"; mb_csin:.ascii "complex_sin"; mb_ccos:.ascii "complex_cos"; mb_csqrt:.ascii "complex_sqrt"
 mb_component:.ascii "component"; mb_root_valid:.ascii "root_valid"
-mb_matrix2:.ascii "matrix2"; mb_matrix3:.ascii "matrix3"; mb_matrix4:.ascii "matrix4"; mb_mget:.ascii "mget"; mb_mtranspose:.ascii "transpose"; mb_mtrace:.ascii "matrix_trace"; mb_makespd:.ascii "make_spd"
+mb_mget:.ascii "mget"; mb_mtranspose:.ascii "transpose"; mb_mtrace:.ascii "matrix_trace"; mb_makespd:.ascii "make_spd"
 mb_cholesky:.ascii "cholesky"; mb_orthogonalize:.ascii "orthogonalize"; mb_qrr:.ascii "qr_r"; mb_lul:.ascii "lu_l"; mb_luu:.ascii "lu_u"; mb_ldltl:.ascii "ldlt_l"; mb_ldltd:.ascii "ldlt_d"
 mb_matrixexp:.ascii "matrix_exp"; mb_matrixlog:.ascii "matrix_log"; mb_matrixsqrt:.ascii "matrix_sqrt"; mb_eigvalues:.ascii "eig_values"; mb_eigvectors:.ascii "eig_vectors"; mb_svdvalues:.ascii "svd_values"; mb_svdu:.ascii "svd_u"; mb_svdv:.ascii "svd_v"; mb_matrixinv:.ascii "matrix_inverse"; mb_hadamard:.ascii "hadamard"
 .p2align 3
@@ -10356,9 +10172,6 @@ s_math_builtin_table:
     .quad mb_cexp; .long 11,MB_CEXP,1,MSF_PURE|MSF_SPECIAL
     .quad mb_clog; .long 11,MB_CLOG,1,MSF_PURE|MSF_SPECIAL
     .quad mb_component; .long 9,MB_COMPONENT,2,MSF_PURE|MSF_STATIC_ARG1
-    .quad mb_matrix2; .long 7,MB_MATRIX2,4,MSF_PURE
-    .quad mb_matrix3; .long 7,MB_MATRIX3,9,MSF_PURE
-    .quad mb_matrix4; .long 7,MB_MATRIX4,16,MSF_PURE
     .quad mb_mget; .long 4,MB_MGET,3,MSF_PURE
     .quad mb_mtranspose; .long 9,MB_MTRANSPOSE,1,MSF_PURE
     .quad mb_mtrace; .long 12,MB_MTRACE,1,MSF_PURE
@@ -10386,8 +10199,7 @@ s_math_builtin_table:
     .quad mb_root_valid; .long 10,MB_ROOT_VALID,1,MSF_PURE
     .quad 0; .long 0,0,0,0
 
-# Semantic Registry execution tables.  Registry growth is append-only and does
-# not change parser, calculus or runtime control flow.
+# Semantic Registry execution tables use compact current operator identifiers.
 .p2align 3
 s_math_expand_jump_table:
     .quad 0
@@ -10459,9 +10271,6 @@ s_math_expand_jump_table:
     .quad .semb_cexp
     .quad .semb_clog
     .quad .semb_component
-    .quad .semb_matrix2
-    .quad .semb_matrix3
-    .quad .semb_matrix4
     .quad .semb_mget
     .quad .semb_mtranspose
     .quad .semb_mtrace
@@ -10558,18 +10367,42 @@ s_math_zeta_em_coeff:
     .quad 0x3fb5555555555555,0xbf56c16c16c16c17,0x3f01566abc011567
     .quad 0xbeabbd779334ef0b,0x3e566a8f2bf70ebe,0xbe022805d644267f
 s_math_erf_coeff:
-    .quad 0x3ff0fb844255a12d,0xbff7401c57014c39,0x3ff6be1c55bae157,0xbfd23531cc3c1469,0x3fd04f20c6ec5a7e
+    .quad 0xbeab43a9e2f1308a
+    .quad 0x3e6c365343d4cf46
+    .quad 0x3ed70aebc4ae1eeb
+    .quad 0x3eac979f577da49e
+    .quad 0xbef1dcd4d9ab4517
+    .quad 0xbee06affba9d746d
+    .quad 0x3f0245eebfee698c
+    .quad 0x3ef90ca9fc8cd266
+    .quad 0xbf0cd816edce98e8
+    .quad 0xbf013c7126d68cca
+    .quad 0x3f0f713ca866b36a
+    .quad 0x3ef7c951ad48f774
+    .quad 0xbeffe140e39849b6
+    .quad 0xbefedbc28b2b2835
+    .quad 0x3ef344867967aa01
+    .quad 0x3f043daaa2bc929b
+    .quad 0xbf11e67e5a35080f
+    .quad 0x3f12f301ad4b17af
+    .quad 0xbf02cf26bd5e9fbc
+    .quad 0xbf1820663736d9b1
+    .quad 0x3f349ce9b2d38bea
+    .quad 0xbf40a135f57aabfd
+    .quad 0x3f37f7b117dda6ac
+    .quad 0x3f413df267eb0332
+    .quad 0xbf628ae8d0ab623b
+    .quad 0x3f6e019771f5d6c6
+    .quad 0xbf5456105780e7ba
+    .quad 0xbf838c123b581833
+    .quad 0x3f9a01c1d92fc08f
+    .quad 0xbf8c7c4af7453dc2
+    .quad 0xbfb876639efa8771
+    .quad 0x3fce6c53f4d8a7eb
+    .quad 0x3feb5d8780f956b3
 s_math_lanczos_coeff:
     .quad 0x3feffffffffff950,0x40852429b6c30b05,0xc093ac8e8ed4171b,0x40881a9661d3b4d8
     .quad 0xc06613ae51a32f5d,0x402903c27f8b9c81,0xbfc1bcb2992b2855,0x3ee4f0514e4e324f,0x3e8435508f3faeef
-s_math_bessel_j0_coeff:
-    .quad 0x3ad4197a7f5154bc,0xbb669ca9cf3b7f54,0x3bf5601885e63e5d,0xbc80b313289be0b9
-    .quad 0x3d0522a43f65486a,0xbd8522a43f65486a,0x3e002e85c0898b71,0xbe723456789abcdf
-    .quad 0x3edc71c71c71c71c,0xbf3c71c71c71c71c,0x3f90000000000000,0xbfd0000000000000,0x3ff0000000000000
-s_math_bessel_j1_coeff:
-    .quad 0x3a88bce58901a35e,0xbb1e2637bef9ff1a,0x3baf17697cf1cf13,0xbc3ab81ea75fcdf4
-    .quad 0x3cc2c9758daf5cd0,0xbd4522a43f65486a,0x3dc27e4fb7789f5c,0xbe3845c8a0ce5129
-    .quad 0x3ea6c16c16c16c17,0xbf0c71c71c71c71c,0x3f65555555555555,0xbfb0000000000000,0x3fe0000000000000
 s_math_bessel_i0_coeff:
     .quad 0x3ad4197a7f5154bc,0x3b669ca9cf3b7f54,0x3bf5601885e63e5d,0x3c80b313289be0b9
     .quad 0x3d0522a43f65486a,0x3d8522a43f65486a,0x3e002e85c0898b71,0x3e723456789abcdf
@@ -10581,26 +10414,6 @@ s_math_bessel_i1_coeff:
     .quad 0x3cc2c9758daf5cd0,0x3d4522a43f65486a,0x3dc27e4fb7789f5c,0x3e3845c8a0ce5129
     .quad 0x3ea6c16c16c16c17,0x3f0c71c71c71c71c,0x3f65555555555555,0x3fb0000000000000,0x3fe0000000000000
 .p2align 3
-s_math_exp_coeff:
-    .quad 0x3d2ae7f3e733b81f,0x3d6ae7f3e733b81f,0x3da93974a8c07c9d,0x3de6124613a86d09
-    .quad 0x3e21eed8eff8d898,0x3e5ae64567f544e4,0x3e927e4fb7789f5c,0x3ec71de3a556c734
-    .quad 0x3efa01a01a01a01a,0x3f2a01a01a01a01a,0x3f56c16c16c16c17,0x3f81111111111111
-    .quad 0x3fa5555555555555,0x3fc5555555555555,0x3fe0000000000000,0x3ff0000000000000,0x3ff0000000000000
-s_math_exp_pade_num:
-    .quad 0x39ce3d36c1c38faa,0x3a58ce36eaf26bda,0x3ad4405ad5cfea0d,0x3b45d561ee842856
-    .quad 0x3bb1660a0a115024,0x3c15bf8c8c95a42e,0x3c76168abec7fabe,0x3cd2a30510f8bb90
-    .quad 0x3d2a7fcb3421aab1,0x3d80028ac4d45721,0x3dd0829f1afaf9da,0x3e1d149e0f85b242
-    .quad 0x3e65cf768ba445b2,0x3eabaeb40001baeb,0x3eed699f4001d69a,0x3f29bc6b58019bc7
-    .quad 0x3f62187b79e12188,0x3f93b13b13b13b14,0x3fbf2df2df2df2df,0x3fe0000000000000,0x3ff0000000000000
-s_math_exp_pade_den:
-    .quad 0x39ce3d36c1c38faa,0xba58ce36eaf26bda,0x3ad4405ad5cfea0d,0xbb45d561ee842856
-    .quad 0x3bb1660a0a115024,0xbc15bf8c8c95a42e,0x3c76168abec7fabe,0xbcd2a30510f8bb90
-    .quad 0x3d2a7fcb3421aab1,0xbd80028ac4d45721,0x3dd0829f1afaf9da,0xbe1d149e0f85b242
-    .quad 0x3e65cf768ba445b2,0xbeabaeb40001baeb,0x3eed699f4001d69a,0xbf29bc6b58019bc7
-    .quad 0x3f62187b79e12188,0xbf93b13b13b13b14,0x3fbf2df2df2df2df,0xbfe0000000000000,0x3ff0000000000000
-s_math_log_coeff:
-    .quad 0x3fb3b13b13b13b14,0x3fb745d1745d1746,0x3fbc71c71c71c71c,0x3fc2492492492492
-    .quad 0x3fc999999999999a,0x3fd5555555555555,0x3ff0000000000000
 s_math_atan13_coeff:
     .quad 0x3fa47ae147ae147b,0xbfa642c8590b2164,0x3fa8618618618618,0xbfaaf286bca1af28
     .quad 0x3fae1e1e1e1e1e1e,0xbfb1111111111111,0x3fb3b13b13b13b14,0xbfb745d1745d1746
@@ -10612,39 +10425,21 @@ s_gl8_nodes:
     .quad 0x3fc77ac94f3c7345,0x3fe0d129583284b4,0x3fe97e4ab249f41e,0x3feebab1cb0acc67
 s_gl8_weights:
     .quad 0x3fd736360b199343,0x3fd413c50a255616,0x3fcc76fb531d2b97,0x3fb9ea1d04ca0377
-s_math_sin_coeff:
-    .quad 0xb8e434d2e783f5bc,0x398259f98b4358ad,0xba1d1ab1c2dccea3,0x3ab3f3ccdd165fa9
-    .quad 0xbb4761b41316381a,0x3bd71b8ef6dcf572,0xbc62f49b46814157,0x3ce952c77030ad4a
-    .quad 0xbd6ae7f3e733b81f,0x3de6124613a86d09,0xbe5ae64567f544e4,0x3ec71de3a556c734
-    .quad 0xbf2a01a01a01a01a,0x3f81111111111111,0xbfc5555555555555,0x3ff0000000000000
-s_math_cos_coeff:
-    .quad 0xb933932c5047d60e,0x39d0a18a2635085d,0xba688e85fc6a4e5a,0x3aff2cf01972f578
-    .quad 0xbb90ce396db7f853,0x3c1e542ba4020225,0xbca6827863b97d97,0x3d2ae7f3e733b81f
-    .quad 0xbda93974a8c07c9d,0x3e21eed8eff8d898,0xbe927e4fb7789f5c,0x3efa01a01a01a01a
-    .quad 0xbf56c16c16c16c17,0x3fa5555555555555,0xbfe0000000000000,0x3ff0000000000000
-s_math_atan_coeff:
-    .quad 0x3fae1e1e1e1e1e1e,0xbfb1111111111111,0x3fb3b13b13b13b14,0xbfb745d1745d1746
-    .quad 0x3fbc71c71c71c71c,0xbfc2492492492492,0x3fc999999999999a,0xbfd5555555555555,0x3ff0000000000000
-# high->low coefficients 1/41,1/39,...,1 for atanh(u)/u polynomial in u^2
-s_math_atanh_coeff:
-    .quad 0x3f98f9c18f9c18fa,0x3f9a41a41a41a41a,0x3f9bacf914c1bad0,0x3f9d41d41d41d41d
-    .quad 0x3f9f07c1f07c1f08,0x3fa0842108421084,0x3fa1a7b9611a7b96,0x3fa2f684bda12f68
-    .quad 0x3fa47ae147ae147b,0x3fa642c8590b2164,0x3fa8618618618618,0x3faaf286bca1af28
-    .quad 0x3fae1e1e1e1e1e1e,0x3fb1111111111111,0x3fb3b13b13b13b14,0x3fb745d1745d1746
-    .quad 0x3fbc71c71c71c71c,0x3fc2492492492492,0x3fc999999999999a,0x3fd5555555555555
-    .quad 0x3ff0000000000000
-
 # op strings
 op_or:.ascii "or"; op_and:.ascii "and"; op_bit_or:.ascii "bit_or"; op_bit_xor:.ascii "bit_xor"; op_bit_and:.ascii "bit_and"
 op_eq:.ascii "eq"; op_ne:.ascii "ne"; op_lt:.ascii "lt"; op_le:.ascii "le"; op_gt:.ascii "gt"; op_ge:.ascii "ge"
 op_shl:.ascii "shl"; op_shr:.ascii "shr"; op_add:.ascii "add"; op_sub:.ascii "sub"; op_mul:.ascii "mul"; op_div:.ascii "div"; op_mod:.ascii "mod"
 op_not:.ascii "not"; op_bit_not:.ascii "bit_not"; op_neg:.ascii "neg"; op_select:.ascii "select"; op_min:.ascii "min"; op_max:.ascii "max"; op_abs:.ascii "abs"; op_sqrt:.ascii "sqrt"; op_trunc:.ascii "trunc"; op_ushr:.ascii "ushr"
-op_square:.ascii "square"; op_exp:.ascii "exp"; op_log:.ascii "log"; op_sin:.ascii "sin"; op_cos:.ascii "cos"; op_square_end:
+op_square:.ascii "square"; op_exp:.ascii "exp"; op_log:.ascii "log"; op_sin:.ascii "sin"; op_cos:.ascii "cos"
+op_fma:.ascii "fma"; op_square_end:
 # JSON fragments
 js_lit_prefix:.asciz "{\"literal\":"
 js_type_mid:.asciz ",\"type\":"
 js_var_prefix:.asciz "{\"var\":"
 js_axis_prefix:.asciz "{\"axis\":"
+js_field_prefix:.asciz "{\"field\":{\"record\":"
+js_field_name_mid:.asciz ",\"name\":"
+js_field_close:.asciz "}}"
 js_state_prefix:.asciz "{\"state\":"
 js_op_prefix:.asciz "{\"op\":"
 js_args_mid:.asciz ",\"args\":["
@@ -10724,6 +10519,7 @@ surface_diag_cheese_line:.skip 8
 surface_diag_error_line:.skip 8
 s_peek_repair_ptr:.skip 8
 s_general_lane:.skip 4
+s_tensor_demand_caps:.skip 4
 s_deterministic:.skip 4
 s_overflow_wrap:.skip 4
 s_fp_tolerant:.skip 4
@@ -10733,6 +10529,9 @@ s_tol_len:.skip 8
 s_program_ptr:.skip 8
 s_program_len:.skip 8
 s_input_count:.skip 4
+s_wh_extent_ptr:.skip 8
+s_wh_extent_len:.skip 8
+s_ordered_reduce_count:.skip 4
 s_binding_count:.skip 4
 s_output_count:.skip 4
 s_test_count:.skip 4
@@ -10826,6 +10625,7 @@ s_struct_decl_lens:.skip 8
 s_struct_decl_nodes:.skip 8
 s_decl_ptrs:.skip 8
 s_decl_lens:.skip 8
+s_decl_range_max:.skip 8
 s_last_decl_index:.skip 4
 s_decl_shape_rank:.skip 8
 s_decl_shape_offset:.skip 8
@@ -10901,3 +10701,159 @@ s_active_cap_var:.skip 8
 
 # 1.2.18 native materialized-field WH/WHEX surface completion.
 .include "compiler/field_surface_lowerer_x86_64.inc"
+
+.section .text
+# rdi=u64 AST -> rax conservative maximum, edx=0 proof /1 unknown.
+s_eval_u64_range_max:
+    push rbx; push r12; push r13
+    mov rbx,rdi
+    mov rdi,rbx; call s_eval_static_u64
+    test edx,edx; jz .seurm_done
+    test rbx,rbx; jz .seurm_no
+    cmp dword ptr [rbx+SN_KIND],NK_AXIS; je .seurm_axis
+    cmp dword ptr [rbx+SN_KIND],NK_VAR; je .seurm_var
+    cmp dword ptr [rbx+SN_KIND],NK_BINARY; jne .seurm_no
+    mov eax,dword ptr [rbx+SN_OP]
+    cmp eax,OP_ADD; je .seurm_binary
+    cmp eax,OP_MUL; jne .seurm_no
+.seurm_binary:
+    mov rdi,[rbx+SN_A]; call s_eval_u64_range_max
+    test edx,edx; jnz .seurm_no
+    mov r12,rax
+    mov rdi,[rbx+SN_B]; call s_eval_u64_range_max
+    test edx,edx; jnz .seurm_no
+    cmp dword ptr [rbx+SN_OP],OP_MUL; je .seurm_mul
+    add rax,r12; jc .seurm_no
+    xor edx,edx; jmp .seurm_done
+.seurm_mul:
+    mul r12; test rdx,rdx; jnz .seurm_no
+    jmp .seurm_done
+.seurm_axis:
+    mov rdi,[rip+s_wh_extent_ptr]; mov rsi,[rip+s_wh_extent_len]
+    jmp .seurm_lookup
+.seurm_var:
+    mov rdi,[rbx+SN_PTR]; mov rsi,[rbx+SN_LEN]
+.seurm_lookup:
+    call s_decl_lookup_exact
+    cmp eax,-1; je .seurm_no
+    mov rcx,[rip+s_decl_range_max]; mov rax,[rcx+rax*8]
+    cmp rax,-1; je .seurm_no
+    xor edx,edx; jmp .seurm_done
+.seurm_no: xor eax,eax; mov edx,1
+.seurm_done: pop r13; pop r12; pop rbx; ret
+
+s_tensor_relation_admit:
+    push rbx
+    mov rbx,rdi
+    test rbx,rbx; jz .stra_done
+    mov eax,[rbx+SN_KIND]
+    cmp eax,NK_BINARY; je .stra_op
+    cmp eax,NK_UNARY; je .stra_op
+    cmp eax,NK_CAST; je .stra_cast
+    cmp eax,NK_LOAD; je .stra_children
+    jmp .stra_done
+ .stra_cast:
+    # The recovered tensor authority witnesses only integer-to-f64 projection.
+    # Integer target casts retain the same General semantic authority up front.
+    mov rdi,[rbx+SN_PTR]; mov rsi,[rbx+SN_LEN]
+    lea rdx,[rip+ty_i64]; mov ecx,3; call s_span_eq
+    test eax,eax; jnz .stra_general
+    mov rdi,[rbx+SN_PTR]; mov rsi,[rbx+SN_LEN]
+    lea rdx,[rip+ty_u64]; mov ecx,3; call s_span_eq
+    test eax,eax; jnz .stra_general
+    jmp .stra_children
+.stra_op:
+    mov eax,[rbx+SN_OP]
+    cmp eax,OP_OR; jb .stra_children
+    cmp eax,OP_BIT_AND; jbe .stra_general
+    cmp eax,OP_SHL; je .stra_general
+    cmp eax,OP_SHR; je .stra_general
+    cmp eax,OP_USHR; je .stra_general
+    cmp eax,OP_BIT_NOT; je .stra_general
+    cmp eax,OP_SELECT; jne 1f
+    or dword ptr [rip+s_tensor_demand_caps],2
+1:  cmp eax,OP_EXP; jb 2f
+    cmp eax,OP_COS; ja .stra_general
+    or dword ptr [rip+s_tensor_demand_caps],1
+    # Tensor has no invocation-lifetime owner for runtime math yet. Keep that
+    # necessary admission witness until its shared invariant consumer exists.
+    mov rdi,[rbx+SN_A]; call s_tensor_math_has_axis
+    test eax,eax; jz .stra_general
+    mov eax,[rbx+SN_OP]
+2:
+    cmp eax,OP_DIV; jne .stra_remainder
+    # An integer denominator has no typed vector division witness here. Keep
+    # the ordinary semantic authority before codegen, rather than retry later.
+    mov rdi,[rbx+SN_B]; call s_eval_static_u64
+    test edx,edx; jz .stra_general
+    jmp .stra_children
+.stra_remainder:
+    cmp eax,OP_MOD; jne .stra_children
+    mov rdi,[rbx+SN_B]; call s_eval_static_u64
+    test edx,edx; jnz .stra_general
+    test rax,rax; jz .stra_general
+    lea rcx,[rax-1]; test rax,rcx; jz .stra_children
+    mov rcx,0x0001000000000000
+    cmp rax,rcx; jae .stra_general
+    mov rdi,[rbx+SN_A]; call s_eval_u64_range_max
+    test edx,edx; jnz .stra_general
+    mov rcx,0x0001000000000000
+    cmp rax,rcx; jae .stra_general
+    jmp .stra_children
+.stra_general:
+    mov dword ptr [rip+s_general_lane],1
+.stra_children:
+    mov rdi,[rbx+SN_A]; call s_tensor_relation_admit
+    mov rdi,[rbx+SN_B]; call s_tensor_relation_admit
+    mov rdi,[rbx+SN_C]; call s_tensor_relation_admit
+.stra_done:
+    cmp dword ptr [rip+s_tensor_demand_caps],3; jne 1f
+    mov dword ptr [rip+s_general_lane],1
+1:  pop rbx; ret
+
+s_tensor_math_has_axis:
+    push rbx
+    mov rbx,rdi
+    test rbx,rbx; jz .stmha_no
+    cmp dword ptr [rbx+SN_KIND],NK_AXIS; je .stmha_yes
+    mov rdi,[rbx+SN_A]; call s_tensor_math_has_axis
+    test eax,eax; jnz .stmha_yes
+    mov rdi,[rbx+SN_B]; call s_tensor_math_has_axis
+    test eax,eax; jnz .stmha_yes
+    mov rdi,[rbx+SN_C]; call s_tensor_math_has_axis
+    test eax,eax; jnz .stmha_yes
+    mov rdi,[rbx+SN_NEXT]; call s_tensor_math_has_axis
+    test eax,eax; jnz .stmha_yes
+.stmha_no: xor eax,eax; pop rbx; ret
+.stmha_yes: mov eax,1; pop rbx; ret
+
+
+.text
+.include "compiler/canonical_members.inc"
+
+.text
+.include "compiler/math_bessel.inc"
+
+.section .rodata
+s_math_sinh_small:
+    .quad 0x3ce952c77030ad4a
+    .quad 0x3d6ae7f3e733b81f
+    .quad 0x3de6124613a86d09
+    .quad 0x3e5ae64567f544e4
+    .quad 0x3ec71de3a556c734
+    .quad 0x3f2a01a01a01a01a
+    .quad 0x3f81111111111111
+    .quad 0x3fc5555555555555
+    .quad 0x3ff0000000000000
+s_math_cosh_small:
+    .quad 0x3d2ae7f3e733b81f
+    .quad 0x3da93974a8c07c9d
+    .quad 0x3e21eed8eff8d898
+    .quad 0x3e927e4fb7789f5c
+    .quad 0x3efa01a01a01a01a
+    .quad 0x3f56c16c16c16c17
+    .quad 0x3fa5555555555555
+    .quad 0x3fe0000000000000
+    .quad 0x3ff0000000000000
+
+.include "compiler/surface_shape_consumer.inc"

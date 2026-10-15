@@ -50,17 +50,8 @@ _start:
     cmp rax,rdx
     jne .arena_fail
 .arena_ready:
-    # Generated type vectors and native code share one exact-sized read/execute
-    # trailer.  Counts determine metadata extent; no template array owns program
-    # cardinality.  Zero trailer size keeps the standalone template callable.
-    lea rax,[rip+program_slot]
-    mov qword ptr [rip+program_code_ptr],rax
-    mov qword ptr [rip+input_type_ptr],0
-    mov qword ptr [rip+output_type_ptr],0
-    mov qword ptr [rip+rankn_physical_fact_ptr],0
-    mov rsi,qword ptr [rip+program_trailer_size_patch]
-    test rsi,rsi
-    jz .program_ready
+    # Every production image owns an AOT-sized type/code trailer.
+    # The link-time template has no separate executable fallback mode.
     mov eax,SYS_openat
     mov edi,AT_FDCWD
     lea rsi,[rip+self_exe_path]
@@ -83,6 +74,8 @@ _start:
     mov qword ptr [rip+input_type_ptr],rax
     mov ecx,dword ptr [rip+input_count_patch]
     lea rdx,[rax+rcx*4]
+    mov qword ptr [rip+input_range_ptr],rdx
+    imul rcx,rcx,24; add rdx,rcx
     mov qword ptr [rip+output_type_ptr],rdx
     mov ecx,dword ptr [rip+output_count_patch]
     lea rdx,[rdx+rcx*4]
@@ -159,12 +152,9 @@ _start:
     mov [r13+rbx*SLOT_BYTES],rax
     jmp .in_next
 .in_f32:
-    call parse_f64
+    call parse_f32
     test edx,edx
     jnz .bad_args
-    movq xmm0,rax
-    cvtsd2ss xmm0,xmm0
-    movd eax,xmm0
     mov [r13+rbx*SLOT_BYTES],rax
     jmp .in_next
 .in_f64:
@@ -186,6 +176,11 @@ _start:
     mov r10,qword ptr [rip+input_aux_base_patch]
     mov [r10+rbx*8],rax
 .in_next:
+    mov rax,[r13+rbx*SLOT_BYTES]
+    mov edi,dword ptr [r14+rbx*4]
+    imul rsi,rbx,24; add rsi,qword ptr [rip+input_range_ptr]
+    call input_range_check
+    test edx,edx; jnz .bad_args
     inc ebx
     jmp .parse_inputs
 
@@ -204,10 +199,8 @@ _start:
     mov eax,dword ptr [r10+rbx*4]
     cmp eax,TYPE_STRING
     je .print_string
-    mov edi,eax
-    call rpf_precision_from_type
-    test rax,rax
-    jnz .print_rankn_fp
+    cmp eax,RPF_TYPE_BASE
+    jae .print_rankn_fp
     mov rax,rbx
     call make_out_index
     mov r10,qword ptr [rip+output_pages_base_patch]
@@ -256,26 +249,19 @@ _start:
     xor edi,edi
     mov eax,SYS_exit_group
     syscall
+ .global general_runtime_reject
+general_runtime_reject:
 .runtime_reject:
     mov edi,65
     mov eax,SYS_exit_group
     syscall
 .arena_fail:
-    mov edi,65
-    mov eax,SYS_exit_group
-    syscall
+    jmp general_runtime_reject
 .bad_args:
     mov edi,2
     mov eax,SYS_exit_group
     syscall
 
-# Standalone-template fallback only.  Compiled programs execute the exact-sized
-# trailer mapped above; no fixed executable slot participates in admission.
-.p2align 6
-.global program_slot
-program_slot:
-    xor eax,eax
-    ret
 
 # parse bool -> rax 0/1, edx err
 parse_bool:
@@ -355,74 +341,7 @@ parse_i64:
 
 # Restricted but deterministic decimal parser: [+/-]digits[.digits].
 # Returns IEEE f64 bits in rax. Exponent syntax is rejected rather than guessed.
-parse_f64:
-    push rbx
-    push r12
-    xor r12d,r12d
-    cmp byte ptr [rdi],'-'
-    jne .pf_plus
-    mov r12d,1
-    inc rdi
-    jmp .pf_start
-.pf_plus:
-    cmp byte ptr [rdi],'+'
-    jne .pf_start
-    inc rdi
-.pf_start:
-    xor rax,rax                    # integer numerator digits
-    mov rbx,1                     # denominator
-    xor r8d,r8d                    # seen digit
-    xor r9d,r9d                    # after dot
-.pf_loop:
-    movzx ecx,byte ptr [rdi]
-    test cl,cl
-    jz .pf_done
-    cmp cl,'.'
-    jne .pf_digit
-    test r9d,r9d
-    jnz .pf_bad
-    mov r9d,1
-    inc rdi
-    jmp .pf_loop
-.pf_digit:
-    cmp cl,'0'; jb .pf_bad
-    cmp cl,'9'; ja .pf_bad
-    imul rax,rax,10
-    sub ecx,'0'
-    add rax,rcx
-    test r9d,r9d
-    jz .pf_next
-    imul rbx,rbx,10
-.pf_next:
-    mov r8d,1
-    inc rdi
-    jmp .pf_loop
-.pf_done:
-    test r8d,r8d
-    jz .pf_bad
-    cvtsi2sd xmm0,rax
-    cmp rbx,1
-    je .pf_sign
-    cvtsi2sd xmm1,rbx
-    divsd xmm0,xmm1
-.pf_sign:
-    test r12d,r12d
-    jz .pf_bits
-    mov rax,0x8000000000000000
-    movq xmm1,rax
-    xorpd xmm0,xmm1
-.pf_bits:
-    movq rax,xmm0
-    xor edx,edx
-    pop r12
-    pop rbx
-    ret
-.pf_bad:
-    xor eax,eax
-    mov edx,1
-    pop r12
-    pop rbx
-    ret
+.include "runtime/decimal_input_parser.inc"
 
 cstrlen:
     xor eax,eax
@@ -831,6 +750,7 @@ program_trailer_size_patch: .quad 0
 program_code_rel_offset_patch: .quad 0
 program_code_ptr: .quad 0
 input_type_ptr: .quad 0
+input_range_ptr: .quad 0
 output_type_ptr: .quad 0
 rankn_physical_fact_ptr: .quad 0
 .global rankn_type_count_patch
@@ -862,3 +782,7 @@ rankn_fp_line_buf: .fill 128,1,0
 .section .bss
 .p2align 6
 runtime_bss_sentinel: .skip 64
+
+.section .text
+.include "runtime/input_range_relation.inc"
+INPUT_RANGE_RELATION input_range_check

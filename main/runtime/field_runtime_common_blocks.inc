@@ -91,7 +91,7 @@
     jne .mof_unmap_fail
     cmp dword ptr [r14+FH_VERSION],FIELD_VERSION
     jne .mof_unmap_fail
-    cmp dword ptr [r14+FH_TYPE],FIELD_TYPE_F32
+    cmp dword ptr [r14+FH_TYPE],FIELD_ELEMENT_TYPE
     jne .mof_unmap_fail
     mov rcx,[rip+g_rank]
     cmp qword ptr [r14+FH_RANK],rcx
@@ -152,7 +152,7 @@
     jo .mof_unmap_fail
     add r10,rax
     jo .mof_unmap_fail
-    cmp r10,0x7ffffffb
+    cmp r10,0x7fffffff-FIELD_ELEMENT_BYTES
     ja .mof_unmap_fail
     inc r9
     jmp .mof_axis
@@ -161,7 +161,7 @@
     jne .mof_unmap_fail
     mov rax,[r14+FH_DATA_OFF]
     add rax,r10
-    add rax,4
+    add rax,FIELD_ELEMENT_BYTES
     mov rdx,[rip+g_field_size_ptr]
     cmp rax,[rdx+r12*8]
     ja .mof_unmap_fail
@@ -200,7 +200,7 @@
 
     mov rax,[rip+g_field_contig_ptr]
     mov byte ptr [rax+r12],1
-    mov r11d,4
+    mov r11d,FIELD_ELEMENT_BYTES
     mov r9,[rip+g_rank]
     mov rdx,r12
     imul rdx,qword ptr [rip+g_axis_bytes]
@@ -270,7 +270,7 @@
     mov rdi,r14
     xor eax,eax
     rep stosd                        # selected[axis]=0, exact RankFact span
-    mov r15,4                        # occupied byte span of lower axes
+    mov r15,FIELD_ELEMENT_BYTES                        # occupied byte span of lower axes
 .vmi_mark_trivial:
     xor ebx,ebx
 .vmi_mark_loop:
@@ -643,7 +643,7 @@
     cmp qword ptr [rip+g_chunks],1
     jbe .vpmg_ok
     mov rax,qword ptr [rip+field_chunk_elements_patch]
-    test rax,15                    # 16 f32 = one 64-byte ownership quantum
+    test rax,FIELD_TRAFFIC_ELEMENTS-1 # one physical traffic line
     jnz .vpmg_fail
     xor ebx,ebx
 .vpmg_field:
@@ -670,15 +670,15 @@
     mov r9,r14
     lea r9,[r9+r13*4]
     mov eax,dword ptr [r8+r9]
-    cmp eax,4
+    cmp eax,FIELD_ELEMENT_BYTES
     jne .vpmg_fail
     mov r8,[rip+g_field_extents_ptr]
     mov r9,r14
     lea r9,[r9+r13*4]
     mov eax,dword ptr [r8+r9]
-    test eax,15
+    test eax,FIELD_TRAFFIC_ELEMENTS-1
     jnz .vpmg_fail
-    imul rax,rax,4
+    imul rax,rax,FIELD_ELEMENT_BYTES
     mov r15,rax                     # physical span of inner logical block
     test r13d,r13d
     jz .vpmg_next
@@ -820,7 +820,7 @@
     jmp .ns_axis
 .ns_next:
     mov rax,r15
-    shl rax,2                       # f32 byte displacement
+    shl rax,FIELD_ELEMENT_SHIFT       # TypePhysicalFact byte displacement
     mov rdx,[rip+g_spec_linear_delta_bytes_ptr]
     mov [rdx+rbx*8],rax
     inc ebx
@@ -955,7 +955,7 @@
     push r13
     push r14
     push r15
-    sub rsp,REDUCE_LEVELS*4+16
+    sub rsp,REDUCE_LEVELS*FIELD_ELEMENT_BYTES+16
     mov r13,rsi
     mov r14,rdx
     xor r15d,r15d
@@ -968,8 +968,8 @@
 .w_carry:
     bt r15,rcx
     jnc .w_store
-    movss xmm1,dword ptr [rsp+rcx*4]
-    addss xmm1,xmm0
+    FRC_MOV_SCALAR xmm1,[rsp+rcx*FIELD_ELEMENT_BYTES]
+    FRC_ADD_SCALAR xmm1,xmm0
     vmovaps xmm0,xmm1
     btr r15,rcx
     inc ecx
@@ -977,7 +977,7 @@
     jb .w_carry
     jmp .bad_args
 .w_store:
-    movss dword ptr [rsp+rcx*4],xmm0
+    FRC_MOV_SCALAR [rsp+rcx*FIELD_ELEMENT_BYTES],xmm0
     bts r15,rcx
     inc r13
     jmp .w_chunk
@@ -992,12 +992,12 @@
     jnc .w_fin_next
     test edx,edx
     jnz .w_merge
-    movss xmm0,dword ptr [rsp+rcx*4]
+    FRC_MOV_SCALAR xmm0,[rsp+rcx*FIELD_ELEMENT_BYTES]
     mov edx,1
     jmp .w_fin_next
 .w_merge:
-    movss xmm1,dword ptr [rsp+rcx*4]
-    addss xmm1,xmm0
+    FRC_MOV_SCALAR xmm1,[rsp+rcx*FIELD_ELEMENT_BYTES]
+    FRC_ADD_SCALAR xmm1,xmm0
     vmovaps xmm0,xmm1
 .w_fin_next:
     inc ecx
@@ -1007,7 +1007,7 @@
     je 1f
     sfence
 1:  vzeroupper
-    add rsp,REDUCE_LEVELS*4+16
+    add rsp,REDUCE_LEVELS*FIELD_ELEMENT_BYTES+16
     pop r15
     pop r14
     pop r13
@@ -1059,3 +1059,257 @@ field_eval_vec_disp_patch: .long 0
 .global field_eval_vec_end
 .endm
 
+
+# One element-parameterized authority for both native ISA carriers.
+.macro FRC_run_region_frontier_and_reduce
+run_region_frontier:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp,64
+    mov r13,rsi
+    mov r14,rdx
+    mov r12d,edi
+
+.frf_descend:
+    mov rax,r14
+    sub rax,r13
+    cmp rax,1
+    jbe .frf_leaf
+
+    # Profitability was already collapsed into field_chunk_elements_patch.
+    # Expose actual cardinality directly: no inherited binary reduction geometry.
+    mov r8,rax
+    inc r8
+    shr r8,1
+    lea rbx,[r13+r8]              # right ownership region begins here
+
+    # The right-subtree start is unique and becomes the permanent result/stack
+    # slot identity for the outward execution that owns its leftmost leaf.
+    mov rax,rbx
+    dec rax
+    shl rax,14
+    mov r15,qword ptr [rip+g_region_arena]
+    test r15,r15
+    jz .bad_args
+    add r15,rax
+    mov dword ptr [r15],0
+
+    lea rsi,[r15+REGION_STACK_SIZE-16]
+    mov eax,SYS_clone
+    mov edi,CLONE_VM_FILES_FS_SIGCHLD
+    test r12d,r12d
+    jnz .frf_clone_flags_ready
+    or edi,CLONE_PARENT
+.frf_clone_flags_ready:
+    xor edx,edx
+    xor r10d,r10d
+    xor r8d,r8d
+    syscall
+    test rax,rax
+    js .frf_refused_right
+    jz .frf_child
+
+    # Current execution owns only the left side after exposing the right side.
+    # No parent/child reduction relation is retained.
+    mov r14,rbx
+    jmp .frf_descend
+
+.frf_child:
+    # A non-root outward execution follows the left spine of its own disjoint
+    # ownership range.  Any descendants it exposes use CLONE_PARENT and are
+    # direct children of the invocation root rather than a runtime join tree.
+    xor r12d,r12d
+    mov r13,rbx
+    jmp .frf_descend
+
+.frf_refused_right:
+    # Linux refusal does not create a compatibility backend.  The current
+    # execution evaluates the refused ownership range with the same worker_range
+    # primitive and publishes each canonical leaf result into its normal slot.
+    mov r15,rbx
+.frf_refused_loop:
+    cmp r15,r14
+    jae .frf_refused_done
+    mov rsi,r15
+    lea rdx,[r15+1]
+    call worker_range
+    mov rax,r15
+    dec rax
+    shl rax,14
+    add rax,qword ptr [rip+g_region_arena]
+    FRC_MOV_SCALAR [rax],xmm0
+    inc r15
+    jmp .frf_refused_loop
+.frf_refused_done:
+    mov r14,rbx
+    jmp .frf_descend
+
+.frf_leaf:
+    mov rsi,r13
+    mov rdx,r14
+    call worker_range
+    test r12d,r12d
+    jnz .frf_root_leaf
+
+    # Leaf execution publishes only its own local reduction and immediately
+    # returns its silicon context to the OS.  It knows no sibling or join tree.
+    mov rax,r13
+    dec rax
+    shl rax,14
+    add rax,qword ptr [rip+g_region_arena]
+    FRC_MOV_SCALAR [rax],xmm0
+    xor edi,edi
+    mov eax,SYS_exit
+    syscall
+    ud2
+
+.frf_root_leaf:
+    FRC_MOV_SCALAR [rsp],xmm0
+
+    # All non-root outward executions are direct children of the invocation root.
+    # wait4(-1) is the OS lifecycle truth; no Wheelchair completion counter,
+    # scheduler state or join tree survives.
+.frf_reap:
+    mov dword ptr [rsp+8],0
+    mov eax,SYS_wait4
+    mov rdi,-1
+    lea rsi,[rsp+8]
+    xor edx,edx
+    xor r10d,r10d
+    syscall
+    cmp rax,-10                    # -ECHILD
+    je .frf_reduce
+    cmp rax,-4                     # -EINTR
+    je .frf_reap
+    test rax,rax
+    js .bad_args
+    cmp dword ptr [rsp+8],0
+    jne .bad_args
+    jmp .frf_reap
+
+.frf_reduce:
+    FRC_MOV_SCALAR xmm0,[rsp]
+    call reduce_region_results
+
+    add rsp,64
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+# reduce_region_results(xmm0=root-region result) -> xmm0 f32
+# Results are consumed in chunk order with the same left-to-right binary carry
+# frontier used by worker_range.  Parallel ownership topology is absent here.
+reduce_region_results:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp,REDUCE_LEVELS*FIELD_ELEMENT_BYTES+16
+    FRC_MOV_SCALAR [rsp+REDUCE_LEVELS*FIELD_ELEMENT_BYTES],xmm0
+    xor r15d,r15d                  # occupied reduction levels
+    xor r13d,r13d                  # region index
+
+.rrr_next:
+    cmp r13,qword ptr [rip+g_chunks]
+    jae .rrr_finish
+    test r13,r13
+    jnz .rrr_load_slot
+    FRC_MOV_SCALAR xmm0,[rsp+REDUCE_LEVELS*FIELD_ELEMENT_BYTES]
+    jmp .rrr_carry_start
+.rrr_load_slot:
+    mov rax,r13
+    dec rax
+    shl rax,14
+    add rax,qword ptr [rip+g_region_arena]
+    FRC_MOV_SCALAR xmm0,[rax]
+.rrr_carry_start:
+    xor ecx,ecx
+.rrr_carry:
+    bt r15,rcx
+    jnc .rrr_store
+    FRC_MOV_SCALAR xmm1,[rsp+rcx*FIELD_ELEMENT_BYTES]
+    FRC_ADD_SCALAR xmm1,xmm0
+    vmovaps xmm0,xmm1
+    btr r15,rcx
+    inc ecx
+    cmp ecx,REDUCE_LEVELS
+    jb .rrr_carry
+    jmp .bad_args
+.rrr_store:
+    FRC_MOV_SCALAR [rsp+rcx*FIELD_ELEMENT_BYTES],xmm0
+    bts r15,rcx
+    inc r13
+    jmp .rrr_next
+
+.rrr_finish:
+    xor ecx,ecx
+    xor edx,edx
+    vxorps xmm0,xmm0,xmm0
+.rrr_finish_loop:
+    cmp ecx,REDUCE_LEVELS
+    jae .rrr_done
+    bt r15,rcx
+    jnc .rrr_finish_next
+    test edx,edx
+    jnz .rrr_merge
+    FRC_MOV_SCALAR xmm0,[rsp+rcx*FIELD_ELEMENT_BYTES]
+    mov edx,1
+    jmp .rrr_finish_next
+.rrr_merge:
+    FRC_MOV_SCALAR xmm1,[rsp+rcx*FIELD_ELEMENT_BYTES]
+    FRC_ADD_SCALAR xmm1,xmm0
+    vmovaps xmm0,xmm1
+.rrr_finish_next:
+    inc ecx
+    jmp .rrr_finish_loop
+.rrr_done:
+    add rsp,REDUCE_LEVELS*FIELD_ELEMENT_BYTES+16
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+# worker_range(rsi=begin_chunk,rdx=end_chunk) -> xmm0 f32
+
+.endm
+
+# One element-parameterized authority for both native ISA carriers.
+.macro FRC_print_checksum
+print_checksum:
+    # rax=exact element payload bits
+    lea rdi,[rip+checksum_line+20]
+    mov ecx,FIELD_ELEMENT_BYTES*2
+.pcf_hex:
+    mov rdx,rax
+    shr rdx,FIELD_ELEMENT_BITS-4
+    and edx,15
+    cmp edx,9
+    jbe .pcf_digit
+    add edx,'a'-10
+    jmp .pcf_store
+.pcf_digit:
+    add edx,'0'
+.pcf_store:
+    mov byte ptr [rdi],dl
+    inc rdi
+    shl rax,4
+    dec ecx
+    jnz .pcf_hex
+    mov eax,SYS_write
+    mov edi,1
+    lea rsi,[rip+checksum_line]
+    mov edx,21+FIELD_ELEMENT_BYTES*2
+    syscall
+    ret
+
+
+.endm

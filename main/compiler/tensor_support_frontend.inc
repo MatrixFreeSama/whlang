@@ -4,15 +4,6 @@
 # Runtime discovers exact IEEE boundaries, canonicalizes a source-sized RegionSet,
 # and Physical Reality erases proven-zero subtrees without workload geometry.
 
-.equ SUPPORT_NONE, 0
-.equ SUPPORT_INTERVAL, 1
-.equ SUPPORT_EMPTY, 2
-.equ SUPPORT_SHAPE_CONST, 1
-.equ SUPPORT_SHAPE_INC, 2
-.equ SUPPORT_SHAPE_DEC, 3
-.equ SUPPORT_SHAPE_BASIN, 4
-.equ SUPPORT_SHAPE_CAP, 5
-
 # support_resolve_identity_load(rdi=expr) -> rax=canonical expression.
 # Only direct same-axis map edges are transparent. Indexed maps remain real
 # CoordinateFacts and are never guessed through by SupportFact analysis.
@@ -114,12 +105,16 @@ support_const_sign:
     call obj_get
     test rax,rax
     jz .scs_op
-    mov rdi,[rax+8]
-    mov rsi,[rax+16]
-    call tensor_domain_var_match
-    test eax,eax
-    jz .scs_unknown
-    mov eax,1
+    mov rdi,[rax+8]; mov rsi,[rax+16]
+    call tensor_find_input
+    test edx,edx; jz .scs_unknown
+    shl rax,5
+    add rax,[rip+tensor_input_descriptors]
+    lea rdi,[rax+8]
+    mov esi,3; cmp edx,TYPE_F64; jne .scs_range_sign
+    mov esi,5
+.scs_range_sign:
+    call physical_input_range_sign
     jmp .scs_done
 
 .scs_op:
@@ -148,26 +143,7 @@ support_const_sign:
     test eax,eax
     jz .scs_mul_probe
     mov rdi,r14
-    lea rsi,[rip+k_var]
-    mov edx,k_var_end-k_var
-    call obj_get
-    test rax,rax
-    jz .scs_cast_lit
-    mov rdi,[rax+8]
-    mov rsi,[rax+16]
-    call tensor_domain_var_match
-    test eax,eax
-    jz .scs_unknown
-    mov eax,1
-    jmp .scs_done
-.scs_cast_lit:
-    mov rdi,r14
-    call expr_literal_u64
-    test edx,edx
-    jnz .scs_unknown
-    test rax,rax
-    jz .scs_zero
-    mov eax,1
+    call support_const_sign
     jmp .scs_done
 .scs_mul_probe:
     mov rdi,[r13+8]
@@ -228,6 +204,42 @@ support_const_sign:
     pop rbx
     ret
 
+# Strip only proved nonzero axis-independent multiplicative factors.
+# This is a proof identity, never a rewrite of the emitted IEEE expression.
+support_multiplicative_core:
+    push rbx; push r12; push r13; push r14
+    mov r12,rdi
+.smc_loop:
+    mov rdi,r12; call support_resolve_identity_load; mov r12,rax
+    mov rdi,r12; lea rsi,[rip+k_op]; mov edx,k_op_end-k_op; call obj_get
+    test rax,rax; jz .smc_done
+    mov r13,rax; xor r14d,r14d
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_mul]; mov ecx,v_mul_end-v_mul; call span_eq
+    test eax,eax; jnz .smc_args
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_div]; mov ecx,v_div_end-v_div; call span_eq
+    test eax,eax; jz .smc_done
+    mov r14d,1
+.smc_args:
+    mov rdi,r12; lea rsi,[rip+k_args]; mov edx,k_args_end-k_args; call obj_get
+    test rax,rax; jz .smc_done
+    mov r13,[rax+24]; test r13,r13; jz .smc_done
+    mov rbx,[r13+32]; test rbx,rbx; jz .smc_done
+    cmp qword ptr [rbx+32],0; jne .smc_done
+    mov rdi,rbx; call support_const_sign
+    cmp eax,1; je .smc_strip_rhs
+    cmp eax,-1; je .smc_strip_rhs
+    test r14d,r14d; jnz .smc_done
+    mov rdi,r13; call support_const_sign
+    cmp eax,1; je .smc_strip_lhs
+    cmp eax,-1; jne .smc_done
+.smc_strip_lhs:
+    mov r12,rbx; jmp .smc_loop
+.smc_strip_rhs:
+    mov r12,r13; jmp .smc_loop
+.smc_done:
+    mov rax,r12
+    pop r14; pop r13; pop r12; pop rbx; ret
+
 # support_shape_class(rdi=expr) -> eax shape class, 0 unsupported.
 # INC/DEC are monotone axis sequences. BASIN is a single discrete basin, hence
 # every sublevel predicate against an axis-independent constant has contiguous
@@ -248,6 +260,14 @@ support_shape_class:
     call expr_literal_f64_bits
     test edx,edx
     jz .ssc_const
+    # A runtime InputFact is axis-independent. Finite validity is checked once
+    # by the shared launch parser before this proof can erase a zero subtree.
+    mov rdi,r12; lea rsi,[rip+k_var]; mov edx,k_var_end-k_var; call obj_get
+    test rax,rax; jz .ssc_operator
+    mov rdi,[rax+8]; mov rsi,[rax+16]; call tensor_find_input
+    cmp edx,TYPE_F64; je .ssc_const
+    jmp .ssc_no
+.ssc_operator:
     mov rdi,r12
     lea rsi,[rip+k_op]
     mov edx,k_op_end-k_op
@@ -383,10 +403,17 @@ support_shape_class:
     test eax,eax
     jz .ssc_div_probe
 
-    # The only nonconstant products admitted into a monotone class below this
-    # point are affine-in-axis relations scaled/translated by axis-independent
-    # facts. Equal slope signs therefore form one positive-leading quadratic
-    # basin. Opposite signs are concave and are rejected.
+    # A common monotone coordinate, scaled without translating its zero, has
+    # one IEEE basin/cap. Mere equal slope signs of unrelated rounded affines
+    # do not certify a discrete extremum, so that former inference is removed.
+    cmp dword ptr [rsp],SUPPORT_SHAPE_CONST; je .ssc_mul_const
+    cmp dword ptr [rsp+4],SUPPORT_SHAPE_CONST; je .ssc_mul_const
+    mov rdi,r14; call support_multiplicative_core
+    mov [rsp+8],rax
+    mov rdi,r15; call support_multiplicative_core
+    mov rsi,rax; mov rdi,[rsp+8]; xor edx,edx
+    call physical_value_expr_equal
+    test eax,eax; jz .ssc_no
     mov eax,dword ptr [rsp]
     mov edx,dword ptr [rsp+4]
     cmp eax,SUPPORT_SHAPE_INC
@@ -427,7 +454,7 @@ support_shape_class:
     cmp edx,2
     je .ssc_no
     test edx,edx
-    jz .ssc_const
+    jz .ssc_no                      # zero * unbounded is not a constant proof
     test edx,edx
     js .ssc_scale_neg
     jmp .ssc_done
@@ -711,57 +738,513 @@ support_prepare_leaf:
     pop rbx
     ret
 
-# support_positive_finite_literal(rdi=expr) -> eax=1 only for a strictly
-# positive finite f64 literal. Such a scalar preserves exact +0 outside an
-# operand support, so execution support may pass through multiplication.
-support_positive_finite_literal:
+# support_reset_binding_seen() -> clears the existing source-sized binding
+# visitation vector for one SupportFact pass.  The storage is the same AOT use-
+# graph scratch already owned by Tensor Physical Reality; no second capacity or
+# runtime manager is introduced.
+support_reset_binding_seen:
+    push rdi
+    push rcx
+    mov rdi,qword ptr [rip+tensor_binding_expanded_ptr]
+    xor eax,eax
+    mov ecx,dword ptr [rip+tensor_binding_count]
+    rep stosd
+    pop rcx
+    pop rdi
+    ret
+
+# support_binding_first(rdi=binding) -> eax=1 first visit, eax=0 already seen,
+# edx=0 success; edx=1 malformed binding.  One binding definition therefore has
+# one SupportFact authority even when the expression DAG references it many times.
+support_binding_first:
     push rbx
-    call expr_literal_f64_bits
-    test edx,edx
-    jnz .spfl_no
-    test rax,rax
-    jz .spfl_no
-    test rax,rax
-    js .spfl_no
-    mov rbx,rax
-    mov rax,0x7ff0000000000000
-    and rbx,rax
-    cmp rbx,rax
-    je .spfl_no
+    mov rbx,qword ptr [rip+tensor_bindings_ptr]
+    mov rax,rdi
+    sub rax,rbx
+    test rax,63
+    jnz .sbf_fail
+    shr rax,6
+    cmp eax,dword ptr [rip+tensor_binding_count]
+    jae .sbf_fail
+    mov rcx,qword ptr [rip+tensor_binding_expanded_ptr]
+    cmp dword ptr [rcx+rax*4],0
+    jne .sbf_seen
+    mov dword ptr [rcx+rax*4],1
     mov eax,1
+    xor edx,edx
     pop rbx
     ret
-.spfl_no:
+.sbf_seen:
     xor eax,eax
+    xor edx,edx
+    pop rbx
+    ret
+.sbf_fail:
+    xor eax,eax
+    mov edx,1
     pop rbx
     ret
 
-# support_count_terms(rdi=expr) -> eax=count, edx=1 proven RegionSet algebra;
-# edx=0 means the expression support is not representable by this authority.
-# Addition/subtraction use conservative execution-support union. Multiplication
-# transports a proven RegionSet through a strictly positive finite scalar, or
-# unions two proven operand supports; outside that union both operands are exact
-# +0, so the product is exact +0. No cancellation or workload identity is guessed.
+# support_predicate_exterior(rdi=ordered comparison) -> eax=0/1 exterior truth,
+# edx=1 when both operands have exact exterior ValueFacts.  Ordered comparisons
+# remain ordered for NaNs; != is true for unordered, the other relations false.
+support_predicate_exterior:
+    push rbx
+    push r12
+    push r13
+    push r14
+    sub rsp,16
+    mov r12,rdi
+    mov rdi,r12
+    lea rsi,[rip+k_op]
+    mov edx,k_op_end-k_op
+    call obj_get
+    test rax,rax
+    jz .spe_no
+    mov r13,rax
+    xor r14d,r14d
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_eq]; mov ecx,v_eq_end-v_eq; call span_eq
+    test eax,eax; jz .spe_ne; mov r14d,1; jmp .spe_kind
+.spe_ne:
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_ne]; mov ecx,v_ne_end-v_ne; call span_eq
+    test eax,eax; jz .spe_lt; mov r14d,2; jmp .spe_kind
+.spe_lt:
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_lt]; mov ecx,v_lt_end-v_lt; call span_eq
+    test eax,eax; jz .spe_le; mov r14d,3; jmp .spe_kind
+.spe_le:
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_le]; mov ecx,v_le_end-v_le; call span_eq
+    test eax,eax; jz .spe_gt; mov r14d,4; jmp .spe_kind
+.spe_gt:
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_gt]; mov ecx,v_gt_end-v_gt; call span_eq
+    test eax,eax; jz .spe_ge; mov r14d,5; jmp .spe_kind
+.spe_ge:
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_ge]; mov ecx,v_ge_end-v_ge; call span_eq
+    test eax,eax; jz .spe_no; mov r14d,6
+.spe_kind:
+    mov rdi,r12
+    lea rsi,[rip+k_args]
+    mov edx,k_args_end-k_args
+    call obj_get
+    test rax,rax
+    jz .spe_no
+    mov rbx,[rax+24]
+    test rbx,rbx
+    jz .spe_no
+    mov r12,[rbx+32]
+    test r12,r12
+    jz .spe_no
+    cmp qword ptr [r12+32],0
+    jne .spe_no
+    mov rdi,rbx
+    call support_exterior_fact
+    test edx,edx
+    jz .spe_no
+    mov qword ptr [rsp],rax
+    mov rdi,r12
+    call support_exterior_fact
+    test edx,edx
+    jz .spe_no
+    mov qword ptr [rsp+8],rax
+    movq xmm0,qword ptr [rsp]
+    movq xmm1,qword ptr [rsp+8]
+    ucomisd xmm0,xmm1
+    jp .spe_unordered
+    cmp r14d,1
+    je .spe_eq_test
+    cmp r14d,2
+    je .spe_ne_test
+    cmp r14d,3
+    je .spe_lt_test
+    cmp r14d,4
+    je .spe_le_test
+    cmp r14d,5
+    je .spe_gt_test
+    # GE
+    jae .spe_true
+    jmp .spe_false
+.spe_eq_test:
+    je .spe_true
+    jmp .spe_false
+.spe_ne_test:
+    jne .spe_true
+    jmp .spe_false
+.spe_lt_test:
+    jb .spe_true
+    jmp .spe_false
+.spe_le_test:
+    jbe .spe_true
+    jmp .spe_false
+.spe_gt_test:
+    ja .spe_true
+    jmp .spe_false
+.spe_unordered:
+    cmp r14d,2
+    je .spe_true
+.spe_false:
+    xor eax,eax
+    mov edx,1
+    jmp .spe_done
+.spe_true:
+    mov eax,1
+    mov edx,1
+    jmp .spe_done
+.spe_no:
+    xor eax,eax
+    xor edx,edx
+.spe_done:
+    add rsp,16
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+# support_exterior_fact(rdi=expr) -> rax=exact exterior f64 bits, edx=1 success.
+# A SupportFact is no longer restricted to exterior +0 internally.  The region
+# carries the places that may differ; this ValueFact carries the exact value
+# outside that region.  Only the final reduction must converge back to exact +0
+# before Physical Reality is allowed to erase exterior work.
+support_exterior_fact:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp,16
+    mov r12,rdi
+
+    mov rdi,r12
+    call expr_literal_f64_bits
+    test edx,edx
+    jnz .sef_load
+    mov edx,1
+    jmp .sef_done
+
+.sef_load:
+    mov rdi,r12
+    lea rsi,[rip+k_load]
+    mov edx,k_load_end-k_load
+    call obj_get
+    test rax,rax
+    jz .sef_op
+    mov rdi,[rax+8]
+    mov rsi,[rax+16]
+    call find_binding
+    test rax,rax
+    jz .sef_no
+    cmp dword ptr [rax+16],OP_MAP
+    jne .sef_no
+    mov rdi,[rax+40]
+    call support_exterior_fact
+    jmp .sef_done
+
+.sef_op:
+    mov rdi,r12
+    lea rsi,[rip+k_op]
+    mov edx,k_op_end-k_op
+    call obj_get
+    test rax,rax
+    jz .sef_no
+    mov r13,rax
+
+    # A primitive topological select already proves that outside its predicate
+    # Region the result is the exact +0 false arm.  Do not force its active arm
+    # through a full-domain exterior analysis.
+    mov rdi,r12
+    call support_prepare_leaf
+    test eax,eax
+    jz .sef_sqrt_probe
+    xor eax,eax
+    mov edx,1
+    jmp .sef_done
+
+.sef_sqrt_probe:
+    mov rdi,r12
+    lea rsi,[rip+k_args]
+    mov edx,k_args_end-k_args
+    call obj_get
+    test rax,rax
+    jz .sef_no
+    mov r14,[rax+24]
+    test r14,r14
+    jz .sef_no
+
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_sqrt]; mov ecx,v_sqrt_end-v_sqrt; call span_eq
+    test eax,eax; jz .sef_square_probe
+    cmp qword ptr [r14+32],0
+    jne .sef_no
+    mov rdi,r14
+    call support_exterior_fact
+    test edx,edx
+    jz .sef_no
+    movq xmm0,rax
+    sqrtsd xmm0,xmm0
+    movq rax,xmm0
+    mov edx,1
+    jmp .sef_done
+
+.sef_square_probe:
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_square]; mov ecx,v_square_end-v_square; call span_eq
+    test eax,eax; jz .sef_select_probe
+    cmp qword ptr [r14+32],0
+    jne .sef_no
+    mov rdi,r14
+    call support_exterior_fact
+    test edx,edx
+    jz .sef_no
+    movq xmm0,rax
+    mulsd xmm0,xmm0
+    movq rax,xmm0
+    mov edx,1
+    jmp .sef_done
+
+.sef_select_probe:
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_select]; mov ecx,v_select_end-v_select; call span_eq
+    test eax,eax; jz .sef_binary
+    mov r15,[r14+32]
+    test r15,r15
+    jz .sef_no
+    mov rbx,[r15+32]
+    test rbx,rbx
+    jz .sef_no
+    cmp qword ptr [rbx+32],0
+    jne .sef_no
+    mov rdi,r14
+    call support_predicate_exterior
+    test edx,edx
+    jz .sef_no
+    test eax,eax
+    jz .sef_select_false
+    mov rdi,r15
+    call support_exterior_fact
+    jmp .sef_done
+.sef_select_false:
+    mov rdi,rbx
+    call support_exterior_fact
+    jmp .sef_done
+
+.sef_binary:
+    mov r15,[r14+32]
+    test r15,r15
+    jz .sef_no
+    cmp qword ptr [r15+32],0
+    jne .sef_no
+    xor ebx,ebx
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_add]; mov ecx,v_add_end-v_add; call span_eq
+    test eax,eax; jz .sef_sub; mov ebx,1; jmp .sef_binary_kind
+.sef_sub:
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_sub]; mov ecx,v_sub_end-v_sub; call span_eq
+    test eax,eax; jz .sef_mul; mov ebx,2; jmp .sef_binary_kind
+.sef_mul:
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_mul]; mov ecx,v_mul_end-v_mul; call span_eq
+    test eax,eax; jz .sef_div; mov ebx,3; jmp .sef_binary_kind
+.sef_div:
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_div]; mov ecx,v_div_end-v_div; call span_eq
+    test eax,eax; jz .sef_no; mov ebx,4
+.sef_binary_kind:
+    mov rdi,r14
+    call support_exterior_fact
+    test edx,edx
+    jz .sef_no
+    mov qword ptr [rsp],rax
+    mov rdi,r15
+    call support_exterior_fact
+    test edx,edx
+    jz .sef_no
+    mov qword ptr [rsp+8],rax
+    movq xmm0,qword ptr [rsp]
+    movq xmm1,qword ptr [rsp+8]
+    cmp ebx,1
+    je .sef_do_add
+    cmp ebx,2
+    je .sef_do_sub
+    cmp ebx,3
+    je .sef_do_mul
+    divsd xmm0,xmm1
+    jmp .sef_binary_out
+.sef_do_add:
+    addsd xmm0,xmm1
+    jmp .sef_binary_out
+.sef_do_sub:
+    subsd xmm0,xmm1
+    jmp .sef_binary_out
+.sef_do_mul:
+    mulsd xmm0,xmm1
+.sef_binary_out:
+    movq rax,xmm0
+    mov edx,1
+    jmp .sef_done
+
+.sef_no:
+    xor eax,eax
+    xor edx,edx
+.sef_done:
+    add rsp,16
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+# support_note_index(rdi=index expression) -> eax=1 supported CoordinateFact,
+# eax=0 unsupported.  Direct axis identity needs no dilation.  A dynamic-ring
+# unit-affine translation contributes its exact signed displacement to the one
+# current CoordinateFact chain; Physical Reality later dilates the RegionSet by
+# the maximum absolute displacement actually present in the expression DAG.
+support_note_index:
+    push rbx
+    push r12
+    mov r12,rdi
+    mov rdi,r12
+    lea rsi,[rip+k_axis]
+    mov edx,k_axis_end-k_axis
+    call obj_get
+    test rax,rax
+    jnz .sni_yes
+    mov rdi,r12
+    call expr_index_key_u64
+    test ecx,ecx
+    jz .sni_no
+    cmp rax,1
+    jne .sni_no
+    cmp r8,-1
+    jne .sni_no
+    mov rbx,qword ptr [rip+tensor_support_coord_shift]
+    add rbx,rdx
+    jo .sni_no
+    mov qword ptr [rip+tensor_support_coord_shift],rbx
+    mov rax,rbx
+    test rax,rax
+    jns .sni_abs_ready
+    neg rax
+    jo .sni_no
+.sni_abs_ready:
+    cmp rax,qword ptr [rip+tensor_support_halo_elems]
+    jbe .sni_yes
+    mov qword ptr [rip+tensor_support_halo_elems],rax
+.sni_yes:
+    mov eax,1
+    pop r12
+    pop rbx
+    ret
+.sni_no:
+    xor eax,eax
+    pop r12
+    pop rbx
+    ret
+
+# support_count_predicate_terms(rdi=ordered comparison) -> eax=count, edx=1.
+# A predicate can change only where either of its ValueFact operands changes.
+support_count_predicate_terms:
+    push rbx
+    push r12
+    mov r12,rdi
+    mov rdi,r12
+    lea rsi,[rip+k_args]
+    mov edx,k_args_end-k_args
+    call obj_get
+    test rax,rax
+    jz .scpt_no
+    mov r12,[rax+24]
+    test r12,r12
+    jz .scpt_no
+    mov rbx,[r12+32]
+    test rbx,rbx
+    jz .scpt_no
+    cmp qword ptr [rbx+32],0
+    jne .scpt_no
+    mov rdi,r12
+    call support_count_terms
+    test edx,edx
+    jz .scpt_no
+    mov r12d,eax
+    mov rdi,rbx
+    call support_count_terms
+    test edx,edx
+    jz .scpt_no
+    add eax,r12d
+    jc .scpt_no
+    mov edx,1
+    jmp .scpt_done
+.scpt_no:
+    xor eax,eax
+    xor edx,edx
+.scpt_done:
+    pop r12
+    pop rbx
+    ret
+
+# support_count_terms(rdi=expr) -> eax=unique primitive Region count, edx=1.
+# Geometry and exterior ValueFact are separate facts.  Ordinary f64 relations
+# conservatively union operand Regions; primitive topological selects still own
+# exact cold boundary witnesses.  Binding definitions are expanded once, so a
+# source DAG does not become a runtime tree of duplicate Region discoveries.
 support_count_terms:
     push rbx
     push r12
     push r13
     push r14
+    push r15
     mov r12,rdi
-    call support_resolve_identity_load
-    mov r12,rax
 
-    # Literal +0 is the empty RegionSet. Other constants have full support and
-    # therefore cannot contract the ShapeFact domain here.
     mov rdi,r12
     call expr_literal_f64_bits
     test edx,edx
-    jnz .sct_op
-    test rax,rax
-    jnz .sct_unsupported
+    jnz .sct_load
     xor eax,eax
     mov edx,1
     jmp .sct_done
+
+.sct_load:
+    mov rdi,r12
+    lea rsi,[rip+k_load]
+    mov edx,k_load_end-k_load
+    call obj_get
+    test rax,rax
+    jz .sct_op
+    mov rdi,[rax+8]
+    mov rsi,[rax+16]
+    call find_binding
+    test rax,rax
+    jz .sct_no
+    mov r13,rax
+    cmp dword ptr [r13+16],OP_MAP
+    jne .sct_no
+    mov rdi,r12
+    lea rsi,[rip+k_indices]
+    mov edx,k_indices_end-k_indices
+    call obj_get
+    test rax,rax
+    jz .sct_no
+    mov r14,[rax+24]
+    test r14,r14
+    jz .sct_no
+    cmp qword ptr [r14+32],0
+    jne .sct_no
+    mov r15,qword ptr [rip+tensor_support_coord_shift]
+    mov rdi,r14
+    call support_note_index
+    test eax,eax
+    jz .sct_load_restore_no
+    mov rdi,r13
+    call support_binding_first
+    test edx,edx
+    jnz .sct_load_restore_no
+    test eax,eax
+    jz .sct_load_seen
+    mov rdi,[r13+40]
+    call support_count_terms
+    mov qword ptr [rip+tensor_support_coord_shift],r15
+    jmp .sct_done
+.sct_load_seen:
+    mov qword ptr [rip+tensor_support_coord_shift],r15
+    xor eax,eax
+    mov edx,1
+    jmp .sct_done
+.sct_load_restore_no:
+    mov qword ptr [rip+tensor_support_coord_shift],r15
+    jmp .sct_no
 
 .sct_op:
     mov rdi,r12
@@ -769,117 +1252,105 @@ support_count_terms:
     mov edx,k_op_end-k_op
     call obj_get
     test rax,rax
-    jz .sct_leaf
+    jz .sct_no
     mov r13,rax
-    mov rdi,[r13+8]
-    mov rsi,[r13+16]
-    lea rdx,[rip+v_add]
-    mov ecx,v_add_end-v_add
-    call span_eq
-    test eax,eax
-    jnz .sct_union
-    mov rdi,[r13+8]
-    mov rsi,[r13+16]
-    lea rdx,[rip+v_sub]
-    mov ecx,v_sub_end-v_sub
-    call span_eq
-    test eax,eax
-    jnz .sct_union
-    mov rdi,[r13+8]
-    mov rsi,[r13+16]
-    lea rdx,[rip+v_mul]
-    mov ecx,v_mul_end-v_mul
-    call span_eq
-    test eax,eax
-    jnz .sct_mul
-    jmp .sct_leaf
-.sct_union:
-    mov rdi,r12
-    lea rsi,[rip+k_args]
-    mov edx,k_args_end-k_args
-    call obj_get
-    test rax,rax
-    jz .sct_unsupported
-    mov r14,[rax+24]
-    test r14,r14
-    jz .sct_unsupported
-    mov rbx,[r14+32]
-    test rbx,rbx
-    jz .sct_unsupported
-    cmp qword ptr [rbx+32],0
-    jne .sct_unsupported
-    mov rdi,r14
-    call support_count_terms
-    test edx,edx
-    jz .sct_unsupported
-    mov r13d,eax
-    mov rdi,rbx
-    call support_count_terms
-    test edx,edx
-    jz .sct_unsupported
-    add eax,r13d
-    jc .sct_unsupported
-    mov edx,1
-    jmp .sct_done
-.sct_mul:
-    mov rdi,r12
-    lea rsi,[rip+k_args]
-    mov edx,k_args_end-k_args
-    call obj_get
-    test rax,rax
-    jz .sct_unsupported
-    mov r14,[rax+24]
-    test r14,r14
-    jz .sct_unsupported
-    mov rbx,[r14+32]
-    test rbx,rbx
-    jz .sct_unsupported
-    cmp qword ptr [rbx+32],0
-    jne .sct_unsupported
-    mov rdi,r14
-    call support_positive_finite_literal
-    test eax,eax
-    jnz .sct_mul_right
-    mov rdi,rbx
-    call support_positive_finite_literal
-    test eax,eax
-    jnz .sct_mul_left
-    # If both operands already have proven +0-outside RegionSets, their product
-    # is +0 outside the union. Union is conservative and requires no new runtime
-    # algebra; identical supports canonicalize back to one Region.
-    mov rdi,r14
-    call support_count_terms
-    test edx,edx
-    jz .sct_unsupported
-    mov r13d,eax
-    mov rdi,rbx
-    call support_count_terms
-    test edx,edx
-    jz .sct_unsupported
-    add eax,r13d
-    jc .sct_unsupported
-    mov edx,1
-    jmp .sct_done
-.sct_mul_right:
-    mov rdi,rbx
-    call support_count_terms
-    jmp .sct_done
-.sct_mul_left:
-    mov rdi,r14
-    call support_count_terms
-    jmp .sct_done
-.sct_leaf:
+
     mov rdi,r12
     call support_prepare_leaf
     test eax,eax
-    jz .sct_unsupported
+    jz .sct_args
     mov eax,1
     mov edx,1
     jmp .sct_done
-.sct_unsupported:
+
+.sct_args:
+    mov rdi,r12
+    lea rsi,[rip+k_args]
+    mov edx,k_args_end-k_args
+    call obj_get
+    test rax,rax
+    jz .sct_no
+    mov r14,[rax+24]
+    test r14,r14
+    jz .sct_no
+
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_sqrt]; mov ecx,v_sqrt_end-v_sqrt; call span_eq
+    test eax,eax; jnz .sct_unary
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_square]; mov ecx,v_square_end-v_square; call span_eq
+    test eax,eax; jnz .sct_unary
+
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_select]; mov ecx,v_select_end-v_select; call span_eq
+    test eax,eax; jz .sct_binary_probe
+    mov r15,[r14+32]
+    test r15,r15
+    jz .sct_no
+    mov rbx,[r15+32]
+    test rbx,rbx
+    jz .sct_no
+    cmp qword ptr [rbx+32],0
+    jne .sct_no
+    mov rdi,r14
+    call support_count_predicate_terms
+    test edx,edx
+    jz .sct_no
+    mov r13d,eax
+    mov rdi,r15
+    call support_count_terms
+    test edx,edx
+    jz .sct_no
+    add r13d,eax
+    jc .sct_no
+    mov rdi,rbx
+    call support_count_terms
+    test edx,edx
+    jz .sct_no
+    add eax,r13d
+    jc .sct_no
+    mov edx,1
+    jmp .sct_done
+
+.sct_binary_probe:
+    xor ebx,ebx
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_add]; mov ecx,v_add_end-v_add; call span_eq
+    test eax,eax; jnz .sct_binary
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_sub]; mov ecx,v_sub_end-v_sub; call span_eq
+    test eax,eax; jnz .sct_binary
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_mul]; mov ecx,v_mul_end-v_mul; call span_eq
+    test eax,eax; jnz .sct_binary
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_div]; mov ecx,v_div_end-v_div; call span_eq
+    test eax,eax; jz .sct_no
+.sct_binary:
+    mov r15,[r14+32]
+    test r15,r15
+    jz .sct_no
+    cmp qword ptr [r15+32],0
+    jne .sct_no
+    mov rdi,r14
+    call support_count_terms
+    test edx,edx
+    jz .sct_no
+    mov r13d,eax
+    mov rdi,r15
+    call support_count_terms
+    test edx,edx
+    jz .sct_no
+    add eax,r13d
+    jc .sct_no
+    mov edx,1
+    jmp .sct_done
+
+.sct_unary:
+    cmp qword ptr [r14+32],0
+    jne .sct_no
+    mov rdi,r14
+    call support_count_terms
+    jmp .sct_done
+
+.sct_no:
     xor eax,eax
     xor edx,edx
 .sct_done:
+    pop r15
     pop r14
     pop r13
     pop r12
@@ -887,9 +1358,9 @@ support_count_terms:
     ret
 
 # tensor_support_analyze_root(rdi=reduction expression).
-# SupportFact is a canonical RegionSet algebra, not a one-interval mode. AOT
-# proves an arbitrary source-derived union of contiguous leaf supports; runtime
-# discovers their exact IEEE boundaries and canonicalizes overlap/adjacency.
+# The final reduction may contract only when its exact exterior ValueFact is
+# +0.  Intermediate bindings may carry any exact exterior f64 value; their
+# RegionSets remain the places where the value may differ from that background.
 tensor_support_analyze_root:
     push r12
     mov dword ptr [rip+tensor_support_mode],SUPPORT_NONE
@@ -897,17 +1368,29 @@ tensor_support_analyze_root:
     mov qword ptr [rip+tensor_support_predicate],0
     mov qword ptr [rip+tensor_support_basin],0
     mov dword ptr [rip+tensor_support_negate],0
+    mov qword ptr [rip+tensor_support_halo_elems],0
+    mov qword ptr [rip+tensor_support_coord_shift],0
     mov r12,rdi
+
+    # Exterior ValueFact first.  Exact +0 is the only identity that can be
+    # physically erased from a strict sum without altering any IEEE bit.
+    mov rdi,r12
+    call support_exterior_fact
+    test edx,edx
+    jz .tsa_regions_done
+    test rax,rax
+    jnz .tsa_regions_done
+
+    # Geometry is a separate pass so binding identity can be deduplicated
+    # without sacrificing exterior-value propagation.
+    call support_reset_binding_seen
+    mov qword ptr [rip+tensor_support_coord_shift],0
+    mov rdi,r12
     call support_count_terms
     test edx,edx
     jz .tsa_regions_done
     test eax,eax
     jz .tsa_regions_empty
-    # Scalar witness uses signed CVTSI2SD. Keep boundary discovery inside the
-    # exact signed coordinate domain; this is a physical proof boundary.
-    mov rcx,qword ptr [rip+tensor_shape_extent_max]
-    test rcx,rcx
-    js .tsa_regions_done
     mov dword ptr [rip+tensor_support_count],eax
     mov dword ptr [rip+tensor_support_mode],SUPPORT_INTERVAL
     jmp .tsa_regions_done
@@ -920,188 +1403,303 @@ tensor_support_analyze_root:
 # Emit one exact leaf witness after support_prepare_leaf established predicate
 # and basin. ABI: R8=i, R9=n; EAX=ordered predicate; XMM0=single-basin value.
 tensor_emit_support_leaf:
-    mov dword ptr [rip+emit_gpr_mask],0x00000CC2  # RCX,RSI,RDI,R10,R11
-    mov dword ptr [rip+emit_xmm_mask],0x00000FFC  # XMM2..XMM11; XMM0/1 reserved
-    mov rdi,qword ptr [rip+tensor_support_basin]
-    xor esi,esi
+    push rbx; push r12; push r13; push r14
+    mov dword ptr [rip+emit_gpr_mask],0x00000CC2
+    mov dword ptr [rip+emit_xmm_mask],0x00000FFC
+    mov rdi,[rip+tensor_support_basin]; xor esi,esi
     call emit_float_reg
-    test eax,eax
-    jnz .tesl_fail
+    test eax,eax; jnz .tesl_fail
+
+    # The completed witness is already one operand of the PredicateFact.
+    # Consume it directly rather than re-expanding the same map DAG.
+    mov rdi,[rip+tensor_support_predicate]
+    lea rsi,[rip+k_args]; mov edx,k_args_end-k_args; call obj_get
+    test rax,rax; jz .tesl_fail
+    mov r12,[rax+24]
+    xor r13d,r13d                  # lhs is witness XMM0
+    cmp r12,[rip+tensor_support_basin]; je .tesl_lhs_witness
+    mov r13d,1                    # lhs constant XMM1, rhs witness XMM0
+    mov rdi,r12; jmp .tesl_other
+.tesl_lhs_witness:
+    mov rdi,[r12+32]
+.tesl_other:
+    mov esi,1; call emit_float_reg
+    test eax,eax; jnz .tesl_fail
+    mov rdi,[rip+tensor_support_predicate]
+    lea rsi,[rip+k_op]; mov edx,k_op_end-k_op; call obj_get
+    test rax,rax; jz .tesl_fail
+    mov r14,rax
+    lea rbx,[rip+support_compare_relations]
+.tesl_relation:
+    mov rdi,[r14+8]; mov rsi,[r14+16]
+    mov rdx,[rbx]; mov ecx,[rbx+8]; call span_eq
+    test eax,eax; jnz .tesl_compare
+    add rbx,16
+    cmp qword ptr [rbx],0; jne .tesl_relation
+    jmp .tesl_fail
+.tesl_compare:
+    mov ecx,[rbx+12]; xor edi,edi
+    mov esi,r13d; mov edx,r13d; xor edx,1
+    call gen_ucomisd_setcc          # sole ordered IEEE PredicateFact recipe
     cmp dword ptr [rip+tensor_support_negate],0
-    je .tesl_witness_ready
-    # Negate the scalar witness exactly by flipping the IEEE sign bit:
-    # movq rax,xmm0 ; btc rax,63 ; movq xmm0,rax.
+    je .tesl_return
+    # Preserve EAX truth while normalizing the witness by exact sign-bit flip.
     mov edi,0x66; call emit_u8
     mov edi,0x48; call emit_u8
-    mov edi,0x0F; call emit_u8
-    mov edi,0x7E; call emit_u8
-    mov edi,0xC0; call emit_u8
+    mov edi,0x0f; call emit_u8
+    mov edi,0x7e; call emit_u8
+    mov edi,0xc2; call emit_u8      # movq rdx,xmm0
     mov edi,0x48; call emit_u8
-    mov edi,0x0F; call emit_u8
-    mov edi,0xBA; call emit_u8
-    mov edi,0xF8; call emit_u8
-    mov edi,0x3F; call emit_u8
+    mov edi,0x0f; call emit_u8
+    mov edi,0xba; call emit_u8
+    mov edi,0xfa; call emit_u8
+    mov edi,0x3f; call emit_u8      # btc rdx,63
     mov edi,0x66; call emit_u8
     mov edi,0x48; call emit_u8
-    mov edi,0x0F; call emit_u8
-    mov edi,0x6E; call emit_u8
-    mov edi,0xC0; call emit_u8
-.tesl_witness_ready:
-    mov rdi,qword ptr [rip+tensor_support_predicate]
-    xor esi,esi
-    call emit_int_reg
-    test eax,eax
-    jnz .tesl_fail
-    # Preserve ordered IEEE semantics: LT/LE SETcc alone treats unordered as
-    # below, so predicate result is masked with SETNP.
-    mov edi,0x0F; call emit_u8
-    mov edi,0x9B; call emit_u8          # SETNP dl
-    mov edi,0xC2; call emit_u8
-    mov edi,0x0F; call emit_u8
-    mov edi,0xB6; call emit_u8          # MOVZX edx,dl
-    mov edi,0xD2; call emit_u8
-    mov edi,0x21; call emit_u8          # AND eax,edx
-    mov edi,0xD0; call emit_u8
-    mov edi,0xC3; call emit_u8          # RET
-    xor eax,eax
-    ret
+    mov edi,0x0f; call emit_u8
+    mov edi,0x6e; call emit_u8
+    mov edi,0xc2; call emit_u8      # movq xmm0,rdx
+.tesl_return:
+    mov edi,0xc3; call emit_u8
+    xor eax,eax; jmp .tesl_done
 .tesl_fail:
     mov eax,1
-    ret
+.tesl_done:
+    pop r14; pop r13; pop r12; pop rbx; ret
+.pushsection .rodata
+.p2align 3
+support_compare_relations:
+    .quad v_lt; .long v_lt_end-v_lt,0x92
+    .quad v_le; .long v_le_end-v_le,0x96
+    .quad v_gt; .long v_gt_end-v_gt,0x97
+    .quad v_ge; .long v_ge_end-v_ge,0x93
+    .quad 0
+.popsection
 
-# support_emit_terms(rdi=expr) emits leaf witnesses in the same DFS order used
-# by support_count_terms and patches the source-derived dispatcher entry.
-support_emit_terms:
+# support_emit_leaf_current(rdi=primitive select) -> eax 0/1.  The same
+# source-derived dispatcher is patched once per unique primitive SupportFact.
+support_emit_leaf_current:
     push rbx
     push r12
     push r13
     push r14
     mov r12,rdi
-    call support_resolve_identity_load
-    mov r12,rax
+    mov rdi,r12
+    call support_prepare_leaf
+    test eax,eax
+    jz .selc_fail
+    mov ecx,dword ptr [rip+tensor_support_emit_index]
+    cmp ecx,dword ptr [rip+tensor_support_count]
+    jae .selc_fail
+    mov rax,rcx
+    imul rax,13
+    mov rdx,qword ptr [rip+tensor_support_dispatch_base]
+    lea rbx,[rdx+rax+9]
+    lea r13,[rdx+rax+13]
+    mov r14,qword ptr [rip+emit_ptr]
+    sub r14,r13
+    mov dword ptr [rbx],r14d
+    inc dword ptr [rip+tensor_support_emit_index]
+    call tensor_emit_support_leaf
+    jmp .selc_done
+.selc_fail:
+    mov eax,1
+.selc_done:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+support_emit_predicate_terms:
+    push rbx
+    push r12
+    mov r12,rdi
+    mov rdi,r12
+    lea rsi,[rip+k_args]
+    mov edx,k_args_end-k_args
+    call obj_get
+    test rax,rax
+    jz .sept_fail
+    mov r12,[rax+24]
+    test r12,r12
+    jz .sept_fail
+    mov rbx,[r12+32]
+    test rbx,rbx
+    jz .sept_fail
+    cmp qword ptr [rbx+32],0
+    jne .sept_fail
+    mov rdi,r12
+    call support_emit_terms
+    test eax,eax
+    jnz .sept_fail
+    mov rdi,rbx
+    call support_emit_terms
+    jmp .sept_done
+.sept_fail:
+    mov eax,1
+.sept_done:
+    pop r12
+    pop rbx
+    ret
+
+# support_emit_terms(rdi=expr) mirrors support_count_terms.  Binding identity is
+# deduplicated with the same source-sized visitation vector, so runtime boundary
+# discovery is proportional to unique primitive Regions rather than expression
+# occurrence count.
+support_emit_terms:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r12,rdi
+
     mov rdi,r12
     call expr_literal_f64_bits
     test edx,edx
-    jnz .set_op
+    jnz .set_load
+    xor eax,eax
+    jmp .set_done
+
+.set_load:
+    mov rdi,r12
+    lea rsi,[rip+k_load]
+    mov edx,k_load_end-k_load
+    call obj_get
     test rax,rax
-    jz .set_ok                         # empty RegionSet contributes no leaf
+    jz .set_op
+    mov rdi,[rax+8]
+    mov rsi,[rax+16]
+    call find_binding
+    test rax,rax
+    jz .set_fail
+    mov r13,rax
+    cmp dword ptr [r13+16],OP_MAP
+    jne .set_fail
+    mov rdi,r12
+    lea rsi,[rip+k_indices]
+    mov edx,k_indices_end-k_indices
+    call obj_get
+    test rax,rax
+    jz .set_fail
+    mov r14,[rax+24]
+    test r14,r14
+    jz .set_fail
+    cmp qword ptr [r14+32],0
+    jne .set_fail
+    mov r15,qword ptr [rip+tensor_support_coord_shift]
+    mov rdi,r14
+    call support_note_index
+    test eax,eax
+    jz .set_load_restore_fail
+    mov rdi,r13
+    call support_binding_first
+    test edx,edx
+    jnz .set_load_restore_fail
+    test eax,eax
+    jz .set_load_seen
+    mov rdi,[r13+40]
+    call support_emit_terms
+    mov qword ptr [rip+tensor_support_coord_shift],r15
+    jmp .set_done
+.set_load_seen:
+    mov qword ptr [rip+tensor_support_coord_shift],r15
+    xor eax,eax
+    jmp .set_done
+.set_load_restore_fail:
+    mov qword ptr [rip+tensor_support_coord_shift],r15
     jmp .set_fail
+
 .set_op:
     mov rdi,r12
     lea rsi,[rip+k_op]
     mov edx,k_op_end-k_op
     call obj_get
     test rax,rax
-    jz .set_leaf
+    jz .set_fail
     mov r13,rax
-    mov rdi,[r13+8]
-    mov rsi,[r13+16]
-    lea rdx,[rip+v_add]
-    mov ecx,v_add_end-v_add
-    call span_eq
-    test eax,eax
-    jnz .set_union
-    mov rdi,[r13+8]
-    mov rsi,[r13+16]
-    lea rdx,[rip+v_sub]
-    mov ecx,v_sub_end-v_sub
-    call span_eq
-    test eax,eax
-    jnz .set_union
-    mov rdi,[r13+8]
-    mov rsi,[r13+16]
-    lea rdx,[rip+v_mul]
-    mov ecx,v_mul_end-v_mul
-    call span_eq
-    test eax,eax
-    jnz .set_mul
-    jmp .set_leaf
-.set_union:
-    mov rdi,r12
-    lea rsi,[rip+k_args]
-    mov edx,k_args_end-k_args
-    call obj_get
-    test rax,rax
-    jz .set_fail
-    mov r14,[rax+24]
-    test r14,r14
-    jz .set_fail
-    mov rbx,[r14+32]
-    test rbx,rbx
-    jz .set_fail
-    cmp qword ptr [rbx+32],0
-    jne .set_fail
-    mov rdi,r14
-    call support_emit_terms
-    test eax,eax
-    jnz .set_fail
-    mov rdi,rbx
-    call support_emit_terms
-    jmp .set_done
-.set_mul:
-    mov rdi,r12
-    lea rsi,[rip+k_args]
-    mov edx,k_args_end-k_args
-    call obj_get
-    test rax,rax
-    jz .set_fail
-    mov r14,[rax+24]
-    test r14,r14
-    jz .set_fail
-    mov rbx,[r14+32]
-    test rbx,rbx
-    jz .set_fail
-    cmp qword ptr [rbx+32],0
-    jne .set_fail
-    mov rdi,r14
-    call support_positive_finite_literal
-    test eax,eax
-    jnz .set_mul_right
-    mov rdi,rbx
-    call support_positive_finite_literal
-    test eax,eax
-    jnz .set_mul_left
-    mov rdi,r14
-    call support_emit_terms
-    test eax,eax
-    jnz .set_fail
-    mov rdi,rbx
-    call support_emit_terms
-    jmp .set_done
-.set_mul_right:
-    mov rdi,rbx
-    call support_emit_terms
-    jmp .set_done
-.set_mul_left:
-    mov rdi,r14
-    call support_emit_terms
-    jmp .set_done
-.set_leaf:
+
     mov rdi,r12
     call support_prepare_leaf
     test eax,eax
+    jz .set_args
+    mov rdi,r12
+    call support_emit_leaf_current
+    jmp .set_done
+
+.set_args:
+    mov rdi,r12
+    lea rsi,[rip+k_args]
+    mov edx,k_args_end-k_args
+    call obj_get
+    test rax,rax
     jz .set_fail
-    # Patch this dispatcher's JE rel32 to the current leaf body.
-    mov ecx,dword ptr [rip+tensor_support_emit_index]
-    cmp ecx,dword ptr [rip+tensor_support_count]
-    jae .set_fail
-    mov rax,rcx
-    imul rax,13
-    mov rdx,qword ptr [rip+tensor_support_dispatch_base]
-    lea rbx,[rdx+rax+9]                 # rel32 field
-    lea r13,[rdx+rax+13]                # next instruction
-    mov r14,qword ptr [rip+emit_ptr]
-    sub r14,r13
-    mov dword ptr [rbx],r14d
-    inc dword ptr [rip+tensor_support_emit_index]
-    call tensor_emit_support_leaf
+    mov r14,[rax+24]
+    test r14,r14
+    jz .set_fail
+
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_sqrt]; mov ecx,v_sqrt_end-v_sqrt; call span_eq
+    test eax,eax; jnz .set_unary
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_square]; mov ecx,v_square_end-v_square; call span_eq
+    test eax,eax; jnz .set_unary
+
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_select]; mov ecx,v_select_end-v_select; call span_eq
+    test eax,eax; jz .set_binary_probe
+    mov r15,[r14+32]
+    test r15,r15
+    jz .set_fail
+    mov rbx,[r15+32]
+    test rbx,rbx
+    jz .set_fail
+    cmp qword ptr [rbx+32],0
+    jne .set_fail
+    mov rdi,r14
+    call support_emit_predicate_terms
+    test eax,eax
+    jnz .set_fail
+    mov rdi,r15
+    call support_emit_terms
+    test eax,eax
+    jnz .set_fail
+    mov rdi,rbx
+    call support_emit_terms
     jmp .set_done
-.set_ok:
-    xor eax,eax
+
+.set_binary_probe:
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_add]; mov ecx,v_add_end-v_add; call span_eq
+    test eax,eax; jnz .set_binary
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_sub]; mov ecx,v_sub_end-v_sub; call span_eq
+    test eax,eax; jnz .set_binary
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_mul]; mov ecx,v_mul_end-v_mul; call span_eq
+    test eax,eax; jnz .set_binary
+    mov rdi,[r13+8]; mov rsi,[r13+16]; lea rdx,[rip+v_div]; mov ecx,v_div_end-v_div; call span_eq
+    test eax,eax; jz .set_fail
+.set_binary:
+    mov r15,[r14+32]
+    test r15,r15
+    jz .set_fail
+    cmp qword ptr [r15+32],0
+    jne .set_fail
+    mov rdi,r14
+    call support_emit_terms
+    test eax,eax
+    jnz .set_fail
+    mov rdi,r15
+    call support_emit_terms
     jmp .set_done
+
+.set_unary:
+    cmp qword ptr [r14+32],0
+    jne .set_fail
+    mov rdi,r14
+    call support_emit_terms
+    jmp .set_done
+
 .set_fail:
     mov eax,1
 .set_done:
+    pop r15
     pop r14
     pop r13
     pop r12
@@ -1150,6 +1748,8 @@ tensor_emit_support_probe:
     mov edi,0x31; call emit_u8           # XOR eax,eax
     mov edi,0xC0; call emit_u8
     mov edi,0xC3; call emit_u8           # RET for invalid leaf index
+    call support_reset_binding_seen
+    mov qword ptr [rip+tensor_support_coord_shift],0
     mov rdi,qword ptr [rip+tensor_reduce_binding]
     mov rdi,qword ptr [rdi+40]
     call support_emit_terms
@@ -1170,3 +1770,19 @@ tensor_emit_support_probe:
     pop r12
     pop rbx
     ret
+
+.pushsection .bss
+.p2align 3
+tensor_support_mode:.skip 4
+tensor_support_count:.skip 4
+tensor_support_emit_index:.skip 4
+tensor_support_negate:.skip 4
+.p2align 3
+tensor_support_predicate:.skip 8
+tensor_support_basin:.skip 8
+tensor_support_dispatch_base:.skip 8
+tensor_support_halo_elems:.skip 8
+tensor_support_coord_shift:.skip 8
+tensor_binding_uses_ptr:.skip 8
+tensor_binding_expanded_ptr:.skip 8
+.popsection

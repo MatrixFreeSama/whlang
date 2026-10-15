@@ -1,0 +1,59 @@
+name: Publish verified release
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'dist/Wheelchair-*.zip'
+      - 'dist/Wheelchair-*.zip.sha256'
+      - '.github/workflows/publish-release.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: publish-release
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify archive and exact production tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive=$(find dist -maxdepth 1 -name 'Wheelchair-*.zip' | sort -V | tail -1)
+          version=$(basename "$archive" .zip)
+          version=${version#Wheelchair-}
+          echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+          (cd dist && sha256sum -c "Wheelchair-$version.zip.sha256")
+          python3 - "$archive" <<'PY'
+          import pathlib, sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              assert z.testzip() is None
+              members = {i.filename.split('/', 1)[1]: z.read(i) for i in z.infolist() if not i.is_dir()}
+          root = pathlib.Path('main')
+          files = {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob('*') if p.is_file()}
+          assert members == files, 'main/ does not exactly match the production archive'
+          print(f'Verified {len(files)} production files')
+          PY
+          (cd main && sha256sum -c SHA256SUMS)
+          cp -a main "$RUNNER_TEMP/wheelchair-rebuild"
+          (cd "$RUNNER_TEMP/wheelchair-rebuild" && sh build.sh)
+          for binary in main/bin/*; do
+            cmp "$binary" "$RUNNER_TEMP/wheelchair-rebuild/bin/$(basename "$binary")"
+          done
+      - name: Publish release and checksum
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="v$RELEASE_VERSION"
+          gh release create "$tag" \
+            "dist/Wheelchair-$RELEASE_VERSION.zip" \
+            "dist/Wheelchair-$RELEASE_VERSION.zip.sha256" \
+            "dist/Wheelchair-$RELEASE_VERSION-report.md" \
+            --verify-tag=false --target "$GITHUB_SHA" \
+            --title "Wheelchair $RELEASE_VERSION" \
+            --notes-file "dist/RELEASE_NOTES_${RELEASE_VERSION//./_}.md" \
+            --latest

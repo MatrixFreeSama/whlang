@@ -93,6 +93,9 @@ surface_field_lower_to_json:
     mov rdx,rax; shl rdx,2
     mov [rip+sfh_delta_temp],rcx; add rcx,rdx
     mov [rip+sfh_periodic_temp],rcx
+    mov qword ptr [rip+sfh_float_type_ptr],0
+    mov qword ptr [rip+sfh_float_type_len],0
+    mov qword ptr [rip+sfh_float_precision],0
     mov qword ptr [rip+sfh_field_periodic_ptr],0
     mov qword ptr [rip+sfh_access_delta_ptr],0
     mov qword ptr [rip+sfh_access_delta_stride],0
@@ -355,7 +358,7 @@ sfh_parse_reduce_decl:
     lea rdi,[rip+tok_rbrack]; mov esi,1; xor edx,edx; call s_expect_token
     lea rdi,[rip+tok_colon]; mov esi,1; xor edx,edx; call s_expect_token
     call s_parse_name; test edx,edx; jnz .sfh_prd_fail
-    mov rdi,rax; mov rsi,rcx; lea rdx,[rip+sfh_ty_f32]; mov ecx,3; call s_span_eq
+    mov rdi,rax; mov rsi,rcx; call sfh_accept_float_type
     test eax,eax; jz .sfh_prd_type
     lea rdi,[rip+tok_eq1]; mov esi,1; xor edx,edx; call s_expect_token
     xor edi,edi; call s_parse_expr; test rax,rax; jz .sfh_prd_expr
@@ -502,7 +505,7 @@ sfh_parse_field_decl:
 
     lea rdi,[rip+tok_colon]; mov esi,1; xor edx,edx; call s_expect_token
     call s_parse_name; test edx,edx; jnz .sfh_pfd_fail
-    mov rdi,rax; mov rsi,rcx; lea rdx,[rip+sfh_ty_f32]; mov ecx,3; call s_span_eq
+    mov rdi,rax; mov rsi,rcx; call sfh_accept_float_type
     test eax,eax; jnz 1f
     mov dword ptr [rip+surface_field_error_code],SFH_ERR_TYPE; jmp .sfh_pfd_fail
 1:  inc dword ptr [rip+sfh_field_count]
@@ -840,8 +843,13 @@ sfh_compute_need:
     cmp eax,OP_ADD; je .sfh_cn_bin
     cmp eax,OP_SUB; je .sfh_cn_bin
     cmp eax,OP_MUL; je .sfh_cn_bin
-    cmp eax,OP_DIV; jne .sfh_cn_fail
+    cmp eax,OP_DIV; je .sfh_cn_bin
+    jmp .sfh_cn_fail
 .sfh_cn_unary:
+    cmp dword ptr [rbx+SN_OP],OP_SIN; je .sfh_cn_unary_ok
+    cmp dword ptr [rbx+SN_OP],OP_COS; je .sfh_cn_unary_ok
+    cmp dword ptr [rbx+SN_OP],OP_EXP; je .sfh_cn_unary_ok
+    cmp dword ptr [rbx+SN_OP],OP_LOG; je .sfh_cn_unary_ok
     cmp dword ptr [rbx+SN_OP],OP_SQRT; je .sfh_cn_unary_ok
     cmp dword ptr [rbx+SN_OP],OP_SQUARE; je .sfh_cn_unary_ok
     cmp dword ptr [rbx+SN_OP],OP_TRUNC; jne .sfh_cn_fail
@@ -903,6 +911,10 @@ sfh_compile_node:
     jmp .sfh_cc_exit
 .sfh_cc_unary:
     mov r15d,dword ptr [rbx+SN_OP]
+    cmp r15d,OP_SIN; je .sfh_cc_unary_ok
+    cmp r15d,OP_COS; je .sfh_cc_unary_ok
+    cmp r15d,OP_EXP; je .sfh_cc_unary_ok
+    cmp r15d,OP_LOG; je .sfh_cc_unary_ok
     cmp r15d,OP_SQRT; je .sfh_cc_unary_ok
     cmp r15d,OP_SQUARE; je .sfh_cc_unary_ok
     cmp r15d,OP_TRUNC; jne .sfh_cc_fail
@@ -1039,9 +1051,17 @@ sfh_emit_unary:
     push rbx; push r12; push r13
     mov ebx,edi; mov r12d,esi; mov r13d,edx
     call sfh_op_prefix
+    cmp ebx,OP_SIN; je .sfh_eu_sin
+    cmp ebx,OP_COS; je .sfh_eu_cos
+    cmp ebx,OP_EXP; je .sfh_eu_exp
+    cmp ebx,OP_LOG; je .sfh_eu_log
     cmp ebx,OP_SQRT; je .sfh_eu_sqrt
     cmp ebx,OP_TRUNC; je .sfh_eu_trunc
     jmp .sfh_eu_fail
+.sfh_eu_sin: lea rdi,[rip+sfh_j_sin]; jmp .sfh_eu_name
+.sfh_eu_cos: lea rdi,[rip+sfh_j_cos]; jmp .sfh_eu_name
+.sfh_eu_exp: lea rdi,[rip+sfh_j_exp]; jmp .sfh_eu_name
+.sfh_eu_log: lea rdi,[rip+sfh_j_log]; jmp .sfh_eu_name
 .sfh_eu_sqrt: lea rdi,[rip+sfh_j_sqrt]; jmp .sfh_eu_name
 .sfh_eu_trunc: lea rdi,[rip+sfh_j_trunc]
 .sfh_eu_name: call s_out_cstr
@@ -1132,7 +1152,7 @@ sfh_emit_final_json:
 .sfh_efj_mode_emit:
     call s_out_quote_span
     lea rdi,[rip+sfh_j_field_type]; call s_out_cstr
-    lea rdi,[rip+sfh_s_f32]; mov esi,3; call s_out_quote_span
+    mov rdi,[rip+sfh_float_type_ptr]; mov rsi,[rip+sfh_float_type_len]; call s_out_quote_span
     lea rdi,[rip+sfh_j_field_rank]; call s_out_cstr
     mov edi,dword ptr [rip+sfh_domain_rank]; call s_emit_u64_decimal
     mov dil,'}'; call s_out_byte
@@ -1209,11 +1229,9 @@ sfh_kw_parallel:.ascii "parallel"
 sfh_kw_for:.ascii "for"
 sfh_kw_sum:.ascii "sum"
 sfh_ty_u64:.ascii "u64"
-sfh_ty_f32:.ascii "f32"
 sfh_s_input:.ascii "input"
 sfh_s_output:.ascii "output"
 sfh_s_inout:.ascii "inout"
-sfh_s_f32:.ascii "f32"
 
 sfh_j_load:.asciz "{\"op\":\"load\",\"access\":"
 sfh_j_const:.asciz "{\"op\":\"const\",\"value\":"
@@ -1221,6 +1239,10 @@ sfh_j_add:.asciz "{\"op\":\"add\",\"a\":"
 sfh_j_sub:.asciz "{\"op\":\"sub\",\"a\":"
 sfh_j_mul:.asciz "{\"op\":\"mul\",\"a\":"
 sfh_j_div:.asciz "{\"op\":\"div\",\"a\":"
+sfh_j_sin:.asciz "{\"op\":\"sin\",\"a\":"
+sfh_j_cos:.asciz "{\"op\":\"cos\",\"a\":"
+sfh_j_exp:.asciz "{\"op\":\"exp\",\"a\":"
+sfh_j_log:.asciz "{\"op\":\"log\",\"a\":"
 sfh_j_sqrt:.asciz "{\"op\":\"sqrt\",\"a\":"
 sfh_j_trunc:.asciz "{\"op\":\"trunc\",\"a\":"
 sfh_j_b:.asciz ",\"b\":"
@@ -1291,3 +1313,25 @@ sfh_access_delta_stride:.skip 8
 .p2align 6
 sfh_ops_buf:.skip 8
 sfh_ops_cap:.skip 8
+
+.text
+.include "compiler/float_type_fact.inc"
+FLOAT_TYPE_PRECISION sfh_parse_float_precision_span
+sfh_accept_float_type:
+    push rbx; push r12
+    mov rbx,rdi; mov r12,rsi
+    call sfh_parse_float_precision_span
+    test rax,rax; jz 9f
+    cmp qword ptr [rip+sfh_float_precision],0; je 1f
+    cmp rax,qword ptr [rip+sfh_float_precision]; jne 9f
+    jmp 2f
+1:  mov [rip+sfh_float_precision],rax
+    mov [rip+sfh_float_type_ptr],rbx
+    mov [rip+sfh_float_type_len],r12
+2:  mov eax,1; jmp 3f
+9:  xor eax,eax
+3:  pop r12; pop rbx; ret
+.bss
+sfh_float_type_ptr: .skip 8
+sfh_float_type_len: .skip 8
+sfh_float_precision: .skip 8

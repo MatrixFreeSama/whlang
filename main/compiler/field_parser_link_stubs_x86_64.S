@@ -43,6 +43,3 @@ group_cardinality: .skip 8
 .global synthesize_resource_schedule
 synthesize_resource_schedule:
     ret
-.global synthesize_group_fact
-synthesize_group_fact:
-    ret

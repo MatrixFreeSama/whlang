@@ -57,7 +57,7 @@ cat > "$OUT" <<EOF
     "gr_release_base": 0,
     "gr_template_end": $END
   },
-  "metadata_layout": "indegree[N],first_out[N],entry_offsets[N],work_ticks[N],edge_v[E],next_edge[E],edge_transfer_bytes[E:qword],realization_tag[N],fabric_descriptor[N:48]",
+  "metadata_layout": "indegree[N],first_out[N],entry_offsets[N],work_ticks[N],edge_v[E],next_edge[E],edge_transfer_bytes[E:qword],realization_tag[N],fabric_descriptor[N:48],work_fact[N:16]",
   "template_size": $SIZE
 }
 EOF

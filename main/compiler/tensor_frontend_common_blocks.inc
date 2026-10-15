@@ -1,3 +1,12 @@
+.equ SUPPORT_NONE, 0
+.equ SUPPORT_INTERVAL, 1
+.equ SUPPORT_EMPTY, 2
+.equ SUPPORT_SHAPE_CONST, 1
+.equ SUPPORT_SHAPE_INC, 2
+.equ SUPPORT_SHAPE_DEC, 3
+.equ SUPPORT_SHAPE_BASIN, 4
+.equ SUPPORT_SHAPE_CAP, 5
+
 # Wheelchair tensor frontend common bodies.
 # Compile-time single authority; wrappers retain only semantic entry labels.
 
@@ -966,9 +975,8 @@
     mov eax,r13d; and eax,7; shl eax,3
     mov ecx,edx; and ecx,7; or eax,ecx; or eax,0xC0
     mov edi,eax; call emit_u8
-    mov edi,0x0F; call emit_u8
-    mov edi,r12d; call emit_u8
-    mov edi,0xC0; call emit_u8
+    mov edi,r12d; call physical_fp_setcc_fragment
+    mov rdi,rax; mov esi,ecx; call emit_bytes
     mov eax,ebx; shr eax,3; and eax,1; shl eax,2
     test eax,eax
     jz .gusc_movzx_no_rex
@@ -1154,7 +1162,8 @@
 
 # expr_is_float_value(rdi=expr) -> eax=1 when the structured expression
 # denotes an f64 ValueFact, else 0.  This is semantic type closure, not a
-# workload route: map values are f64 and arithmetic/select preserve that type.
+# workload route: arithmetic follows its typed operand, and select follows
+# its value arm rather than its predicate.
 .endm
 
 .macro TFC_expr_is_float_value
@@ -1175,28 +1184,29 @@
     je .eifv_yes
     jmp .eifv_no
 .eifv_op:
+    mov rdi,rbx; lea rsi,[rip+k_var]; mov edx,k_var_end-k_var; call obj_get
+    test rax,rax; jz .eifv_operator
+    mov rdi,[rax+8]; mov rsi,[rax+16]; call tensor_find_input
+    cmp edx,TYPE_F64; je .eifv_yes
+    jmp .eifv_no
+ .eifv_operator:
     mov rdi,rbx; lea rsi,[rip+k_op]; mov edx,k_op_end-k_op; call obj_get
-    test rax,rax
-    jz .eifv_no
+    test rax,rax; jz .eifv_no
     mov r12,rax
     mov rdi,[r12+8]; mov rsi,[r12+16]; lea rdx,[rip+v_cast]; mov ecx,v_cast_end-v_cast; call span_eq
     test eax,eax; jnz .eifv_yes
-    mov rdi,[r12+8]; mov rsi,[r12+16]; lea rdx,[rip+v_sqrt]; mov ecx,v_sqrt_end-v_sqrt; call span_eq
-    test eax,eax; jnz .eifv_yes
-    mov rdi,[r12+8]; mov rsi,[r12+16]; lea rdx,[rip+v_square]; mov ecx,v_square_end-v_square; call span_eq
-    test eax,eax; jnz .eifv_yes
-    mov rdi,[r12+8]; mov rsi,[r12+16]; lea rdx,[rip+v_trunc]; mov ecx,v_trunc_end-v_trunc; call span_eq
-    test eax,eax; jnz .eifv_yes
-    mov rdi,[r12+8]; mov rsi,[r12+16]; lea rdx,[rip+v_add]; mov ecx,v_add_end-v_add; call span_eq
-    test eax,eax; jnz .eifv_yes
-    mov rdi,[r12+8]; mov rsi,[r12+16]; lea rdx,[rip+v_sub]; mov ecx,v_sub_end-v_sub; call span_eq
-    test eax,eax; jnz .eifv_yes
-    mov rdi,[r12+8]; mov rsi,[r12+16]; lea rdx,[rip+v_mul]; mov ecx,v_mul_end-v_mul; call span_eq
-    test eax,eax; jnz .eifv_yes
-    mov rdi,[r12+8]; mov rsi,[r12+16]; lea rdx,[rip+v_div]; mov ecx,v_div_end-v_div; call span_eq
-    test eax,eax; jnz .eifv_yes
+.eifv_args:
     mov rdi,[r12+8]; mov rsi,[r12+16]; lea rdx,[rip+v_select]; mov ecx,v_select_end-v_select; call span_eq
-    test eax,eax; jnz .eifv_yes
+    push rax
+    mov rdi,rbx; lea rsi,[rip+k_args]; mov edx,k_args_end-k_args; call obj_get
+    pop rcx
+    test rax,rax; jz .eifv_no
+    mov rdi,[rax+24]; test rdi,rdi; jz .eifv_no
+    test ecx,ecx; jz .eifv_child
+    mov rdi,[rdi+32]; test rdi,rdi; jz .eifv_no
+.eifv_child:
+    call expr_is_float_value
+    jmp .eifv_done
 .eifv_no:
     xor eax,eax
     jmp .eifv_done
@@ -1307,6 +1317,13 @@
     mov rsi,rax; mov edi,r13d; call gen_load_f64_bits
     xor eax,eax; jmp .efr_done
 .efr_load:
+    mov rdi,r12; lea rsi,[rip+k_var]; mov edx,k_var_end-k_var; call obj_get
+    test rax,rax; jz .efr_binding_load
+    mov rdi,[rax+8]; mov rsi,[rax+16]; call tensor_find_input
+    cmp edx,TYPE_F64; jne .efr_fail
+    mov esi,eax; mov edi,r13d; call tensor_emit_scalar_input_float
+    jmp .efr_done
+.efr_binding_load:
     mov rdi,r12; lea rsi,[rip+k_load]; mov edx,k_load_end-k_load; call obj_get
     test rax,rax; jz .efr_op
     mov rdi,[rax+8]; mov rsi,[rax+16]; call find_binding
@@ -1347,11 +1364,13 @@
     test eax,eax; jz .efr_sqrt_probe
     call alloc_gpr; cmp eax,-1; je .efr_fail; mov ebx,eax
     mov rdi,r15; mov esi,ebx; call emit_int_reg; test eax,eax; jnz .efr_free_b_fail
-    mov edi,r13d; mov esi,ebx; call gen_cvtsi2sd
+    mov edi,r13d; mov esi,ebx; call tensor_emit_u64_to_f64
+    test eax,eax; jnz .efr_free_b_fail
     mov edi,ebx; call free_gpr
     inc dword ptr [rip+schedule_counts+4*3] # fp convert
     xor eax,eax; jmp .efr_done
 .efr_sqrt_probe:
+    TFC_scalar_sign_projection
     mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+v_sqrt]; mov ecx,v_sqrt_end-v_sqrt; call span_eq
     test eax,eax; jz .efr_square_probe
     cmp qword ptr [r15+32],0; jne .efr_fail
@@ -1372,13 +1391,14 @@
     xor eax,eax; jmp .efr_done
 .efr_trunc_probe:
     mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+v_trunc]; mov ecx,v_trunc_end-v_trunc; call span_eq
-    test eax,eax; jz .efr_select_probe
+    test eax,eax; jz .efr_math_probe
     cmp qword ptr [r15+32],0; jne .efr_fail
     mov rdi,r15; mov esi,r13d; call emit_float_reg; test eax,eax; jnz .efr_fail
     mov edi,r13d; mov esi,r13d; call vec_roundpd_trunc_scalar_reg
     test eax,eax; jnz .efr_fail
     inc dword ptr [rip+schedule_counts+4*3]
     xor eax,eax; jmp .efr_done
+    TMC_scalar_probe
 .efr_select_probe:
     mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+v_select]; mov ecx,v_select_end-v_select; call span_eq
     test eax,eax; jz .efr_binary
@@ -1409,16 +1429,10 @@
     mov edi,ebx; call free_gpr
     jmp .efr_fail
 .efr_binary:
-    xor ebx,ebx
-    mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+v_add]; mov ecx,v_add_end-v_add; call span_eq
-    test eax,eax; jz 11f; mov ebx,0x58; jmp 15f
-11: mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+v_sub]; mov ecx,v_sub_end-v_sub; call span_eq
-    test eax,eax; jz 12f; mov ebx,0x5C; jmp 15f
-12: mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+v_mul]; mov ecx,v_mul_end-v_mul; call span_eq
-    test eax,eax; jz 13f; mov ebx,0x59; jmp 15f
-13: mov rdi,[r14+8]; mov rsi,[r14+16]; lea rdx,[rip+v_div]; mov ecx,v_div_end-v_div; call span_eq
-    test eax,eax; jz .efr_fail; mov ebx,0x5E
-15:
+    mov rdi,r14
+    call tensor_fp_binary_opcode
+    test eax,eax; jz .efr_fail
+    mov ebx,eax
     mov r14,[r15+32]; test r14,r14; jz .efr_fail
     cmp ebx,0x5E
     jne .efr_generic_binary
@@ -1549,29 +1563,17 @@
 # map is 0F, L=256. All vector regs are 0..7 by construction.
 .endm
 
-.macro TFC_vec_vex3_0f38_rrr
-    push rbx
-    mov ebx,edi
-    mov edi,0xC4; call vec_emit_u8
-    mov eax,esi; shr eax,3; and eax,1; xor eax,1; shl eax,7
-    or eax,0x40
-    mov r9d,ecx; shr r9d,3; and r9d,1; xor r9d,1; shl r9d,5
-    or eax,r9d
-    or eax,2
-    mov edi,eax; call vec_emit_u8
-    mov eax,edx; not eax; and eax,0xF; shl eax,3
-    or eax,0x04
-    or eax,r8d
-    mov edi,eax; call vec_emit_u8
-    mov edi,ebx; call vec_emit_u8
-    mov eax,esi; and eax,7; shl eax,3
-    mov r9d,ecx; and r9d,7; or eax,r9d; or eax,0xC0
-    mov edi,eax; call vec_emit_u8
-    pop rbx
-    ret
+ .macro TFC_vec_vex3_0f38_rrr
+    shl r8d,10
+    or edi,r8d
+    or edi,0x2200
+    call physical_encode_rrr
+    test edx,edx; jz 991f
+    sub rsp,8; mov [rsp],rax
+    mov rdi,rsp; mov esi,edx; call vec_emit_bytes
+    add rsp,8; ret
+991: mov eax,1; ret
 
-# EVEX vmovdqa64 ymm dst,ymm src, regs 0..31.  Used for persistent CSE
-# ingress/egress so YMM16..23 never alias XMM12..15 reduction carriers.
 .endm
 
 .macro TFC_vec_const_intern
@@ -1660,23 +1662,27 @@
 # source in ModRM.rm/B/B'.  Used for exact modulo-2^64 strength reduction.
 .endm
 
-.macro TFC_vec_vcvtqq2pd
+.macro TFC_vec_vcvtuqq2pd
+    .if TENSOR_PHYSICAL_LANES == 4
+    jmp vec_vcvtuqq2pd_synth
+    .else
     mov eax,dword ptr [rip+isa_cap_bits]
     test eax,ISA_CAP_I64_FP_CONVERT
     jnz .vcq2pd_native_dispatch
     test eax,ISA_CAP_I64_FP_CONVERT_SYNTH
     jz .vcq2pd_no_cap
-    jmp vec_vcvtqq2pd_synth
+    jmp vec_vcvtuqq2pd_synth
 .vcq2pd_native_dispatch:
-    jmp vec_vcvtqq2pd_native
+    jmp vec_vcvtuqq2pd_native
 .vcq2pd_no_cap:
     mov eax,1
     ret
 
 # AVX512DQ native realization.
+    .endif
 .endm
 
-.macro TFC_vec_vcvtqq2pd_native
+.macro TFC_vec_vcvtuqq2pd_native
     push rbx
     mov ebx,edi
     mov edi,0x62; call vec_emit_u8
@@ -1689,7 +1695,7 @@
     mov edi,eax; call vec_emit_u8
     mov edi,0xFE; call vec_emit_u8
     mov edi,0x48; call vec_emit_u8
-    mov edi,0xE6; call vec_emit_u8
+    mov edi,0x7A; call vec_emit_u8
     mov eax,ebx; and eax,7; shl eax,3
     mov ecx,esi; and ecx,7; or eax,ecx; or eax,0xC0
     mov edi,eax; call vec_emit_u8
@@ -1698,34 +1704,17 @@
     xor eax,eax
     ret
 
-# AVX512F exact synthesis of signed int64 -> binary64.
-# For each lane x, split x = hi32*2^32 + lo32(unsigned).  hi32 and lo32 are
-# exactly representable as binary64; the correction of a negative signed low
-# dword is also exact.  The final add is therefore the same single rounding of
-# the exact int64 value performed by VCVTQQ2PD.
 .endm
 
 .macro TFC_vec_roundpd_trunc_scalar_reg
-    push rbx
-    mov ebx,edi
-    mov r10d,esi
-    mov edi,0x66; call vec_emit_u8
-    mov eax,0x40
-    test ebx,8; jz 991f; or eax,0x04
-991: test r10d,8; jz 992f; or eax,0x01
-992: cmp eax,0x40; je 993f
-    mov edi,eax; call vec_emit_u8
-993: mov edi,0x0F; call vec_emit_u8
-    mov edi,0x3A; call vec_emit_u8
-    mov edi,0x0B; call vec_emit_u8
-    mov eax,ebx; and eax,7; shl eax,3
-    mov ecx,r10d; and ecx,7; or eax,ecx; or eax,0xC0
-    mov edi,eax; call vec_emit_u8
+    mov ecx,esi; mov esi,edi; mov edx,edi; mov edi,0x70b
+    cmp esi,15; jbe .tvrts_encode
+    or edi,0x9000
+.tvrts_encode:
+    call vec_rrr_descriptor
+    test eax,eax; jnz .tvrts_done
     mov edi,3; call vec_emit_u8
-    pop rbx
-    xor eax,eax
-    ret
-
+.tvrts_done: ret
 .endm
 
 .macro TFC_vec_trunc_nonneg_pd_to_u64
@@ -2688,3 +2677,753 @@
     ret
 .endm
 
+
+# The sign of an FP ValueFact is a bit projection. Negation flips bit 63;
+# absolute value clears it. Neither performs rounded subtraction from zero.
+.macro TFC_vector_sign_projection
+    mov rdi,[r14+8]; mov rsi,[r14+16]
+    lea rdx,[rip+tensor_v_neg]; mov ecx,3; call span_eq
+    mov ebx,0xEF                    # existing XOR integer-lane recipe
+    test eax,eax; jnz .Lvsp_have_\@
+    mov rdi,[r14+8]; mov rsi,[r14+16]
+    lea rdx,[rip+tensor_v_abs]; mov ecx,3; call span_eq
+    mov ebx,0xDB                    # existing AND integer-lane recipe
+    test eax,eax; jz .Lvsp_done_\@
+.Lvsp_have_\@:
+    cmp qword ptr [r15+32],0; jne .evf_fail
+    mov rdi,r15; mov esi,r13d; call emit_vec_float
+    test eax,eax; jnz .evf_fail
+    call vec_alloc; cmp eax,-1; je .evf_fail
+    mov r12d,eax
+    mov rsi,0x8000000000000000
+    cmp ebx,0xEF; je .Lvsp_mask_\@
+    dec rsi
+.Lvsp_mask_\@:
+    mov edi,r12d; call vec_broadcast_imm64
+    test eax,eax; jnz .Lvsp_free_fail_\@
+    mov edi,ebx; mov esi,r13d; mov edx,r13d; mov ecx,r12d
+    mov r8d,1; call vec_vex2_rrr
+    push rax
+    mov edi,r12d; call vec_free
+    pop rax; test eax,eax; jnz .evf_fail
+    inc dword ptr [rip+schedule_counts+4*4]
+    xor eax,eax; jmp .evf_done
+.Lvsp_free_fail_\@:
+    mov edi,r12d; call vec_free
+    jmp .evf_fail
+.Lvsp_done_\@:
+.endm
+
+.macro TFC_scalar_sign_projection
+    mov rdi,[r14+8]; mov rsi,[r14+16]
+    lea rdx,[rip+tensor_v_neg]; mov ecx,3; call span_eq
+    mov ebx,0x57                    # XORPD scalar carrier projection
+    test eax,eax; jnz .Lssp_have_\@
+    mov rdi,[r14+8]; mov rsi,[r14+16]
+    lea rdx,[rip+tensor_v_abs]; mov ecx,3; call span_eq
+    mov ebx,0x54                    # ANDPD scalar carrier projection
+    test eax,eax; jz .Lssp_done_\@
+.Lssp_have_\@:
+    cmp qword ptr [r15+32],0; jne .efr_fail
+    mov rdi,r15; mov esi,r13d; call emit_float_reg
+    test eax,eax; jnz .efr_fail
+    call alloc_gpr; cmp eax,-1; je .efr_fail
+    mov r12d,eax
+    call alloc_xmm; cmp eax,-1; je .Lssp_free_gpr_fail_\@
+    mov r15d,eax
+    mov rsi,0x8000000000000000
+    cmp ebx,0x57; je .Lssp_mask_\@
+    dec rsi
+.Lssp_mask_\@:
+    mov edi,r12d; call gen_mov_ri64
+    mov edi,r15d; mov esi,r12d; call gen_movq_xmm_gpr
+    mov edi,ebx; mov esi,r13d; mov edx,r15d; call gen_sse66_rr
+    mov edi,r15d; call free_xmm
+    mov edi,r12d; call free_gpr
+    inc dword ptr [rip+schedule_counts+4*4]
+    xor eax,eax; jmp .efr_done
+.Lssp_free_gpr_fail_\@:
+    mov edi,r12d; call free_gpr
+    jmp .efr_fail
+.Lssp_done_\@:
+.endm
+
+# A physical pass is complete only when every byte and relocation is present.
+# Arena growth is an AOT workspace retry, never an alternative runtime recipe.
+.macro TFC_completed_code_stage
+    cmp dword ptr [rip+tensor_code_overflow],0
+    jne .fail
+.endm
+
+# Complete one register instruction through the shared physical authority.
+.macro TFC_vec_rrr_descriptor
+    push rbx; push rsi; push rdx; push rcx; push r8; push r10; push r11
+    call physical_encode_rrr
+    test edx,edx; jz .tvrd_bad
+    sub rsp,8; mov [rsp],rax
+    mov rdi,rsp; mov esi,edx; call vec_emit_bytes
+    add rsp,8; jmp .tvrd_done
+.tvrd_bad: mov eax,1
+.tvrd_done:
+    pop r11; pop r10; pop r8; pop rcx; pop rdx; pop rsi; pop rbx; ret
+.endm
+
+.macro TFC_vec_vex2_rrr
+    push rbx; push r8
+    mov ebx,edi
+    shl r8d,10; or edi,r8d
+.if TENSOR_PHYSICAL_LANES == 8
+    or edi,0xd100
+.else
+    or edi,0x2100
+.endif
+    call vec_rrr_descriptor
+    test eax,eax; jnz .tvrrr_done
+    cmp ebx,0x58; je .tvrrr_add
+    cmp ebx,0x5c; je .tvrrr_add
+    cmp ebx,0x59; je .tvrrr_mul
+    cmp ebx,0x5e; je .tvrrr_div
+    inc dword ptr [rip+schedule_counts+16]; jmp .tvrrr_done
+.tvrrr_add: inc dword ptr [rip+schedule_counts]; jmp .tvrrr_done
+.tvrrr_mul: inc dword ptr [rip+schedule_counts+4]; jmp .tvrrr_done
+.tvrrr_div: inc dword ptr [rip+schedule_counts+8]
+.tvrrr_done: pop r8; pop rbx; ret
+.endm
+
+.macro TFC_vec_sqrtpd
+    mov ecx,esi; mov esi,edi; xor edx,edx
+.if TENSOR_PHYSICAL_LANES == 8
+    mov edi,0xd551
+.else
+    mov edi,0x2551
+.endif
+    call vec_rrr_descriptor
+    test eax,eax; jnz .tvsq_done
+    inc dword ptr [rip+schedule_counts+8]
+.tvsq_done: ret
+.endm
+
+.macro TFC_vec_vrndscalepd_trunc
+    mov ecx,esi; mov esi,edi; xor edx,edx
+.if TENSOR_PHYSICAL_LANES == 8
+    mov edi,0xd709
+.else
+    mov edi,0x2709
+.endif
+    call vec_rrr_descriptor
+    test eax,eax; jnz .tvrt_done
+    mov edi,3; call vec_emit_u8
+    test eax,eax; jnz .tvrt_done
+    inc dword ptr [rip+schedule_counts+12]
+.tvrt_done: ret
+.endm
+
+.macro TFC_vec_linear_compose_key
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r12,rdi                    # local c
+    mov r13,rsi                    # local d
+    mov r14,rdx                    # local mod token
+    mov r15,qword ptr [rip+vec_linear_ctx_mod]
+
+    # Decide resulting modulus domain.
+    test r15,r15
+    jz .vlck_ctx_plain
+    test r14,r14
+    jz .vlck_no                    # cannot erase an existing representative mod
+    cmp r14,r15
+    je .vlck_mod_same
+    # Distinct tokens are equivalent only when both resolve to the same fixed m.
+    mov rdi,r14
+    call vec_linear_modulus_value
+    test ecx,ecx; jz .vlck_no
+    mov rbx,rax
+    mov rdi,r15
+    call vec_linear_modulus_value
+    test ecx,ecx; jz .vlck_no
+    cmp rax,rbx
+    jne .vlck_no
+    mov r14,r15
+    jmp .vlck_mod_domain
+.vlck_mod_same:
+    mov r14,r15
+    jmp .vlck_mod_domain
+.vlck_ctx_plain:
+    test r14,r14
+    jnz .vlck_mod_domain
+    # Plain affine composition with exact overflow checks.
+    mov rax,r12
+    mul qword ptr [rip+vec_linear_ctx_c]
+    test rdx,rdx; jnz .vlck_no
+    mov r9,rax
+    # Coordinate offsets are signed representatives in Z/nZ.  Keep coefficient
+    # multiplication exact, but compose the offset in the signed domain so
+    # (+c) followed by (-c) canonicalizes instead of leaking unsigned carry
+    # into a false structural rejection.
+    mov rax,qword ptr [rip+vec_linear_ctx_d]
+    imul rax,r12
+    jo .vlck_no
+    add rax,r13
+    jo .vlck_no
+    mov rdx,rax
+    mov rax,r9
+    xor r8d,r8d
+    mov ecx,1
+    jmp .vlck_done
+
+.vlck_mod_domain:
+    # If m is known, compute canonical residues with exact 128-bit modular math.
+    mov rdi,r14
+    call vec_linear_modulus_value
+    test ecx,ecx
+    jz .vlck_mod_symbolic
+    mov rbx,rax                    # m
+    mov rdi,r12
+    mov rsi,qword ptr [rip+vec_linear_ctx_c]
+    mov rdx,rbx
+    call vec_linear_mul_mod
+    mov r9,rax                     # composed c
+    mov rdi,r12
+    mov rsi,qword ptr [rip+vec_linear_ctx_d]
+    mov rdx,rbx
+    call vec_linear_mul_mod
+    mov r10,rax
+    mov rdi,r10
+    mov rsi,r13
+    mov rdx,rbx
+    call vec_linear_add_mod
+    mov rdx,rax                    # composed d
+    mov rax,r9
+    mov r8,r14
+    mov ecx,1
+    jmp .vlck_done
+
+.vlck_mod_symbolic:
+    # Dynamic external n: algebraic composition is valid in Z/nZ, but without a
+    # fixed modulus only exact non-overflowing representatives are canonicalized.
+    cmp r14,-1
+    jne .vlck_no
+    mov rax,r12
+    mul qword ptr [rip+vec_linear_ctx_c]
+    test rdx,rdx; jnz .vlck_no
+    mov r9,rax
+    mov rax,qword ptr [rip+vec_linear_ctx_d]
+    imul rax,r12
+    jo .vlck_no
+    add rax,r13
+    jo .vlck_no
+    # Algebraic equality does not imply cheaper physical execution. Compare
+    # the composed ring against both exact staged CoordinateFacts before
+    # erasing their identities. This is one compile-time realization choice.
+    push r9; push rax
+    mov rdi,r9; mov rsi,rax; mov rdx,r14
+    call vec_periodic_key_ticks
+    push rax
+    mov rdi,r12; mov rsi,r13; mov rdx,r14
+    call vec_periodic_key_ticks
+    mov rbx,rax
+    mov rdi,[rip+vec_linear_ctx_c]
+    mov rsi,[rip+vec_linear_ctx_d]
+    mov rdx,[rip+vec_linear_ctx_mod]
+    call vec_periodic_key_ticks
+    add rbx,rax
+    add rbx,PRC_INT_ALU_TICKS       # staged coordinate transport
+    pop rcx
+    pop rdx
+    pop rax
+    cmp rcx,rbx; ja .vlck_no
+    mov r8,r14
+    mov ecx,1
+    jmp .vlck_done
+.vlck_no:
+    xor eax,eax
+    xor edx,edx
+    xor r8d,r8d
+    xor ecx,ecx
+.vlck_done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+.endm
+
+# Complete unsigned conversion shared by every tensor ISA realization.
+# hi and lo are exact u32 values; hi*2^32 is exact, and only the last ADD rounds.
+# Reinterpreting (2^52 bits | u32) and subtracting 2^52 needs no signed correction,
+# narrowing instruction, per-lane branch, or second conversion implementation.
+.macro TFC_vec_vcvtuqq2pd_synth
+    push rbx; push r12; push r13; push r14; push r15
+    sub rsp,24
+    mov ebx,edi; mov r12d,esi
+    call vec_alloc; cmp eax,-1; je .vuqs_fail
+    mov r14d,eax
+    call vec_alloc; cmp eax,-1; je .vuqs_free_hi
+    mov r15d,eax
+    mov rsi,0xffffffff; call vec_const_intern
+    cmp eax,-1; je .vuqs_free_both
+    mov [rsp],eax
+    mov rsi,0x4330000000000000; call vec_const_intern
+    cmp eax,-1; je .vuqs_free_both
+    mov [rsp+8],eax
+    mov rsi,0x41f0000000000000; call vec_const_intern
+    cmp eax,-1; je .vuqs_free_both
+    mov [rsp+16],eax
+    mov edi,r14d; mov esi,r12d; mov edx,32; call vec_vpsrlq_imm
+    test eax,eax; jnz .vuqs_free_both
+    mov edi,ebx; mov esi,r12d; mov edx,[rsp]; call vec_vpandq_mem_const
+    test eax,eax; jnz .vuqs_free_both
+    mov edi,r15d; mov r13d,[rsp+8]; call vec_emit_const_load_index
+    test eax,eax; jnz .vuqs_free_both
+    mov edi,0xeb; mov esi,ebx; mov edx,ebx; mov ecx,r15d; mov r8d,1; call vec_vex2_rrr
+    mov edi,0xeb; mov esi,r14d; mov edx,r14d; mov ecx,r15d; mov r8d,1; call vec_vex2_rrr
+    mov edi,0x5c; mov esi,ebx; mov edx,ebx; mov ecx,r15d; mov r8d,1; call vec_vex2_rrr
+    mov edi,0x5c; mov esi,r14d; mov edx,r14d; mov ecx,r15d; mov r8d,1; call vec_vex2_rrr
+    mov edi,r14d; mov esi,r14d; mov edx,[rsp+16]; call vec_vmulpd_mem_const
+    test eax,eax; jnz .vuqs_free_both
+    mov edi,0x58; mov esi,ebx; mov edx,ebx; mov ecx,r14d; mov r8d,1; call vec_vex2_rrr
+    mov edi,r15d; call vec_free
+    mov edi,r14d; call vec_free
+    xor eax,eax; jmp .vuqs_done
+.vuqs_free_both:
+    mov edi,r15d; call vec_free
+.vuqs_free_hi:
+    mov edi,r14d; call vec_free
+.vuqs_fail:
+    mov eax,1
+.vuqs_done:
+    add rsp,24
+    pop r15; pop r14; pop r13; pop r12; pop rbx; ret
+.endm
+
+# One generated image authority; ISA only changes compile-time lane geometry.
+.macro TFC_emit_tensor_image
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    # Measure only machine code that is reachable in this generated image.
+    mov r12,[rip+emit_ptr]
+    mov rax,[rip+tensor_eval_base]
+    sub r12,rax                     # reachable cold proof bytes
+    cmp dword ptr [rip+tensor_vector_width],TENSOR_PHYSICAL_LANES
+    jne .eti_fail
+    cmp dword ptr [rip+tensor_support_mode],SUPPORT_INTERVAL
+    je .eti_support_probe_kept
+    xor r12d,r12d                   # no runtime scalar evaluator exists
+.eti_support_probe_kept:
+
+    xor r13d,r13d                   # vector bytes
+    xor r14d,r14d                   # vector-init bytes
+    cmp dword ptr [rip+tensor_vector_width],TENSOR_PHYSICAL_LANES
+    jne .eti_lengths_ready
+    mov r13,[rip+vec_emit_ptr]
+    mov rax,[rip+tensor_vec_base]
+    sub r13,rax
+    mov r14,[rip+vec_init_emit_ptr]
+    mov rax,[rip+tensor_vec_init_base]
+    sub r14,rax
+.eti_lengths_ready:
+    mov r15,r12
+    add r15,r13
+    add r15,r14
+    test r15,r15
+    jz .eti_fail
+    mov [rip+image_eval_len],r12
+    mov [rip+image_vec_len],r13
+    mov [rip+image_init_len],r14
+    mov [rip+image_generated_len],r15
+
+    mov eax,SYS_openat
+    mov edi,AT_FDCWD
+    mov rsi,[rip+tensor_output_path]
+    mov edx,OUT_FLAGS
+    mov r10d,0755
+    syscall
+    test rax,rax
+    js .eti_fail
+    mov rbx,rax
+
+    # Write only the loadable runtime prefix.  Section/symbol tables and the
+    # one-byte link-time .generated anchor are not copied into the final image.
+    mov eax,SYS_write
+    mov rdi,rbx
+    lea rsi,[rip+runtime_template_blob]
+    mov edx,RUNTIME_TEMPLATE_SIZE
+    syscall
+    cmp rax,RUNTIME_TEMPLATE_SIZE
+    jne .eti_close_fail
+
+    # Final image deliberately has no section table.  Runtime loaders need only
+    # ELF + PHDRs, and dead compiler/debug metadata must not survive AOT output.
+    mov qword ptr [rip+image_zero_qword],0
+    mov eax,SYS_pwrite64
+    mov rdi,rbx
+    lea rsi,[rip+image_zero_qword]
+    mov edx,8
+    mov r10d,RUNTIME_ELF_SHOFF_OFF
+    syscall
+    cmp rax,8
+    jne .eti_close_fail
+    mov eax,SYS_pwrite64
+    mov rdi,rbx
+    lea rsi,[rip+image_zero_qword]
+    mov edx,6
+    mov r10d,RUNTIME_ELF_SHENTSIZE_OFF
+    syscall
+    cmp rax,6
+    jne .eti_close_fail
+
+    # Structural plan patches.
+    # 1.3.18 AOT emergent-expansion prices.
+    mov edi,dword ptr [rip+tensor_vector_width]
+    call derive_tensor_chunk_work_ticks
+
+    mov eax,SYS_pwrite64
+    mov rdi,rbx
+    lea rsi,[rip+execution_admission_capacity]
+    mov edx,4
+    mov r10d,RUNTIME_EXECUTION_ADMISSION_OFF
+    syscall
+    cmp rax,4
+    jne .eti_close_fail
+
+    # Reduction semantics are an AOT contract fact.  Runtime admission may change
+    # ownership multiplicity, never this strict/tolerant mathematical authority.
+    mov eax,SYS_pwrite64
+    mov rdi,rbx
+    lea rsi,[rip+tensor_tolerant_fp]
+    mov edx,4
+    mov r10d,RUNTIME_REDUCTION_TOLERANT_OFF
+    syscall
+    cmp rax,4
+    jne .eti_close_fail
+
+    # SupportFact is an AOT topology fact. Runtime only discovers exact IEEE
+    # boundaries through the original predicate when this mode is nonzero.
+    mov eax,SYS_pwrite64
+    mov rdi,rbx
+    lea rsi,[rip+tensor_support_mode]
+    mov edx,4
+    mov r10d,RUNTIME_SUPPORT_MODE_OFF
+    syscall
+    cmp rax,4
+    jne .eti_close_fail
+
+    mov eax,SYS_pwrite64
+    mov rdi,rbx
+    lea rsi,[rip+tensor_support_count]
+    mov edx,4
+    mov r10d,RUNTIME_SUPPORT_COUNT_OFF
+    syscall
+    cmp rax,4
+    jne .eti_close_fail
+
+    mov eax,SYS_pwrite64
+    mov rdi,rbx
+    lea rsi,[rip+tensor_support_halo_elems]
+    mov edx,8
+    mov r10d,RUNTIME_SUPPORT_HALO_ELEMS_OFF
+    syscall
+    cmp rax,8
+    jne .eti_close_fail
+
+    # Burn the exact compile-time silicon-domain placement witness into the
+    # executable. Runtime only applies this inherited mask once; it never
+    # discovers, scores, or reallocates silicon.
+    mov eax,SYS_pwrite64
+    mov rdi,rbx
+    lea rsi,[rip+sd_static_placement_required]
+    mov edx,4
+    mov r10d,RUNTIME_STATIC_PLACEMENT_REQUIRED_OFF
+    syscall
+    cmp rax,4
+    jne .eti_close_fail
+    mov eax,SYS_pwrite64
+    mov rdi,rbx
+    lea rsi,[rip+sd_preferred_l3_mask_bytes]
+    mov edx,4
+    mov r10d,RUNTIME_STATIC_PLACEMENT_MASK_BYTES_OFF
+    syscall
+    cmp rax,4
+    jne .eti_close_fail
+    mov eax,SYS_pwrite64
+    mov rdi,rbx
+    lea rsi,[rip+sd_preferred_l3_mask]
+    mov edx,128
+    mov r10d,RUNTIME_STATIC_PLACEMENT_MASK_OFF
+    syscall
+    cmp rax,128
+    jne .eti_close_fail
+
+    mov eax,SYS_pwrite64
+    mov rdi,rbx
+    lea rsi,[rip+outward_materialization_ticks]
+    mov edx,8
+    mov r10d,RUNTIME_OUTWARD_MATERIALIZATION_TICKS_OFF
+    syscall
+    cmp rax,8
+    jne .eti_close_fail
+
+    mov eax,SYS_pwrite64
+    mov rdi,rbx
+    lea rsi,[rip+tensor_chunk_work_ticks]
+    mov edx,8
+    mov r10d,RUNTIME_CHUNK_WORK_TICKS_OFF
+    syscall
+    cmp rax,8
+    jne .eti_close_fail
+
+    mov eax,SYS_pwrite64
+    mov rdi,rbx
+    lea rsi,[rip+tensor_chunk_elements]
+    mov edx,8
+    mov r10d,RUNTIME_CHUNK_ELEMENTS_OFF
+    syscall
+    cmp rax,8
+    jne .eti_close_fail
+
+    mov eax,SYS_pwrite64
+    mov rdi,rbx
+    lea rsi,[rip+tensor_vector_width]
+    mov edx,4
+    mov r10d,RUNTIME_VECTOR_WIDTH_OFF
+    syscall
+    cmp rax,4
+    jne .eti_close_fail
+
+    mov eax,SYS_pwrite64
+    mov rdi,rbx
+    lea rsi,[rip+group_carrier_factor]
+    mov edx,4
+    mov r10d,RUNTIME_GROUP_CARRIER_FACTOR_OFF
+    syscall
+    cmp rax,4
+    jne .eti_close_fail
+
+    mov eax,SYS_pwrite64
+    mov rdi,rbx
+    lea rsi,[rip+group_body_factor]
+    mov edx,4
+    mov r10d,RUNTIME_GROUP_BODY_FACTOR_OFF
+    syscall
+    cmp rax,4
+    jne .eti_close_fail
+
+    # Independent realized-carrier contract.
+    mov eax,SYS_pwrite64
+    mov rdi,rbx
+    lea rsi,[rip+physical_realize_group_carriers]
+    mov edx,4
+    mov r10d,RUNTIME_REALIZED_GROUP_CARRIER_OFF
+    syscall
+    cmp rax,4
+    jne .eti_close_fail
+
+    # Independent execution-contract byte: corrupting both plan fields cannot
+    # disguise the Physical Tensor width actually realized by code generation.
+    mov eax,SYS_pwrite64
+    mov rdi,rbx
+    lea rsi,[rip+physical_realize_group_body]
+    mov edx,4
+    mov r10d,RUNTIME_REALIZED_GROUP_BODY_OFF
+    syscall
+    cmp rax,4
+    jne .eti_close_fail
+
+    mov eax,SYS_pwrite64
+    mov rdi,rbx
+    lea rsi,[rip+tensor_shape_extent_min]
+    mov edx,8
+    mov r10d,RUNTIME_EXTENT_MIN_OFF
+    syscall
+    cmp rax,8
+    jne .eti_close_fail
+
+    mov eax,SYS_pwrite64
+    mov rdi,rbx
+    lea rsi,[rip+tensor_shape_extent_max]
+    mov edx,8
+    mov r10d,RUNTIME_EXTENT_MAX_OFF
+    syscall
+    cmp rax,8
+    jne .eti_close_fail
+
+    # Append the reachable cold proof, vector body and initialization once.
+    mov eax,SYS_pwrite64
+    mov rdi,rbx
+    mov rsi,[rip+tensor_eval_base]
+    mov rdx,r12
+    mov r10d,RUNTIME_GENERATED_FILE_OFF
+    syscall
+    cmp rax,r12
+    jne .eti_close_fail
+
+    test r13,r13
+    jz .eti_no_vec_payload
+    mov r10,RUNTIME_GENERATED_FILE_OFF
+    add r10,r12
+    mov eax,SYS_pwrite64
+    mov rdi,rbx
+    mov rsi,[rip+tensor_vec_base]
+    mov rdx,r13
+    syscall
+    cmp rax,r13
+    jne .eti_close_fail
+
+    mov r10,RUNTIME_GENERATED_FILE_OFF
+    add r10,r12
+    add r10,r13
+    mov eax,SYS_pwrite64
+    mov rdi,rbx
+    mov rsi,[rip+tensor_vec_init_base]
+    mov rdx,r14
+    syscall
+    cmp rax,r14
+    jne .eti_close_fail
+.eti_no_vec_payload:
+    call tensor_write_input_facts
+    test eax,eax; jnz .eti_close_fail
+
+    # Make the generated RX segment exactly the appended byte length.
+    mov [rip+image_generated_len],r15
+    mov eax,SYS_pwrite64
+    mov rdi,rbx
+    lea rsi,[rip+image_generated_len]
+    mov edx,8
+    mov r10d,RUNTIME_GENERATED_FILESZ_PHDR_OFF
+    syscall
+    cmp rax,8
+    jne .eti_close_fail
+    mov eax,SYS_pwrite64
+    mov rdi,rbx
+    lea rsi,[rip+image_generated_len]
+    mov edx,8
+    mov r10d,RUNTIME_GENERATED_MEMSZ_PHDR_OFF
+    syscall
+    cmp rax,8
+    jne .eti_close_fail
+
+    # Direct rel32 AOT jumps.  No runtime function-pointer lookup or interpreter.
+    mov rax,RUNTIME_GENERATED_VA
+    sub rax,(0x400000 + RUNTIME_EVAL_OFF + 5)
+    mov dword ptr [rip+image_disp],eax
+    mov eax,SYS_pwrite64
+    mov rdi,rbx
+    lea rsi,[rip+image_disp]
+    mov edx,4
+    mov r10d,RUNTIME_EVAL_DISP_OFF
+    syscall
+    cmp rax,4
+    jne .eti_close_fail
+
+    test r13,r13
+    jz .eti_jumps_done
+    mov rax,RUNTIME_GENERATED_VA
+    add rax,r12
+    sub rax,(0x400000 + RUNTIME_VEC_OFF + 5)
+    mov dword ptr [rip+image_disp],eax
+    mov eax,SYS_pwrite64
+    mov rdi,rbx
+    lea rsi,[rip+image_disp]
+    mov edx,4
+    mov r10d,RUNTIME_VEC_DISP_OFF
+    syscall
+    cmp rax,4
+    jne .eti_close_fail
+
+    mov rax,RUNTIME_GENERATED_VA
+    add rax,r12
+    add rax,r13
+    sub rax,(0x400000 + RUNTIME_VEC_INIT_OFF + 5)
+    mov dword ptr [rip+image_disp],eax
+    mov eax,SYS_pwrite64
+    mov rdi,rbx
+    lea rsi,[rip+image_disp]
+    mov edx,4
+    mov r10d,RUNTIME_VEC_INIT_DISP_OFF
+    syscall
+    cmp rax,4
+    jne .eti_close_fail
+.eti_jumps_done:
+
+    mov eax,SYS_fchmod
+    mov rdi,rbx
+    mov esi,0755
+    syscall
+    mov eax,SYS_close
+    mov rdi,rbx
+    syscall
+    xor eax,eax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+.eti_close_fail:
+    mov eax,SYS_close
+    mov rdi,rbx
+    syscall
+.eti_fail:
+    mov eax,1
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+.endm
+
+.macro TFC_tensor_prepare_binding_arena
+    push rbx
+    mov ebx,edi
+    test ebx,ebx
+    jz .tpba_fail
+    mov rdi,[rip+tensor_bindings_ptr]
+    test rdi,rdi
+    jz .tpba_size
+    mov rsi,[rip+tensor_binding_arena_bytes]
+    mov eax,SYS_munmap
+    syscall
+.tpba_size:
+    mov eax,ebx
+    imul rax,rax,72
+    jo .tpba_fail
+    mov [rip+tensor_binding_arena_bytes],rax
+    mov rsi,rax
+    mov eax,SYS_mmap
+    xor edi,edi
+    mov edx,PROT_READ_WRITE
+    mov r10d,MAP_PRIVATE_ANON
+    mov r8,-1
+    xor r9d,r9d
+    syscall
+    test rax,rax
+    js .tpba_fail
+    mov [rip+tensor_bindings_ptr],rax
+    mov dword ptr [rip+tensor_binding_capacity],ebx
+    mov ecx,ebx
+    shl rcx,6
+    lea rdx,[rax+rcx]
+    mov [rip+tensor_binding_uses_ptr],rdx
+    mov ecx,ebx
+    shl rcx,2
+    add rdx,rcx
+    mov [rip+tensor_binding_expanded_ptr],rdx
+    xor eax,eax
+    pop rbx
+    ret
+.tpba_fail:
+    mov eax,1
+    pop rbx
+    ret
+.endm

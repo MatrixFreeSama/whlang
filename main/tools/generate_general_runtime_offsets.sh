@@ -22,6 +22,7 @@ va_rankn_from_u64=$(need rankn_fp_from_u64)
 va_rankn_from_i64=$(need rankn_fp_from_i64)
 va_rankn_from_f64=$(need rankn_fp_from_f64_bits)
 va_rankn_convert=$(need rankn_fp_convert)
+va_rankn_to_f32=$(need rankn_fp_to_f32_bits)
 va_rankn_to_f64=$(need rankn_fp_to_f64_bits)
 va_rankn_add=$(need rankn_fp_add)
 va_rankn_sub=$(need rankn_fp_sub)
@@ -36,9 +37,19 @@ va_rankn_log=$(need rankn_fp_log)
 va_rankn_sin=$(need rankn_fp_sin)
 va_rankn_cos=$(need rankn_fp_cos)
 va_rankn_affine_power=$(need rankn_affine_power_u64)
+va_runtime_reject=$(need general_runtime_reject)
+math_sqrt_spans=$(need RPF_SQRT_SPANS)
+math_exp_spans=$(need RPF_EXP_SPANS)
+math_log_spans=$(need RPF_LOG_SPANS)
+math_sincos_spans=$(need RPF_SINCOS_SPANS)
 size=$(stat -c %s "$BIN")
 to_off() { printf '0x%x' $(( $1 - BASE )); }
 cat > "$OUT" <<EOT
+.equ GENERAL_RANKN_FP_SQRT_SPANS, $math_sqrt_spans
+.equ GENERAL_RANKN_FP_EXP_SPANS, $math_exp_spans
+.equ GENERAL_RANKN_FP_LOG_SPANS, $math_log_spans
+.equ GENERAL_RANKN_FP_SINCOS_SPANS, $math_sincos_spans
+.equ GENERAL_RUNTIME_REJECT_VA, $va_runtime_reject
 .equ GENERAL_RUNTIME_SIZE, $size
 .equ GENERAL_INPUT_COUNT_OFF, $(to_off "$va_in_count")
 .equ GENERAL_OUTPUT_COUNT_OFF, $(to_off "$va_out_count")
@@ -57,6 +68,7 @@ cat > "$OUT" <<EOT
 .equ GENERAL_RANKN_FP_FROM_I64_VA, $va_rankn_from_i64
 .equ GENERAL_RANKN_FP_FROM_F64_VA, $va_rankn_from_f64
 .equ GENERAL_RANKN_FP_CONVERT_VA, $va_rankn_convert
+.equ GENERAL_RANKN_FP_TO_F32_VA, $va_rankn_to_f32
 .equ GENERAL_RANKN_FP_TO_F64_VA, $va_rankn_to_f64
 .equ GENERAL_RANKN_FP_ADD_VA, $va_rankn_add
 .equ GENERAL_RANKN_FP_SUB_VA, $va_rankn_sub
